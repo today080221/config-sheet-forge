@@ -35,7 +35,7 @@ Local state is written under `.config-sheet-forge/` and is ignored by git.
 After this repository is pushed to GitHub and tagged, install the Unity package with:
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.1.0
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.1.1
 ```
 
 Then open `Tools > Config Sheet Forge`.
