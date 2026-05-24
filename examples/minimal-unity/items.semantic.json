@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "1",
+  "providerId": "example",
+  "sourceId": "placeholder-items",
+  "sourceTitle": "Items",
+  "revision": "example",
+  "sheets": [
+    {
+      "id": "items",
+      "name": "Items",
+      "columns": [
+        {
+          "key": "id",
+          "displayName": "ID",
+          "valueKind": "string",
+          "required": true,
+          "sourceColumn": "A",
+          "tags": []
+        },
+        {
+          "key": "display_name",
+          "displayName": "Display Name",
+          "valueKind": "string",
+          "required": true,
+          "sourceColumn": "B",
+          "tags": []
+        },
+        {
+          "key": "power",
+          "displayName": "Power",
+          "valueKind": "number",
+          "required": false,
+          "sourceColumn": "C",
+          "tags": []
+        }
+      ],
+      "rows": [
+        {
+          "stableId": "item_sword",
+          "sourceIndex": 2,
+          "cells": {
+            "id": {
+              "valueKind": "string",
+              "rawText": "item_sword",
+              "normalizedText": "item_sword",
+              "details": {}
+            },
+            "display_name": {
+              "valueKind": "string",
+              "rawText": "Sword",
+              "normalizedText": "Sword",
+              "details": {}
+            },
+            "power": {
+              "valueKind": "number",
+              "rawText": "10",
+              "normalizedText": "10",
+              "details": {}
+            }
+          },
+          "metadata": {}
+        }
+      ],
+      "metadata": {}
+    }
+  ],
+  "metadata": {}
+}

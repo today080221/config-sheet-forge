@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1",
+  "provider": "lark",
+  "rootUrl": "https://your-tenant.example/wiki/CONFIG_ROOT_PLACEHOLDER",
+  "rootToken": "",
+  "rootObjectType": "wiki",
+  "registryPath": ".config-sheet-forge/registry.json",
+  "cacheDirectory": ".config-sheet-forge/cache",
+  "providerSettings": {
+    "larkCliPath": "lark-cli"
+  }
+}

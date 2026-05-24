@@ -1,0 +1,33 @@
+name: Task
+description: Track implementation work for Config Sheet Forge.
+title: "[Task] "
+labels:
+  - task
+body:
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Milestone
+      options:
+        - M0 Repo Bootstrap
+        - M1 Core Workbook Model
+        - M2 Lark Provider
+        - M3 Unity Package
+        - M4 Merge Review And Gate
+        - M5 Docs And Release
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What should change?
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: How will this be checked?
+    validations:
+      required: true
