@@ -50,5 +50,5 @@
 - [x] Release `v0.1.1` Unity onboarding update。
 - [x] 创建/同步 GitHub issues 和 milestones。
 - [ ] 恢复公开 GitHub Actions 并验证通过。
-- [ ] 配置 `main` branch protection。
+- [x] 配置 `main` branch protection。
 - [ ] Release `v0.2.0`。

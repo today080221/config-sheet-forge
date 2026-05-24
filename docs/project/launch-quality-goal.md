@@ -44,6 +44,7 @@
 - Unity smoke：Unity `6000.3.12f1` 干净临时项目导入本地 UPM 包并运行 EditMode tests，4/4 通过；临时项目已清理。
 - GitHub 治理：milestones `M0`-`M5` 和 issues `#1`-`#6` 已创建，`M0` 已关闭。
 - GitHub 权限：`gh auth refresh -s workflow` 在非交互环境超时，当前 token 未获得 `workflow` scope；workflow push 被 GitHub 拒绝，Actions 暂未恢复。
+- Branch protection：`main` 已启用轻量保护，禁止 force push 和删除；因暂无 Actions run，未设置 required status checks。
 
 ## 停止规则
 

@@ -25,7 +25,7 @@ v0.2.0 上线质量工作已进入发布阶段：共享 typed inference、Lark p
 - [x] GitHub workflow scope 尝试：`gh auth refresh -s workflow` 超时，当前 token 未获得 `workflow` scope。
 - [x] GitHub workflow push 尝试：因缺少 `workflow` scope 被 GitHub 拒绝，本次 release 不包含 `.github/workflows/ci.yml`。
 - [ ] GitHub Actions
-- [ ] branch protection
+- [x] branch protection：`main` 禁止 force push 和删除，未要求 status checks。
 - [ ] tag/release/clean clone UPM 验证
 
 ## 剩余风险
