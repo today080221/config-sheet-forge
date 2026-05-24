@@ -24,9 +24,9 @@ v0.2.0 上线质量工作已进入发布阶段：共享 typed inference、Lark p
 - [x] GitHub milestones/issues：M0-M5 已创建，M0 issue/milestone 已关闭。
 - [x] GitHub workflow scope 尝试：`gh auth refresh -s workflow` 超时，当前 token 未获得 `workflow` scope。
 - [x] GitHub workflow push 尝试：因缺少 `workflow` scope 被 GitHub 拒绝，本次 release 不包含 `.github/workflows/ci.yml`。
-- [ ] GitHub Actions
+- [x] GitHub Actions 尝试：workflow push 因缺少 `workflow` scope 被拒绝，非阻塞缺口已写入 release notes 和 issue。
 - [x] branch protection：`main` 禁止 force push 和删除，未要求 status checks。
-- [ ] tag/release/clean clone UPM 验证
+- [x] tag/release/clean clone UPM 验证：`v0.2.0` tag/release 已创建，CLI nupkg 已上传，干净 clone 和真实 UPM Git URL Unity smoke 通过。
 
 ## 剩余风险
 

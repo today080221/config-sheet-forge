@@ -14,3 +14,4 @@
 - `gh auth refresh -s workflow` 在本机非交互环境超时，当前 token 仍只有 `repo/gist/read:org` scope；workflow/protection 继续按 best-effort 处理。
 - GitHub milestones M0-M5 已创建，M0 issue/milestone 已关闭，其余工作项用中文 issue 追踪。
 - `main` branch protection 配置成功：禁止 force push 和删除；由于 GitHub Actions 暂未恢复，未配置 required status checks。
+- `v0.2.0` tag/release、CLI release asset、clean clone 和真实 UPM Git URL Unity smoke 已完成；issues/milestones 已关闭。

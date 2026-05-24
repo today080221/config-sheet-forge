@@ -49,6 +49,6 @@
 - [x] Release `v0.1.0`。
 - [x] Release `v0.1.1` Unity onboarding update。
 - [x] 创建/同步 GitHub issues 和 milestones。
-- [ ] 恢复公开 GitHub Actions 并验证通过。
+- [ ] 恢复公开 GitHub Actions 并验证通过。（当前 token 缺少 `workflow` scope，已作为非阻塞缺口记录。）
 - [x] 配置 `main` branch protection。
-- [ ] Release `v0.2.0`。
+- [x] Release `v0.2.0`。

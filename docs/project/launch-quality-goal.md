@@ -45,6 +45,9 @@
 - GitHub 治理：milestones `M0`-`M5` 和 issues `#1`-`#6` 已创建，`M0` 已关闭。
 - GitHub 权限：`gh auth refresh -s workflow` 在非交互环境超时，当前 token 未获得 `workflow` scope；workflow push 被 GitHub 拒绝，Actions 暂未恢复。
 - Branch protection：`main` 已启用轻量保护，禁止 force push 和删除；因暂无 Actions run，未设置 required status checks。
+- 发布：`v0.2.0` tag 和 GitHub release 已创建，CLI nupkg 已作为 release asset 上传。
+- UPM 验证：干净 clone `v0.2.0` 显示 Unity package version 为 `0.2.0`；真实 UPM Git URL 导入 Unity `6000.3.12f1` 干净项目并运行 EditMode tests，4/4 通过。
+- GitHub 收口：issues `#1`-`#6` 和 milestones `M0`-`M5` 已关闭；GitHub Actions 缺口保留为后续授权项。
 
 ## 停止规则
 
