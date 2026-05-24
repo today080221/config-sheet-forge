@@ -1,7 +1,7 @@
 # Minimal Unity Example
 
-This example contains placeholder-only config files for a Unity project.
+这个示例只包含占位配置文件。
 
-Copy the example JSON files into a Unity project as local `.config-sheet-forge/` files, then replace the placeholder root and spreadsheet values with your own confirmed Feishu/Lark resources.
+把示例 JSON 复制到 Unity 项目的 `.config-sheet-forge/` 本地目录后，再替换为你确认过的飞书/Lark root 和表资源。
 
-Do not commit the copied local files if they contain real tenant URLs, tokens, or private table contents.
+如果复制后的文件包含真实租户 URL、token 或私有表内容，不要提交。

@@ -1,40 +1,45 @@
-# Lark Provider
+# Lark Provider 说明
 
-The Lark provider is implemented in `src/providers/lark` and is backed by `lark-cli`.
+Lark provider 位于 `src/providers/lark`，底层调用 `lark-cli`。
 
-## Commands Used
+## 调用的命令
 
-- `lark-cli --version`
 - `lark-cli doctor`
+- `lark-cli --version`
 - `lark-cli auth status`
 - `lark-cli docs +search --query <query> --format json`
-- `lark-cli sheets +export ... --output <path>`
-- `lark-cli sheets +read ... --format json`
+- `lark-cli sheets +export ... --file-extension xlsx --output-path <relative-path>`
+- `lark-cli sheets +read ...`
 
-Provider commands are executed with process argument arrays, not shell-joined strings.
+provider 使用进程参数数组调用命令，不拼接 shell 字符串。
 
-## CLI Discovery
+## CLI 发现顺序
 
-The provider resolves `lark-cli` in this order:
+1. 本地 config 中的 `larkCliPath`。
+2. 环境变量 `LARK_CLI_PATH`。
+3. `PATH` 和 Windows `PATHEXT`，优先 npm-safe launcher，例如 `lark-cli.cmd`。
+4. Windows npm 全局目录，例如 `%APPDATA%\npm`。
+5. 缺少 shim 但已安装 npm 包时，fallback 到 `node <global @larksuite/cli>/scripts/run.js`。
 
-1. An explicit `larkCliPath` in local config.
-2. `LARK_CLI_PATH`.
-3. `PATH` plus Windows `PATHEXT`, preferring npm-safe launchers such as `lark-cli.cmd`.
-4. Known Windows npm global locations such as `%APPDATA%\npm`.
-5. A `node <global @larksuite/cli>/scripts/run.js` fallback when the shim is missing but the package is installed.
+`doctor --details` 会显示解析来源和路径，方便排查环境问题。
 
-`doctor --details` prints the resolved source and path so environment issues are visible without exposing tokens.
+## 身份策略
 
-## Auth Model
+默认 `larkCliIdentity = bot`。provider 会先用 `--as bot`，失败后 fallback 到 `--as user`。如果项目明确只想使用当前用户身份，可配置为 `user`。
 
-The provider does not store secrets. It expects `lark-cli` to manage app config and user OAuth locally.
+bot 身份适合已通过群组或知识库授权 bridge 授权给应用的资源；用户身份适合用户自己的云文档、电子表格和知识库。
 
-Use user identity for user-owned docs and sheets. Use bot identity only for resources the bot can actually access.
+## JSON 解析
 
-## Wiki And Sheet Roots
+v0.2.0 支持多种 `lark-cli` 输出形态：
 
-A wiki URL may point to a sheet, doc, bitable, or file. Discovery shows candidates and their type when available, but a human must confirm the root.
+- 直接二维数组。
+- `data.values`、`values`、`items`、`records` 等 wrapper。
+- 对象数组会转成字段名行加数据行。
+- stdout/stderr 混合输出时，会优先提取可解析 JSON。
 
-## PowerShell Safety
+警告、notice、revision、raw provider 内容会保留在 details 中，面向人的主错误只说明怎么修。
 
-Long JSON payloads are avoided in v0.1. If future commands need inline JSON, pass it through a file or a launcher that preserves argv boundaries.
+## PowerShell 安全
+
+复杂 JSON 不要通过 PowerShell 直接传 `--params`。需要内联 JSON 时，优先使用文件、shortcut 参数，或已验证能保留引号的 launcher。

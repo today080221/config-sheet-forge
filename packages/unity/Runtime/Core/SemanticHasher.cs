@@ -59,6 +59,15 @@ namespace ConfigSheetForge.Core
                     .Append(Normalize(column.ValueKind)).Append("|")
                     .Append(column.Required ? "required" : "optional")
                     .AppendLine();
+
+                foreach (var detail in column.Details.OrderBy(d => d.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    builder.Append("column-detail|")
+                        .Append(Normalize(column.Key)).Append("|")
+                        .Append(Normalize(detail.Key)).Append("|")
+                        .Append(Normalize(detail.Value))
+                        .AppendLine();
+                }
             }
 
             foreach (var row in sheet.Rows.OrderBy(r => r.StableId, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.SourceIndex))

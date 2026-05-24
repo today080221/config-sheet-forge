@@ -1,5 +1,5 @@
-name: Provider Work
-description: Track provider integration work.
+name: Provider 工作
+description: 跟踪 provider 集成工作。
 title: "[Provider] "
 labels:
   - provider
@@ -14,14 +14,14 @@ body:
   - type: textarea
     id: boundaries
     attributes:
-      label: Boundaries
-      description: What data stays in config, secrets, or local auth?
+      label: 边界
+      description: 哪些数据必须留在 config、secrets 或本地 auth？
     validations:
       required: true
   - type: textarea
     id: tests
     attributes:
-      label: Tests
-      description: Unit, smoke, or disposable integration checks.
+      label: 测试
+      description: Unit、smoke 或 disposable integration checks。
     validations:
       required: true

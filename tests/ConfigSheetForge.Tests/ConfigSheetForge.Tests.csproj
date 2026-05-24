@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\core\ConfigSheetForge.Core\ConfigSheetForge.Core.csproj" />
     <ProjectReference Include="..\..\src\providers\lark\ConfigSheetForge.Providers.Lark\ConfigSheetForge.Providers.Lark.csproj" />
+    <ProjectReference Include="..\..\src\cli\ConfigSheetForge.Cli\ConfigSheetForge.Cli.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

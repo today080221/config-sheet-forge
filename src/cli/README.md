@@ -1,8 +1,8 @@
 # CLI
 
-The CLI command name is `config-sheet-forge`.
+CLI 命令名是 `config-sheet-forge`。
 
-Commands:
+命令：
 
 - `init`
 - `doctor`
@@ -12,4 +12,4 @@ Commands:
 - `merge`
 - `gate`
 
-Use `--details` when debugging provider errors. Normal output should stay human-readable.
+排查 provider 问题时使用 `--details`。默认输出应保持人能读懂，低层细节放 details。

@@ -1,24 +1,24 @@
-# Task Complete
+# 任务完成
 
-## Summary
-
--
-
-## Files Changed
+## 摘要
 
 -
 
-## Validation
-
-- [ ] Build:
-- [ ] Tests:
-- [ ] CLI smoke:
-- [ ] Private content scan:
-
-## Known Gaps
+## 变更文件
 
 -
 
-## Release Notes
+## 验证
+
+- [ ] 构建：
+- [ ] 测试：
+- [ ] CLI smoke：
+- [ ] 私有内容扫描：
+
+## 已知缺口
+
+-
+
+## 发布说明
 
 -

@@ -38,6 +38,11 @@ namespace ConfigSheetForge.Core
         public string Range { get; set; } = "";
         public string CacheDirectory { get; set; } = "";
         public bool PreferXlsx { get; set; } = true;
+        public int FieldRow { get; set; } = 0;
+        public int TypeRow { get; set; } = -1;
+        public int DescriptionRow { get; set; } = -1;
+        public int DataStartRow { get; set; } = -1;
+        public bool TreatUnknownTypesAsEnum { get; set; }
         public Dictionary<string, string> Settings { get; set; } = new Dictionary<string, string>();
     }
 

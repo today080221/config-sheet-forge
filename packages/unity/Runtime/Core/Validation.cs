@@ -30,15 +30,17 @@ namespace ConfigSheetForge.Core
             get { return Findings.Any(f => f.Severity == FindingSeverity.Error); }
         }
 
-        public void Add(FindingSeverity severity, string code, string message, string location)
+        public ValidationFinding Add(FindingSeverity severity, string code, string message, string location)
         {
-            Findings.Add(new ValidationFinding
+            var finding = new ValidationFinding
             {
                 Severity = severity,
                 Code = code,
                 Message = message,
                 Location = location
-            });
+            };
+            Findings.Add(finding);
+            return finding;
         }
     }
 

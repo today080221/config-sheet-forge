@@ -1,14 +1,20 @@
 using System.Text.Json;
 using ConfigSheetForge.Core;
+using ConfigSheetForge.Cli;
 using ConfigSheetForge.Providers.Lark;
 
-var tests = new List<(string Name, Action Body)>
+var tests = new List<(string Name, Func<Task> Body)>
 {
-    ("semantic hash is stable across row order", SemanticHashIsStableAcrossRowOrder),
-    ("portable validator catches duplicate row ids", ValidatorCatchesDuplicateRowIds),
-    ("three-way merge detects real conflicts", MergeDetectsConflicts),
-    ("core model round-trips through json", CoreModelRoundTripsThroughJson),
-    ("lark cli discovery resolves windows npm shim", LarkCliDiscoveryResolvesWindowsNpmShim)
+    ("semantic hash is stable across row order", () => RunSync(SemanticHashIsStableAcrossRowOrder)),
+    ("portable validator catches duplicate row ids", () => RunSync(ValidatorCatchesDuplicateRowIds)),
+    ("three-way merge detects real conflicts", () => RunSync(MergeDetectsConflicts)),
+    ("core model round-trips through json", () => RunSync(CoreModelRoundTripsThroughJson)),
+    ("lark cli discovery resolves windows npm shim", () => RunSync(LarkCliDiscoveryResolvesWindowsNpmShim)),
+    ("type row import normalizes semantic values", () => RunSync(TypeRowImportNormalizesSemanticValues)),
+    ("enum option drift is reported", () => RunSync(EnumOptionDriftIsReported)),
+    ("lark read parser accepts wrapped values", () => RunSync(LarkReadParserAcceptsWrappedValues)),
+    ("lark read parser accepts record arrays", () => RunSync(LarkReadParserAcceptsRecordArrays)),
+    ("gate can print github annotations", GateCanPrintGitHubAnnotations)
 };
 
 var failed = 0;
@@ -16,7 +22,7 @@ foreach (var test in tests)
 {
     try
     {
-        test.Body();
+        await test.Body();
         Console.WriteLine("[pass] " + test.Name);
     }
     catch (Exception ex)
@@ -28,6 +34,12 @@ foreach (var test in tests)
 }
 
 return failed == 0 ? 0 : 1;
+
+static Task RunSync(Action action)
+{
+    action();
+    return Task.CompletedTask;
+}
 
 static void SemanticHashIsStableAcrossRowOrder()
 {
@@ -103,6 +115,115 @@ static void LarkCliDiscoveryResolvesWindowsNpmShim()
     {
         Environment.SetEnvironmentVariable("PATH", oldPath);
         Environment.SetEnvironmentVariable("LARK_CLI_PATH", oldEnv);
+        Directory.Delete(temp, recursive: true);
+    }
+}
+
+static void TypeRowImportNormalizesSemanticValues()
+{
+    var matrix = new List<IList<string>>
+    {
+        new List<string> { "id", "power", "enabled", "starts", "payload" },
+        new List<string> { "string", "integer", "bool", "date", "json" },
+        new List<string> { "稳定 ID", "数值", "开关", "日期", "对象" },
+        new List<string> { "item_sword", "0010", "是", "2026/5/24", "{\"a\":1}" }
+    };
+
+    var imported = MatrixWorkbookImporter.Import(matrix, new MatrixWorkbookImportOptions
+    {
+        ProviderId = "test",
+        SourceId = "typed",
+        SheetName = "Items",
+        FieldRow = 0,
+        TypeRow = 1,
+        DescriptionRow = 2,
+        DataStartRow = 3
+    });
+
+    var row = imported.Workbook.Sheets[0].Rows[0];
+    AssertEqual("integer", row.Cells["power"].ValueKind, "Power should be typed as integer.");
+    AssertEqual("10", row.Cells["power"].NormalizedText, "Integer normalization should remove leading zeroes.");
+    AssertEqual("true", row.Cells["enabled"].NormalizedText, "Localized boolean should normalize to true.");
+    AssertEqual("2026-05-24", row.Cells["starts"].NormalizedText, "Date should normalize to ISO date.");
+    AssertTrue(!imported.Report.HasErrors, "Typed import should not produce errors.");
+}
+
+static void EnumOptionDriftIsReported()
+{
+    var matrix = new List<IList<string>>
+    {
+        new List<string> { "id", "rarity" },
+        new List<string> { "string", "enum:common,rare" },
+        new List<string> { "item_sword", "legendary" }
+    };
+
+    var imported = MatrixWorkbookImporter.Import(matrix, new MatrixWorkbookImportOptions
+    {
+        ProviderId = "test",
+        SourceId = "enum",
+        SheetName = "Items",
+        FieldRow = 0,
+        TypeRow = 1,
+        DataStartRow = 2
+    });
+
+    AssertTrue(imported.Report.Findings.Any(f => f.Code == "cell.enum_option_drift"), "Enum option drift should be reported.");
+}
+
+static void LarkReadParserAcceptsWrappedValues()
+{
+    var json = "{\"data\":{\"values\":[[\"id\",\"score\"],[\"a\",1]]}}";
+    var imported = InvokeLarkImport(json);
+    AssertEqual("a", imported.Workbook.Sheets[0].Rows[0].StableId, "Wrapped values should import row id.");
+}
+
+static void LarkReadParserAcceptsRecordArrays()
+{
+    var json = "{\"items\":[{\"id\":\"a\",\"score\":1},{\"id\":\"b\",\"score\":2}]}";
+    var imported = InvokeLarkImport(json);
+    AssertEqual("b", imported.Workbook.Sheets[0].Rows[1].StableId, "Record arrays should import rows.");
+}
+
+static MatrixWorkbookImportResult InvokeLarkImport(string json)
+{
+    var method = typeof(LarkCliWorkbookProvider).GetMethod("BuildWorkbookFromReadJson", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+    AssertTrue(method != null, "Expected provider import method.");
+    var request = new ProviderExportRequest { TableId = "items", SheetId = "sheet", FieldRow = 0 };
+    return (MatrixWorkbookImportResult)method!.Invoke(null, new object[] { json, request, "source" })!;
+}
+
+static async Task GateCanPrintGitHubAnnotations()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-gate-" + Guid.NewGuid().ToString("N"));
+    var cache = Path.Combine(temp, ".config-sheet-forge", "cache");
+    Directory.CreateDirectory(cache);
+    try
+    {
+        var workbook = SampleWorkbook();
+        workbook.Sheets[0].Rows[1].StableId = workbook.Sheets[0].Rows[0].StableId;
+        var json = JsonSerializer.Serialize(workbook, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        await File.WriteAllTextAsync(Path.Combine(cache, "items.semantic.json"), json);
+
+        var oldOut = Console.Out;
+        var writer = new StringWriter();
+        Console.SetOut(writer);
+        var oldDir = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(temp);
+            var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "gate", "--cache", cache, "--annotations", "github" });
+            AssertEqual("1", exitCode.ToString(), "Gate should fail for duplicate rows.");
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(oldDir);
+            Console.SetOut(oldOut);
+        }
+
+        AssertTrue(writer.ToString().Contains("::error file="), "Gate should print GitHub annotations.");
+    }
+    finally
+    {
         Directory.Delete(temp, recursive: true);
     }
 }

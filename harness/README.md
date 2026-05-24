@@ -1,9 +1,9 @@
-# Harness Templates
+# Harness 模板
 
-The harness folder keeps lightweight maintenance checks for each task.
+`harness/` 保存每个任务的轻量治理记录。
 
-- `task-start`: update scope, assumptions, and validation plan before work starts.
-- `requirements-change`: record requirement changes before implementation continues.
-- `task-complete`: record what changed, how it was checked, and what remains.
+- `task-start`：开工前记录范围、假设和验证计划。
+- `requirements-change`：需求变化先记录，再继续实现。
+- `task-complete`：收尾时记录改了什么、怎么验证、还剩什么。
 
-These files are generic templates and do not contain private team routing or project history.
+这些文件不保存私有团队路由或真实业务表内容。

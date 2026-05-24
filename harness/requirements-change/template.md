@@ -1,23 +1,23 @@
-# Requirements Change
+# 需求变更
 
-## Change
+## 变化
 
-- Date:
-- Requested by:
-- Summary:
+- 日期：
+- 提出人：
+- 摘要：
 
-## Impact
+## 影响
 
-- Code:
-- Docs:
-- Tests:
-- Compatibility:
+- 代码：
+- 文档：
+- 测试：
+- 兼容性：
 
-## Decision
+## 决策
 
-- Accepted / deferred / rejected:
-- Reason:
+- 接受 / 延后 / 拒绝：
+- 原因：
 
-## Follow-up
+## 后续
 
 - [ ]
