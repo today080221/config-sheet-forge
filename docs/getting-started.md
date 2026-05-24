@@ -1,68 +1,74 @@
-# Getting Started
+# 入门指南
 
-Config Sheet Forge keeps a local project configuration and a local table registry. Both live under `.config-sheet-forge/` and are ignored by git because they can contain tenant-specific document ids or private URLs.
+Config Sheet Forge 会在项目根目录下维护本地配置和表注册表。它们位于 `.config-sheet-forge/`，可能包含租户文档 ID 或私有 URL，因此默认不进 git。
 
-## Install Requirements
+## 安装要求
 
-- .NET 8 SDK or newer for the CLI
-- `lark-cli` for Feishu/Lark provider access
-- Unity 2021.3 or newer for the UPM package
+- .NET 8 SDK 或更新版本，用于 CLI。
+- `lark-cli`，用于飞书/Lark provider。
+- Unity 2021.3 或更新版本，用于 UPM 包。
 
-Build from source:
+从源码构建：
 
 ```bash
 dotnet build ConfigSheetForge.sln
 ```
 
-Run the CLI from source:
+从源码运行 CLI：
 
 ```bash
 dotnet run --project src/cli/ConfigSheetForge.Cli -- doctor
 ```
 
-Pack as a local .NET tool:
+打包为本地 .NET tool：
 
 ```bash
 dotnet pack src/cli/ConfigSheetForge.Cli -c Release
 ```
 
-## First Project Setup
+## 首次接入项目
 
-Create local templates:
+创建本地模板：
 
 ```bash
-config-sheet-forge init
+config-sheet-forge init --lark-identity bot
 ```
 
-Check the machine and provider setup:
+检查本机和 provider 配置：
 
 ```bash
-config-sheet-forge doctor
+config-sheet-forge doctor --details
 ```
 
-Find possible roots:
+查找候选 root：
 
 ```bash
-config-sheet-forge discover-root --query "config root"
+config-sheet-forge discover-root --query "配置根"
 ```
 
-The command only lists candidates. A human must choose the right root and put it in `.config-sheet-forge/config.json`.
+`discover-root` 只列候选项。必须由人确认正确 root，再写入 `.config-sheet-forge/config.json`。
 
-## Register A Table
+## 注册一张表
+
+类型行优先的推荐布局：
 
 ```bash
-config-sheet-forge new-table --id items --name Items --spreadsheet "<sheet-url-or-token>" --sheet-id "<sheet-id>" --range "A1:Z500"
+config-sheet-forge new-table --id items --name Items --spreadsheet "<sheet-url-or-token>" --sheet-id "<sheet-id>" --range "A1:Z500" --field-row 0 --type-row 1 --description-row 2 --data-start-row 3
 ```
 
-Then sync and gate:
+同步并执行 gate：
 
 ```bash
-config-sheet-forge sync --table items
-config-sheet-forge gate
+config-sheet-forge sync --table items --details
+config-sheet-forge gate --details --annotations github
 ```
 
 ## Unity
 
-Add the package from this repository with the package path `packages/unity`, then open `Tools > Config Sheet Forge`.
+通过 Unity Package Manager 安装：
 
-The Unity window calls the same shared core assembly for local checks and delegates provider actions to the CLI.
+```text
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.2.0
+```
+
+打开 `Tools > Config Sheet Forge`。Unity 窗口会使用同一份共享 core 做本地检查，provider 访问仍交给已安装的 CLI。

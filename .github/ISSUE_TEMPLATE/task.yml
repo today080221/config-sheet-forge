@@ -1,33 +1,33 @@
-name: Task
-description: Track implementation work for Config Sheet Forge.
-title: "[Task] "
+name: 任务
+description: 跟踪 Config Sheet Forge 实现工作。
+title: "[任务] "
 labels:
   - task
 body:
   - type: dropdown
     id: milestone
     attributes:
-      label: Milestone
+      label: 里程碑
       options:
-        - M0 Repo Bootstrap
-        - M1 Core Workbook Model
+        - M0 仓库启动
+        - M1 核心工作簿模型
         - M2 Lark Provider
-        - M3 Unity Package
-        - M4 Merge Review And Gate
-        - M5 Docs And Release
+        - M3 Unity 包
+        - M4 合并审查与 Gate
+        - M5 文档与发布
     validations:
       required: true
   - type: textarea
     id: scope
     attributes:
-      label: Scope
-      description: What should change?
+      label: 范围
+      description: 需要改变什么？
     validations:
       required: true
   - type: textarea
     id: validation
     attributes:
-      label: Validation
-      description: How will this be checked?
+      label: 验证
+      description: 如何检查？
     validations:
       required: true

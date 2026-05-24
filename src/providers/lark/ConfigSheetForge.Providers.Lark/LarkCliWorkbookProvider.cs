@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using ConfigSheetForge.Core;
 
 namespace ConfigSheetForge.Providers.Lark;
@@ -96,7 +95,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             return candidates;
         }
 
-        var result = await gateway.RunAsync(new[] { "docs", "+search", "--query", query, "--format", "json" }, context.WorkspaceRoot, cancellationToken).ConfigureAwait(false);
+        var result = await RunWithIdentityFallbackAsync(gateway, context, new[] { "docs", "+search", "--query", query, "--format", "json" }, cancellationToken).ConfigureAwait(false);
         if (!result.Success)
         {
             candidates.Add(new ProviderRootCandidate
@@ -110,7 +109,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             return candidates;
         }
 
-        foreach (var candidate in ParseSearchCandidates(result.Stdout))
+        foreach (var candidate in ParseSearchCandidates(CombinedOutput(result)))
         {
             candidates.Add(candidate);
         }
@@ -165,17 +164,23 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             return result;
         }
 
-        result.Workbook = BuildWorkbookFromReadJson(read.Stdout, request, source);
+        var import = BuildWorkbookFromReadJson(CombinedOutput(read), request, source);
+        result.Workbook = import.Workbook;
         result.Workbook.ProviderId = Id;
         result.Workbook.SourceId = source;
         result.Workbook.Revision = DateTimeOffset.UtcNow.ToString("O");
+        foreach (var finding in import.Report.Findings)
+        {
+            result.Findings.Add(ToProviderFinding(finding));
+        }
+
         result.SemanticHash = SemanticHasher.ComputeHash(result.Workbook);
         result.ProviderRevision = result.Workbook.Revision;
 
         if (string.IsNullOrWhiteSpace(result.CachePath))
         {
             var semanticPath = Path.Combine(request.CacheDirectory, safeName + ".semantic.json");
-            await File.WriteAllTextAsync(semanticPath, read.Stdout, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(semanticPath, CombinedOutput(read), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
             result.CachePath = semanticPath;
         }
 
@@ -186,9 +191,11 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
     {
         var args = new List<string> { "sheets", "+export" };
         AddSourceArgument(args, source);
-        args.Add("--output");
-        args.Add(outputPath);
-        return await gateway.RunAsync(args, context.WorkspaceRoot, cancellationToken).ConfigureAwait(false);
+        args.Add("--file-extension");
+        args.Add("xlsx");
+        args.Add("--output-path");
+        args.Add(ToCliOutputPath(context.WorkspaceRoot, outputPath));
+        return await RunWithIdentityFallbackAsync(gateway, context, args, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<LarkCliResult> TryReadValuesAsync(LarkCliGateway gateway, ProviderContext context, string source, ProviderExportRequest request, CancellationToken cancellationToken)
@@ -208,9 +215,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             args.Add(request.Range);
         }
 
-        args.Add("--format");
-        args.Add("json");
-        return await gateway.RunAsync(args, context.WorkspaceRoot, cancellationToken).ConfigureAwait(false);
+        return await RunWithIdentityFallbackAsync(gateway, context, args, cancellationToken).ConfigureAwait(false);
     }
 
     private static void AddSourceArgument(ICollection<string> args, string source)
@@ -226,73 +231,43 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         args.Add(source);
     }
 
-    private static WorkbookDocument BuildWorkbookFromReadJson(string json, ProviderExportRequest request, string source)
+    private static MatrixWorkbookImportResult BuildWorkbookFromReadJson(string json, ProviderExportRequest request, string source)
     {
-        var workbook = new WorkbookDocument
+        if (!TryParseJsonDocument(json, out var document))
         {
-            ProviderId = "lark",
-            SourceId = source,
-            SourceTitle = FirstNonEmpty(request.TableId, request.SheetId, "Lark sheet")
-        };
-
-        var sheet = new SheetDocument
-        {
-            Id = request.SheetId,
-            Name = FirstNonEmpty(request.TableId, request.SheetId, "Sheet1")
-        };
-        workbook.Sheets.Add(sheet);
-
-        using var document = JsonDocument.Parse(json);
-        if (!TryFindMatrix(document.RootElement, out var matrix) || matrix.Count == 0)
-        {
-            return workbook;
-        }
-
-        var headers = matrix[0].Select((value, index) => new
-        {
-            Index = index,
-            DisplayName = value,
-            Key = MakeColumnKey(value, index)
-        }).ToList();
-
-        foreach (var header in headers)
-        {
-            sheet.Columns.Add(new ColumnDefinition
+            var empty = MatrixWorkbookImporter.Import(new List<IList<string>>(), new MatrixWorkbookImportOptions
             {
-                Key = header.Key,
-                DisplayName = string.IsNullOrWhiteSpace(header.DisplayName) ? header.Key : header.DisplayName,
-                ValueKind = "string",
-                SourceColumn = ToColumnName(header.Index)
+                ProviderId = "lark",
+                SourceId = source,
+                SourceTitle = FirstNonEmpty(request.TableId, request.SheetId, "Lark sheet"),
+                SheetId = request.SheetId,
+                SheetName = FirstNonEmpty(request.TableId, request.SheetId, "Sheet1")
             });
+            empty.Report.Add(FindingSeverity.Error, "lark.read_json_invalid", "lark-cli 返回的表格数据不是可读取的 JSON。", "$.provider.lark.read");
+            return empty;
         }
 
-        var idColumn = headers.FirstOrDefault(h => string.Equals(h.Key, "id", StringComparison.OrdinalIgnoreCase) || string.Equals(h.Key, "key", StringComparison.OrdinalIgnoreCase)) ?? headers.First();
-        for (var i = 1; i < matrix.Count; i++)
+        using (document)
         {
-            var values = matrix[i];
-            var row = new RowDocument
+            if (!TryFindMatrix(document.RootElement, out var matrix))
             {
-                SourceIndex = i + 1,
-                StableId = idColumn.Index < values.Count && !string.IsNullOrWhiteSpace(values[idColumn.Index])
-                    ? values[idColumn.Index]
-                    : "row-" + i.ToString("0000")
-            };
-
-            foreach (var header in headers)
-            {
-                var text = header.Index < values.Count ? values[header.Index] : "";
-                row.Cells[header.Key] = new CellValue
-                {
-                    RawText = text,
-                    NormalizedText = NormalizeCellText(text),
-                    ValueKind = "string"
-                };
+                matrix = new List<List<string>>();
             }
 
-            sheet.Rows.Add(row);
+            return MatrixWorkbookImporter.Import(matrix.Cast<IList<string>>().ToList(), new MatrixWorkbookImportOptions
+            {
+                ProviderId = "lark",
+                SourceId = source,
+                SourceTitle = FirstNonEmpty(request.TableId, request.SheetId, "Lark sheet"),
+                SheetId = request.SheetId,
+                SheetName = FirstNonEmpty(request.TableId, request.SheetId, "Sheet1"),
+                FieldRow = request.FieldRow,
+                TypeRow = request.TypeRow,
+                DescriptionRow = request.DescriptionRow,
+                DataStartRow = request.DataStartRow,
+                TreatUnknownTypesAsEnum = request.TreatUnknownTypesAsEnum
+            });
         }
-
-        return workbook;
     }
 
     private static IEnumerable<ProviderRootCandidate> ParseSearchCandidates(string json)
@@ -300,8 +275,15 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         var candidates = new List<ProviderRootCandidate>();
         try
         {
-            using var document = JsonDocument.Parse(json);
-            WalkCandidates(document.RootElement, candidates);
+            if (!TryParseJsonDocument(json, out var document))
+            {
+                throw new JsonException();
+            }
+
+            using (document)
+            {
+                WalkCandidates(document.RootElement, candidates);
+            }
         }
         catch (JsonException)
         {
@@ -379,6 +361,13 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
                 matrix = rows;
                 return true;
             }
+
+            var objectRows = TryObjectArrayToMatrix(element);
+            if (objectRows.Count > 0)
+            {
+                matrix = objectRows;
+                return true;
+            }
         }
 
         if (element.ValueKind == JsonValueKind.Object)
@@ -400,6 +389,67 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             }
         }
 
+        return false;
+    }
+
+    private static List<List<string>> TryObjectArrayToMatrix(JsonElement element)
+    {
+        var rows = new List<JsonElement>();
+        var headers = new List<string>();
+        foreach (var rowElement in element.EnumerateArray())
+        {
+            if (rowElement.ValueKind != JsonValueKind.Object)
+            {
+                return new List<List<string>>();
+            }
+
+            rows.Add(rowElement);
+            foreach (var property in rowElement.EnumerateObject())
+            {
+                if (!headers.Contains(property.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    headers.Add(property.Name);
+                }
+            }
+        }
+
+        if (rows.Count == 0 || headers.Count == 0)
+        {
+            return new List<List<string>>();
+        }
+
+        var matrix = new List<List<string>> { headers.ToList() };
+        foreach (var row in rows)
+        {
+            var values = new List<string>();
+            foreach (var header in headers)
+            {
+                values.Add(TryGetPropertyIgnoreCase(row, header, out var property) ? CellToText(property) : "");
+            }
+
+            matrix.Add(values);
+        }
+
+        return matrix;
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement row, string name, out JsonElement value)
+    {
+        if (row.TryGetProperty(name, out value))
+        {
+            return true;
+        }
+
+        foreach (var property in row.EnumerateObject())
+        {
+            if (StringComparer.OrdinalIgnoreCase.Equals(property.Name, name))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
         return false;
     }
 
@@ -429,39 +479,33 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         return "";
     }
 
-    private static string MakeColumnKey(string displayName, int index)
+    private static ProviderDoctorFinding ToProviderFinding(ValidationFinding finding)
     {
-        var key = Regex.Replace(displayName ?? "", "[^A-Za-z0-9_]+", "_").Trim('_');
-        if (string.IsNullOrWhiteSpace(key))
+        var providerFinding = Finding(finding.Severity, finding.Code, finding.Message);
+        providerFinding.Details["location"] = finding.Location;
+        foreach (var pair in finding.Details)
         {
-            key = "column_" + (index + 1);
+            providerFinding.Details[pair.Key] = pair.Value;
         }
 
-        if (char.IsDigit(key[0]))
-        {
-            key = "_" + key;
-        }
-
-        return key.ToLowerInvariant();
+        return providerFinding;
     }
 
-    private static string ToColumnName(int zeroBasedIndex)
+    private static async Task<LarkCliResult> RunWithIdentityFallbackAsync(LarkCliGateway gateway, ProviderContext context, IEnumerable<string> args, CancellationToken cancellationToken)
     {
-        var dividend = zeroBasedIndex + 1;
-        var columnName = "";
-        while (dividend > 0)
+        var requested = GetIdentity(context);
+        if (requested == "default")
         {
-            var modulo = (dividend - 1) % 26;
-            columnName = Convert.ToChar('A' + modulo) + columnName;
-            dividend = (dividend - modulo) / 26;
+            return await gateway.RunAsync(args, context.WorkspaceRoot, cancellationToken).ConfigureAwait(false);
         }
 
-        return columnName;
-    }
+        var first = await gateway.RunAsync(WithIdentity(args, requested), context.WorkspaceRoot, cancellationToken).ConfigureAwait(false);
+        if (first.Success || requested != "bot")
+        {
+            return first;
+        }
 
-    private static string NormalizeCellText(string value)
-    {
-        return (value ?? "").Trim();
+        return await gateway.RunAsync(WithIdentity(args, "user"), context.WorkspaceRoot, cancellationToken).ConfigureAwait(false);
     }
 
     private static ProviderDoctorFinding Finding(FindingSeverity severity, string code, string message)
@@ -510,6 +554,116 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
     {
         context.Settings.TryGetValue("larkCliPath", out var executable);
         return new LarkCliGateway(executable);
+    }
+
+    private static string GetIdentity(ProviderContext context)
+    {
+        if (context.Settings.TryGetValue("larkCliIdentity", out var identity) && !string.IsNullOrWhiteSpace(identity))
+        {
+            identity = identity.Trim().ToLowerInvariant();
+            if (identity == "bot" || identity == "user" || identity == "default")
+            {
+                return identity;
+            }
+        }
+
+        return "bot";
+    }
+
+    private static IEnumerable<string> WithIdentity(IEnumerable<string> args, string identity)
+    {
+        foreach (var arg in args)
+        {
+            yield return arg;
+        }
+
+        yield return "--as";
+        yield return identity;
+    }
+
+    private static bool LooksLikePermissionFailure(LarkCliResult result)
+    {
+        var text = (result.Stdout + "\n" + result.Stderr).ToLowerInvariant();
+        return text.Contains("permission") ||
+               text.Contains("missing_scope") ||
+               text.Contains("forbidden") ||
+               text.Contains("unauthorized") ||
+               text.Contains("auth");
+    }
+
+    private static string ToCliOutputPath(string workspaceRoot, string outputPath)
+    {
+        if (string.IsNullOrWhiteSpace(workspaceRoot) || !Path.IsPathRooted(outputPath))
+        {
+            return outputPath;
+        }
+
+        var relative = Path.GetRelativePath(workspaceRoot, outputPath);
+        return relative.StartsWith("..", StringComparison.Ordinal) ? Path.GetFileName(outputPath) : relative;
+    }
+
+    private static string CombinedOutput(LarkCliResult result)
+    {
+        if (string.IsNullOrWhiteSpace(result.Stderr))
+        {
+            return result.Stdout;
+        }
+
+        if (TryParseJsonDocument(result.Stdout, out var stdoutDoc))
+        {
+            stdoutDoc.Dispose();
+            return result.Stdout;
+        }
+
+        if (TryParseJsonDocument(result.Stderr, out var stderrDoc))
+        {
+            stderrDoc.Dispose();
+            return result.Stderr;
+        }
+
+        return result.Stdout + "\n" + result.Stderr;
+    }
+
+    private static bool TryParseJsonDocument(string text, out JsonDocument document)
+    {
+        document = null!;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var trimmed = text.Trim();
+        foreach (var candidate in JsonCandidates(trimmed))
+        {
+            try
+            {
+                document = JsonDocument.Parse(candidate);
+                return true;
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<string> JsonCandidates(string text)
+    {
+        yield return text;
+        var objectStart = text.IndexOf('{');
+        var objectEnd = text.LastIndexOf('}');
+        if (objectStart >= 0 && objectEnd > objectStart)
+        {
+            yield return text.Substring(objectStart, objectEnd - objectStart + 1);
+        }
+
+        var arrayStart = text.IndexOf('[');
+        var arrayEnd = text.LastIndexOf(']');
+        if (arrayStart >= 0 && arrayEnd > arrayStart)
+        {
+            yield return text.Substring(arrayStart, arrayEnd - arrayStart + 1);
+        }
     }
 
     private static string FirstNonEmpty(params string?[] values)

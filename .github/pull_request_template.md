@@ -1,14 +1,14 @@
-## Summary
+## 摘要
 
 -
 
-## Safety
+## 安全
 
-- [ ] No secrets, access tokens, private team links, owner routes, or private table contents are committed.
-- [ ] Project-specific values are read from config or CI secrets.
-- [ ] Root discovery recommends candidates only.
+- [ ] 未提交 secret、access token、私有团队链接、owner route 或私有表内容。
+- [ ] 项目特定值来自 config、环境变量或 CI secrets。
+- [ ] Root discovery 只推荐候选项。
 
-## Validation
+## 验证
 
 - [ ] `dotnet build ConfigSheetForge.sln`
 - [ ] `dotnet run --project tests/ConfigSheetForge.Tests`

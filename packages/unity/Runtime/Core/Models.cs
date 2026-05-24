@@ -31,6 +31,7 @@ namespace ConfigSheetForge.Core
         public bool Required { get; set; }
         public string SourceColumn { get; set; } = "";
         public List<string> Tags { get; set; } = new List<string>();
+        public Dictionary<string, string> Details { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
 
     public sealed class RowDocument
@@ -108,6 +109,7 @@ namespace ConfigSheetForge.Core
                     columnClone.Tags.Add(tag ?? "");
                 }
 
+                CopyDictionary(column.Details, columnClone.Details);
                 clone.Columns.Add(columnClone);
             }
 

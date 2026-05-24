@@ -1,39 +1,28 @@
-# GitHub Setup Plan
+# GitHub 设置记录
 
-This repository was bootstrapped locally. Once the public personal repository exists, run the GitHub setup from the `main` branch.
+## 推荐 branch protection
 
-## Branch Protection
-
-Recommended `main` rules:
-
-- Require pull request before merge.
-- Require one approving review.
-- Require status checks to pass.
-- Require conversation resolution.
-- Require linear history.
-- Block force pushes.
-- Block deletion.
+- 合并前需要 PR。
+- 禁止 force push。
+- 禁止删除 `main`。
+- CI 通过后再设为 required status check。
+- 如果仓库设置兼容，启用 linear history。
 
 ## Milestones
 
-Create:
-
-- M0 Repo Bootstrap
-- M1 Core Workbook Model
+- M0 仓库启动
+- M1 核心工作簿模型
 - M2 Lark Provider
-- M3 Unity Package
-- M4 Merge Review And Gate
-- M5 Docs And Release
+- M3 Unity 包
+- M4 合并审查与 Gate
+- M5 文档与发布
 
-## Initial Issues
+## Issue 策略
 
-- M0: bootstrap repository structure and CI
-- M1: harden semantic workbook import and validator
-- M2: validate lark-cli export/read against disposable sheets
-- M3: add Unity edit-mode package tests
-- M4: add PR-friendly merge/gate annotations
-- M5: prepare v0.1.0 release notes and package artifacts
+- 已完成的 bootstrap/release 项可关闭，并链接 tag/release。
+- v0.2.0 的剩余线上治理项独立 issue 跟踪。
+- GitHub 权限不足不阻塞本地 release，但必须写明缺少的 scope 或 API 错误。
 
-## PR Review Rhythm
+## PR 节奏
 
-After opening a PR, wait 4-6 minutes for automated review. Fix actionable findings before merging. After merge, update the issue, milestone, and release notes.
+大改动优先走小 PR。创建 PR 后等待 4-6 分钟让自动 review 跑完，先修 actionable finding，再合并。

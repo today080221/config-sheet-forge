@@ -5,6 +5,8 @@ $required = @(
   "packages/unity/Runtime/Core/ConfigSheetForge.Core.asmdef",
   "packages/unity/Editor/ConfigSheetForge.Editor.asmdef",
   "packages/unity/Editor/ConfigSheetForgeWindow.cs",
+  "packages/unity/Tests/Editor/ConfigSheetForge.Editor.Tests.asmdef",
+  "packages/unity/Tests/Editor/ConfigSheetForgeEditorUtilityTests.cs",
   "packages/unity/Samples~/MinimalConfig/config-sheet-forge.config.example.json"
 )
 

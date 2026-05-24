@@ -8,6 +8,11 @@
       "spreadsheet": "https://your-tenant.example/sheets/SPREADSHEET_TOKEN_PLACEHOLDER",
       "sheetId": "SHEET_ID_PLACEHOLDER",
       "range": "A1:C100",
+      "fieldRow": 0,
+      "typeRow": 1,
+      "descriptionRow": 2,
+      "dataStartRow": 3,
+      "treatUnknownTypesAsEnum": false,
       "localSourcePath": ""
     }
   ]

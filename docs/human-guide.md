@@ -1,49 +1,49 @@
-# Human Guide
+# 给非程序用户的说明
 
-This page is for designers, planners, and other non-program users who edit config sheets.
+这页给策划、设计和其他会编辑配置表的人看。
 
-## You Can Usually Change
+## 通常可以改
 
-- Text shown to players.
-- Numeric balance values.
-- Enum-like choices from an agreed list.
-- Boolean switches such as enabled/disabled.
-- New rows, if you give each row a unique stable id.
+- 展示给玩家的文本。
+- 数值平衡字段。
+- 已约定枚举列表中的选项。
+- `enabled` 这类开关。
+- 新增行，但每行必须有唯一稳定 `id` 或 `key`。
 
-## Ask Before Changing
+## 改之前先问
 
-- Column names.
-- The `id` or `key` of an existing row.
-- Formula columns.
-- Sheet names.
-- Hidden columns that look technical.
-- Any value that looks like a token, password, URL, owner route, or private system id.
+- 列名和字段 key。
+- 现有行的 `id` 或 `key`。
+- 公式列。
+- sheet 名称。
+- 看起来像技术用途的隐藏列。
+- token、password、URL、owner route、私有系统 ID。
 
-## Do Not Put In Sheets
+## 不要放进表里
 
-- Access tokens or app secrets.
-- Personal account credentials.
-- Private team routing rules.
-- One-off business history that should not ship in an open source repository.
+- access token 或 app secret。
+- 个人账号凭据。
+- 私有团队路由规则。
+- 不应该进入开源仓库的一次性业务历史。
 
-## Common Error Messages
+## 常见错误
 
 `A row is missing a stable id`
 
-Add a value in the id/key column. The tool needs it to match old and new versions safely.
+在 id/key 列补一个值。工具需要它安全匹配新旧版本。
 
 `Two rows have the same stable id`
 
-Change one id. Every editable row needs a unique id.
+改掉其中一个 id。每一行都需要唯一稳定 id。
 
 `Column keys must use letters, numbers, and underscores`
 
-Rename the machine key. Good examples are `display_name`, `power`, and `unlock_level`.
+修改机器字段名。推荐形如 `display_name`、`power`、`unlock_level`。
 
 `This column type is not part of the portable subset`
 
-Ask an engineer whether this should become text, number, bool, date, enum, or json.
+找工程确认是否应改成 `string`、`number`、`integer`、`bool`、`date`、`datetime`、`enum` 或 `json`。
 
-## When A Merge Conflicts
+## 合并冲突时
 
-The merge report tells you the sheet, row, and column. Open the compared versions, choose the correct value, then run the gate again.
+合并报告会写出 sheet、行 id、列 key 和人能读懂的说明。打开两边版本，选出正确值，再重新跑 gate。

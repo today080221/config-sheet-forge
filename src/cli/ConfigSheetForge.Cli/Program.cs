@@ -85,6 +85,7 @@ public static class Program
             RegistryPath = ".config-sheet-forge/registry.json"
         };
         config.ProviderSettings["larkCliPath"] = args.Get("lark-cli", "lark-cli");
+        config.ProviderSettings["larkCliIdentity"] = args.Get("lark-identity", "bot");
 
         var registry = new TableRegistry();
         await WriteJsonAsync(paths.ConfigPath, config);
@@ -170,6 +171,11 @@ public static class Program
         existing.SheetId = args.Get("sheet-id", existing.SheetId);
         existing.Range = args.Get("range", existing.Range);
         existing.LocalSourcePath = args.Get("local-source", existing.LocalSourcePath);
+        existing.FieldRow = args.GetInt("field-row", existing.FieldRow);
+        existing.TypeRow = args.GetInt("type-row", existing.TypeRow);
+        existing.DescriptionRow = args.GetInt("description-row", existing.DescriptionRow);
+        existing.DataStartRow = args.GetInt("data-start-row", existing.DataStartRow);
+        existing.TreatUnknownTypesAsEnum = args.GetBool("treat-unknown-types-as-enum", existing.TreatUnknownTypesAsEnum);
 
         await WriteJsonAsync(workspace.Paths.RegistryPath, workspace.Registry);
         Console.WriteLine("Registered table " + id + ".");
@@ -207,7 +213,12 @@ public static class Program
                 TableId = table.Id,
                 SheetId = table.SheetId,
                 Range = table.Range,
-                CacheDirectory = workspace.Paths.CacheDirectory
+                CacheDirectory = workspace.Paths.CacheDirectory,
+                FieldRow = table.FieldRow,
+                TypeRow = table.TypeRow,
+                DescriptionRow = table.DescriptionRow,
+                DataStartRow = table.DataStartRow,
+                TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
             }, CancellationToken.None);
 
             foreach (var finding in result.Findings)
@@ -301,6 +312,7 @@ public static class Program
     {
         var workspace = await LoadWorkspaceAsync(requireConfig: false);
         var cache = args.Get("cache", workspace.Paths.CacheDirectory);
+        var annotations = args.Get("annotations", args.Get("annotation-format", ""));
         if (!Directory.Exists(cache))
         {
             throw new CliException("The cache directory does not exist. Run sync first.", 2, cache);
@@ -321,6 +333,10 @@ public static class Program
             foreach (var finding in report.Findings)
             {
                 PrintValidation(finding, args.HasFlag("details"));
+                if (string.Equals(annotations, "github", StringComparison.OrdinalIgnoreCase))
+                {
+                    PrintGitHubAnnotation(file, finding);
+                }
             }
 
             if (report.HasErrors)
@@ -396,10 +412,10 @@ public static class Program
         Console.WriteLine("  config-sheet-forge init [--root <url>] [--force]");
         Console.WriteLine("  config-sheet-forge doctor [--details]");
         Console.WriteLine("  config-sheet-forge discover-root --query <name>");
-        Console.WriteLine("  config-sheet-forge new-table --id <id> --name <name> [--spreadsheet <url-or-token>] [--sheet-id <id>] [--range <A1>]");
+        Console.WriteLine("  config-sheet-forge new-table --id <id> --name <name> [--spreadsheet <url-or-token>] [--sheet-id <id>] [--range <A1>] [--field-row <0>] [--type-row <1>] [--description-row <2>] [--data-start-row <3>]");
         Console.WriteLine("  config-sheet-forge sync [--table <id>] [--input <semantic.json>]");
         Console.WriteLine("  config-sheet-forge merge --base <file> --ours <file> --theirs <file> [--out <report.md>]");
-        Console.WriteLine("  config-sheet-forge gate [--cache <dir>] [--details]");
+        Console.WriteLine("  config-sheet-forge gate [--cache <dir>] [--details] [--annotations github]");
     }
 
     private static int UnknownCommand(string command)
@@ -448,6 +464,14 @@ public static class Program
         }
     }
 
+    private static void PrintGitHubAnnotation(string file, ValidationFinding finding)
+    {
+        var command = finding.Severity == FindingSeverity.Error ? "error" : "warning";
+        var title = EscapeGitHubAnnotation(finding.Code);
+        var message = EscapeGitHubAnnotation(finding.Message + " " + finding.Location);
+        Console.WriteLine("::" + command + " file=" + EscapeGitHubAnnotation(file) + ",line=1,title=" + title + "::" + message);
+    }
+
     private static string RenderMergeReport(MergeReport report)
     {
         var builder = new StringBuilder();
@@ -475,6 +499,16 @@ public static class Program
     private static string EscapeMarkdown(string value)
     {
         return (value ?? "").Replace("|", "\\|").Replace("\r", " ").Replace("\n", " ");
+    }
+
+    private static string EscapeGitHubAnnotation(string value)
+    {
+        return (value ?? "")
+            .Replace("%", "%25")
+            .Replace("\r", "%0D")
+            .Replace("\n", "%0A")
+            .Replace(":", "%3A")
+            .Replace(",", "%2C");
     }
 
     private static async Task<T> ReadJsonAsync<T>(string path)
@@ -571,6 +605,11 @@ public sealed class TableConfig
     public string SheetId { get; set; } = "";
     public string Range { get; set; } = "";
     public string LocalSourcePath { get; set; } = "";
+    public int FieldRow { get; set; } = 0;
+    public int TypeRow { get; set; } = -1;
+    public int DescriptionRow { get; set; } = -1;
+    public int DataStartRow { get; set; } = -1;
+    public bool TreatUnknownTypesAsEnum { get; set; }
 }
 
 public sealed class Workspace
@@ -657,6 +696,28 @@ public sealed class ParsedArgs
     public string Get(string key, string fallback)
     {
         return _options.TryGetValue(key, out var value) ? value : fallback;
+    }
+
+    public int GetInt(string key, int fallback)
+    {
+        return _options.TryGetValue(key, out var value) && int.TryParse(value, out var parsed) ? parsed : fallback;
+    }
+
+    public bool GetBool(string key, bool fallback)
+    {
+        if (_flags.Contains(key))
+        {
+            return true;
+        }
+
+        if (!_options.TryGetValue(key, out var value))
+        {
+            return fallback;
+        }
+
+        return value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+               value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+               value.Equals("yes", StringComparison.OrdinalIgnoreCase);
     }
 }
 

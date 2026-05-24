@@ -1,5 +1,5 @@
 # Runtime
 
-`Runtime/Core` is the canonical C# source for the shared core assembly.
+`Runtime/Core` 是共享 core assembly 的 canonical C# 源码。
 
-The .NET project under `src/core` compiles these same files by link, so Unity and the CLI do not drift apart.
+`src/core` 下的 .NET 项目会通过链接方式编译这些文件，确保 Unity 与 CLI 不分叉。

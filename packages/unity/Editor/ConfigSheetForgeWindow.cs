@@ -93,7 +93,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("Copy UPM", "Copy the Git URL for installing this package through Unity Package Manager."), GUILayout.Width(88)))
             {
-                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.1.0";
+                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.2.0";
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("Use Feishu/Lark sheets as a reviewed config source of truth.", EditorStyles.miniLabel);
@@ -103,8 +103,8 @@ namespace ConfigSheetForge.Unity.Editor
         private void DrawProjectSummary()
         {
             var projectRoot = FindProjectRoot();
-            var configPath = Path.Combine(projectRoot, ".config-sheet-forge", "config.json");
-            var registryPath = Path.Combine(projectRoot, ".config-sheet-forge", "registry.json");
+            var configPath = ConfigSheetForgeEditorUtility.GetConfigPath(projectRoot);
+            var registryPath = ConfigSheetForgeEditorUtility.GetRegistryPath(projectRoot);
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Current Project", EditorStyles.boldLabel);
@@ -356,14 +356,14 @@ namespace ConfigSheetForge.Unity.Editor
         private void RunCli(params string[] args)
         {
             var cleanArgs = CleanArgs(args);
-            _lastCommand = BuildCommandLine(_cliPath, cleanArgs);
+            _lastCommand = ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, cleanArgs);
 
             try
             {
                 var startInfo = new ProcessStartInfo
                 {
-                    FileName = ResolveExecutable(_cliPath),
-                    Arguments = JoinArguments(cleanArgs),
+                    FileName = ConfigSheetForgeEditorUtility.ResolveExecutable(_cliPath),
+                    Arguments = ConfigSheetForgeEditorUtility.JoinArguments(cleanArgs),
                     WorkingDirectory = FindProjectRoot(),
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
@@ -406,10 +406,7 @@ namespace ConfigSheetForge.Unity.Editor
             }
             catch (Exception ex)
             {
-                _output = "Could not run Config Sheet Forge CLI." + Environment.NewLine +
-                          "Command: " + _lastCommand + Environment.NewLine +
-                          "Reason: " + ex.Message + Environment.NewLine +
-                          "Tip: install the CLI or set the CLI field to an absolute path.";
+                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message);
             }
         }
 
@@ -430,113 +427,7 @@ namespace ConfigSheetForge.Unity.Editor
         private void CopyCommand(params string[] args)
         {
             var cleanArgs = CleanArgs(args);
-            EditorGUIUtility.systemCopyBuffer = BuildCommandLine(_cliPath, cleanArgs);
-        }
-
-        private static string BuildCommandLine(string executable, IEnumerable<string> args)
-        {
-            var builder = new StringBuilder();
-            builder.Append(QuoteArgument(executable));
-            foreach (var arg in args)
-            {
-                builder.Append(' ').Append(QuoteArgument(arg));
-            }
-
-            return builder.ToString();
-        }
-
-        private static string JoinArguments(IEnumerable<string> args)
-        {
-            var builder = new StringBuilder();
-            foreach (var arg in args)
-            {
-                if (builder.Length > 0)
-                {
-                    builder.Append(' ');
-                }
-
-                builder.Append(QuoteArgument(arg));
-            }
-
-            return builder.ToString();
-        }
-
-        private static string QuoteArgument(string value)
-        {
-            if (string.IsNullOrEmpty(value))
-            {
-                return "\"\"";
-            }
-
-            if (value.IndexOfAny(new[] { ' ', '\t', '"' }) < 0)
-            {
-                return value;
-            }
-
-            var builder = new StringBuilder();
-            builder.Append('"');
-            var backslashes = 0;
-            foreach (var c in value)
-            {
-                if (c == '\\')
-                {
-                    backslashes++;
-                    continue;
-                }
-
-                if (c == '"')
-                {
-                    builder.Append('\\', backslashes * 2 + 1);
-                    builder.Append('"');
-                    backslashes = 0;
-                    continue;
-                }
-
-                builder.Append('\\', backslashes);
-                backslashes = 0;
-                builder.Append(c);
-            }
-
-            builder.Append('\\', backslashes * 2);
-            builder.Append('"');
-            return builder.ToString();
-        }
-
-        private static string ResolveExecutable(string executable)
-        {
-            if (string.IsNullOrWhiteSpace(executable))
-            {
-                return executable;
-            }
-
-            if (Path.IsPathRooted(executable) || executable.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }) >= 0)
-            {
-                return executable;
-            }
-
-            var path = Environment.GetEnvironmentVariable("PATH") ?? "";
-            var extensions = Application.platform == RuntimePlatform.WindowsEditor
-                ? (Environment.GetEnvironmentVariable("PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").Split(';')
-                : new[] { "" };
-
-            foreach (var directory in path.Split(Path.PathSeparator))
-            {
-                if (string.IsNullOrWhiteSpace(directory))
-                {
-                    continue;
-                }
-
-                foreach (var extension in extensions)
-                {
-                    var candidate = Path.Combine(directory.Trim().Trim('"'), executable + extension);
-                    if (File.Exists(candidate))
-                    {
-                        return candidate;
-                    }
-                }
-            }
-
-            return executable;
+            EditorGUIUtility.systemCopyBuffer = ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, cleanArgs);
         }
 
         private static string FindProjectRoot()

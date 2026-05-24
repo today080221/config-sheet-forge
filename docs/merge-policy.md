@@ -1,31 +1,31 @@
-# Merge Policy
+# 合并策略
 
-Config Sheet Forge uses a three-way merge:
+Config Sheet Forge 使用三方合并：
 
-- base: the common version
-- ours: the local branch
-- theirs: the incoming branch or source
+- `base`：共同祖先版本。
+- `ours`：当前分支版本。
+- `theirs`：传入分支或传入来源。
 
-## Automatic Decisions
+## 自动决策
 
-If only one side changed a cell, that side wins.
+只有一边改了单元格时，采用改动方。
 
-If both sides changed a cell to the same semantic value, there is no conflict.
+两边改成同一个语义值时，不产生冲突。
 
-If both sides changed a cell differently, the merge report marks a conflict and keeps `ours` in the merged output until a human resolves it.
+两边改成不同语义值时，合并报告标记冲突，merged 文件暂时保留 `ours`，等待人工确认。
 
-## Conflict Report
+## 冲突报告
 
-`config-sheet-forge merge` writes a Markdown report with:
+`config-sheet-forge merge` 会写 Markdown 报告，包含：
 
-- status
-- sheet
-- row id
-- column key
-- human-readable message
+- 状态。
+- sheet。
+- 行 id。
+- 列 key。
+- 人能读懂的说明。
 
-Low-level fingerprints are kept in structured details and are not required for non-program users to resolve the row.
+低层 fingerprint 保留在 structured details 中，非程序用户无需读取。
 
-## Row And Sheet Deletions
+## 删除行和删除 sheet
 
-Deletion conflicts are conservative. If one side removes a row or sheet while the other side changes or keeps it, a human should decide.
+删除冲突采用保守策略。一边删除、另一边修改或保留时，需要人工决定。
