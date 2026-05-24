@@ -38,7 +38,7 @@
 
 ## 本轮证据
 
-- 本地 CI：`pwsh scripts/Run-CI.ps1` 通过，包含 build、10 个测试、Unity 包结构检查和私有内容扫描。
+- 本地 CI：`pwsh scripts/Run-CI.ps1` 通过，包含 build、12 个测试、Unity 包结构检查和私有内容扫描。
 - CLI 包：`ConfigSheetForge.Cli.0.2.0.nupkg` 已由 `dotnet pack -c Release` 生成。
 - Lark smoke：使用 disposable 表，bot 身份完成 `doctor -> discover-root -> new-table -> sync -> gate`；未记录真实业务表 URL/token。
 - Unity smoke：Unity `6000.3.12f1` 干净临时项目导入本地 UPM 包并运行 EditMode tests，4/4 通过；临时项目已清理。

@@ -424,13 +424,33 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             var values = new List<string>();
             foreach (var header in headers)
             {
-                values.Add(row.TryGetProperty(header, out var property) ? CellToText(property) : "");
+                values.Add(TryGetPropertyIgnoreCase(row, header, out var property) ? CellToText(property) : "");
             }
 
             matrix.Add(values);
         }
 
         return matrix;
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement row, string name, out JsonElement value)
+    {
+        if (row.TryGetProperty(name, out value))
+        {
+            return true;
+        }
+
+        foreach (var property in row.EnumerateObject())
+        {
+            if (StringComparer.OrdinalIgnoreCase.Equals(property.Name, name))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
     }
 
     private static string CellToText(JsonElement element)

@@ -480,7 +480,8 @@ namespace ConfigSheetForge.Core
 
         private static bool TryNormalizeDateTime(string value, out string normalized)
         {
-            if (DateTimeOffset.TryParse(value.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dto))
+            const DateTimeStyles styles = DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal;
+            if (DateTimeOffset.TryParse(value.Trim(), CultureInfo.InvariantCulture, styles, out var dto))
             {
                 normalized = dto.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
                 return true;

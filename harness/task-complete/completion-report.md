@@ -17,9 +17,10 @@ v0.2.0 上线质量工作已进入发布阶段：共享 typed inference、Lark p
 - [x] `dotnet build ConfigSheetForge.sln`
 - [x] `dotnet run --project tests/ConfigSheetForge.Tests`
 - [x] disposable Lark smoke：bot 创建一次性表，临时工作区完成 `doctor -> discover-root -> new-table -> sync -> gate`。
-- [x] `pwsh scripts/Run-CI.ps1`
+- [x] `pwsh scripts/Run-CI.ps1`（12 个测试通过）
 - [x] `dotnet pack src/cli/ConfigSheetForge.Cli/ConfigSheetForge.Cli.csproj -c Release`
 - [x] Unity edit-mode/import smoke：Unity `6000.3.12f1` 干净临时项目导入本地 UPM 包，EditMode 4/4 通过。
+- [x] PR review 修复：datetime normalization 不再依赖本地时区；Lark object-array 行 lookup 改为大小写不敏感。
 - [x] GitHub milestones/issues：M0-M5 已创建，M0 issue/milestone 已关闭。
 - [x] GitHub workflow scope 尝试：`gh auth refresh -s workflow` 超时，当前 token 未获得 `workflow` scope。
 - [x] GitHub workflow push 尝试：因缺少 `workflow` scope 被 GitHub 拒绝，本次 release 不包含 `.github/workflows/ci.yml`。

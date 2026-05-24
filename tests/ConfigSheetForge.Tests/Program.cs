@@ -14,6 +14,8 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("enum option drift is reported", () => RunSync(EnumOptionDriftIsReported)),
     ("lark read parser accepts wrapped values", () => RunSync(LarkReadParserAcceptsWrappedValues)),
     ("lark read parser accepts record arrays", () => RunSync(LarkReadParserAcceptsRecordArrays)),
+    ("lark read parser matches object keys case-insensitively", () => RunSync(LarkReadParserMatchesObjectKeysCaseInsensitively)),
+    ("datetime normalization does not assume local timezone", () => RunSync(DateTimeNormalizationDoesNotAssumeLocalTimezone)),
     ("gate can print github annotations", GateCanPrintGitHubAnnotations)
 };
 
@@ -182,6 +184,22 @@ static void LarkReadParserAcceptsRecordArrays()
     var json = "{\"items\":[{\"id\":\"a\",\"score\":1},{\"id\":\"b\",\"score\":2}]}";
     var imported = InvokeLarkImport(json);
     AssertEqual("b", imported.Workbook.Sheets[0].Rows[1].StableId, "Record arrays should import rows.");
+}
+
+static void LarkReadParserMatchesObjectKeysCaseInsensitively()
+{
+    var json = "{\"items\":[{\"ID\":\"a\",\"score\":1},{\"id\":\"b\",\"Score\":2}]}";
+    var imported = InvokeLarkImport(json);
+    AssertEqual("b", imported.Workbook.Sheets[0].Rows[1].StableId, "Record array row lookup should ignore key casing.");
+    AssertEqual("2", imported.Workbook.Sheets[0].Rows[1].Cells["score"].RawText, "Record array values should ignore key casing.");
+}
+
+static void DateTimeNormalizationDoesNotAssumeLocalTimezone()
+{
+    var withoutOffset = MatrixWorkbookImporter.NormalizeCell("2026-05-24 10:00", "datetime");
+    var withOffset = MatrixWorkbookImporter.NormalizeCell("2026-05-24T10:00:00+08:00", "datetime");
+    AssertEqual("2026-05-24T10:00:00.000Z", withoutOffset.NormalizedText, "Timezone-less datetime values should be treated as UTC.");
+    AssertEqual("2026-05-24T02:00:00.000Z", withOffset.NormalizedText, "Offset datetimes should normalize to UTC.");
 }
 
 static MatrixWorkbookImportResult InvokeLarkImport(string json)
