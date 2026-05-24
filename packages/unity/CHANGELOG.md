@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- 新增 lifecycle contract、PR gate report、strict bot、三方一致性和 hash-gated cache 能力。
+- Unity package 排除 CLI-only xlsx zip/xml 读取器，降低 asmdef/import 风险。
+- Editor window 增加中文 Source of Truth 文案和 ProjectSettings/*ConfigSheetForge*.json 状态发现。
+- ExcelToSO settings upsert 支持 JSON 结构，避免把项目 JSON 设置当 YAML 追加。
+
 ## 0.2.0
 
 - 新增共享 typed matrix import，支持 field/type/description/data 行布局。

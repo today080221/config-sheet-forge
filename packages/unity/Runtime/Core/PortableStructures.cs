@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+#if !UNITY_5_3_OR_NEWER
 using System.IO;
 using System.IO.Compression;
-using System.Linq;
 using System.Xml.Linq;
+#endif
 
 namespace ConfigSheetForge.Core
 {
@@ -257,6 +259,7 @@ namespace ConfigSheetForge.Core
         }
     }
 
+#if !UNITY_5_3_OR_NEWER
     public sealed class XlsxImportResult
     {
         public WorkbookDocument Workbook { get; set; }
@@ -630,4 +633,5 @@ namespace ConfigSheetForge.Core
             public int Column { get; }
         }
     }
+#endif
 }

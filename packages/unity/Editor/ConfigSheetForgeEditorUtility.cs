@@ -124,6 +124,22 @@ namespace ConfigSheetForge.Unity.Editor
             return Path.Combine(projectRoot, ".config-sheet-forge", "registry.json");
         }
 
+        public static string FindProjectConfigPath(string projectRoot)
+        {
+            var projectSettings = Path.Combine(projectRoot, "ProjectSettings");
+            if (!Directory.Exists(projectSettings))
+            {
+                return "";
+            }
+
+            foreach (var candidate in Directory.GetFiles(projectSettings, "*ConfigSheetForge*.json"))
+            {
+                return candidate;
+            }
+
+            return "";
+        }
+
         public static string FormatCliLaunchFailure(string command, string reason)
         {
             return "无法运行 Config Sheet Forge CLI。" + Environment.NewLine +

@@ -745,10 +745,16 @@ namespace ConfigSheetForge.Core
 
             var normalizedExcel = NormalizePath(entry.ExcelPath);
             var normalizedTable = entry.TableId ?? "";
+            var trimmed = yaml.TrimStart();
             if ((!string.IsNullOrWhiteSpace(normalizedExcel) && yaml.IndexOf(normalizedExcel, StringComparison.OrdinalIgnoreCase) >= 0) ||
                 (!string.IsNullOrWhiteSpace(normalizedTable) && yaml.IndexOf("tableId: " + normalizedTable, StringComparison.OrdinalIgnoreCase) >= 0))
             {
                 return yaml;
+            }
+
+            if (trimmed.StartsWith("{", StringComparison.Ordinal) || trimmed.StartsWith("[", StringComparison.Ordinal))
+            {
+                return UpsertJsonLikeText(yaml, entry, normalizedTable, normalizedExcel);
             }
 
             var builder = new System.Text.StringBuilder();
@@ -776,6 +782,179 @@ namespace ConfigSheetForge.Core
             }
 
             return builder.ToString();
+        }
+
+        private static string UpsertJsonLikeText(string json, UnityExcelToSoEntry entry, string tableId, string excelPath)
+        {
+            if (!string.IsNullOrWhiteSpace(tableId) &&
+                (json.IndexOf("\"tableId\": \"" + tableId + "\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 json.IndexOf("\"id\": \"" + tableId + "\"", StringComparison.OrdinalIgnoreCase) >= 0))
+            {
+                return json;
+            }
+
+            var objectText = BuildJsonEntry(entry, tableId, excelPath, "    ");
+            var arrayProperty = "";
+            entry.ExtraFields.TryGetValue("jsonArrayProperty", out arrayProperty);
+            var insertAt = string.IsNullOrWhiteSpace(arrayProperty) ? -1 : FindArrayEnd(json, "\"" + arrayProperty + "\"");
+            if (insertAt < 0)
+            {
+                foreach (var property in new[] { "\"configs\"", "\"entries\"", "\"tables\"", "\"excelToScriptableObjectSettings\"" })
+                {
+                    insertAt = FindArrayEnd(json, property);
+                    if (insertAt >= 0)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (insertAt >= 0)
+            {
+                var before = json.Substring(0, insertAt).TrimEnd();
+                var after = json.Substring(insertAt);
+                var needsComma = !before.EndsWith("[", StringComparison.Ordinal);
+                return before + (needsComma ? "," : "") + Environment.NewLine + objectText + Environment.NewLine + after.TrimStart();
+            }
+
+            var rootArrayEnd = FindRootArrayEnd(json);
+            if (rootArrayEnd >= 0)
+            {
+                var before = json.Substring(0, rootArrayEnd).TrimEnd();
+                var after = json.Substring(rootArrayEnd);
+                var needsComma = !before.EndsWith("[", StringComparison.Ordinal);
+                return before + (needsComma ? "," : "") + Environment.NewLine + objectText + Environment.NewLine + after.TrimStart();
+            }
+
+            var objectEnd = json.LastIndexOf('}');
+            if (objectEnd >= 0)
+            {
+                var before = json.Substring(0, objectEnd).TrimEnd();
+                var after = json.Substring(objectEnd);
+                var needsComma = !before.EndsWith("{", StringComparison.Ordinal);
+                return before + (needsComma ? "," : "") + Environment.NewLine +
+                       "  \"configSheetForgeEntries\": [" + Environment.NewLine +
+                       objectText + Environment.NewLine +
+                       "  ]" + Environment.NewLine +
+                       after;
+            }
+
+            return json;
+        }
+
+        private static string BuildJsonEntry(UnityExcelToSoEntry entry, string tableId, string excelPath, string indent)
+        {
+            var fields = new List<KeyValuePair<string, string>>
+            {
+                new KeyValuePair<string, string>("tableId", tableId),
+                new KeyValuePair<string, string>("excelPath", excelPath)
+            };
+            if (!string.IsNullOrWhiteSpace(entry.ScriptableObjectType))
+            {
+                fields.Add(new KeyValuePair<string, string>("scriptableObjectType", entry.ScriptableObjectType));
+            }
+
+            if (!string.IsNullOrWhiteSpace(entry.AssetPath))
+            {
+                fields.Add(new KeyValuePair<string, string>("assetPath", NormalizePath(entry.AssetPath)));
+            }
+
+            foreach (var pair in entry.ExtraFields.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                if (string.Equals(pair.Key, "jsonArrayProperty", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                fields.Add(new KeyValuePair<string, string>(pair.Key, pair.Value));
+            }
+
+            var builder = new System.Text.StringBuilder();
+            builder.Append(indent).AppendLine("{");
+            for (var i = 0; i < fields.Count; i++)
+            {
+                builder.Append(indent).Append("  \"").Append(EscapeJson(fields[i].Key)).Append("\": \"").Append(EscapeJson(fields[i].Value)).Append("\"");
+                if (i + 1 < fields.Count)
+                {
+                    builder.Append(',');
+                }
+
+                builder.AppendLine();
+            }
+
+            builder.Append(indent).Append("}");
+            return builder.ToString();
+        }
+
+        private static int FindArrayEnd(string json, string propertyName)
+        {
+            var propertyIndex = json.IndexOf(propertyName, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return -1;
+            }
+
+            var arrayStart = json.IndexOf('[', propertyIndex);
+            return arrayStart < 0 ? -1 : FindMatchingBracket(json, arrayStart, '[', ']');
+        }
+
+        private static int FindRootArrayEnd(string json)
+        {
+            var first = json.TakeWhile(char.IsWhiteSpace).Count();
+            return first < json.Length && json[first] == '[' ? FindMatchingBracket(json, first, '[', ']') : -1;
+        }
+
+        private static int FindMatchingBracket(string text, int start, char open, char close)
+        {
+            var depth = 0;
+            var inString = false;
+            var escaped = false;
+            for (var i = start; i < text.Length; i++)
+            {
+                var c = text[i];
+                if (escaped)
+                {
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\' && inString)
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = !inString;
+                    continue;
+                }
+
+                if (inString)
+                {
+                    continue;
+                }
+
+                if (c == open)
+                {
+                    depth++;
+                }
+                else if (c == close)
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        return i;
+                    }
+                }
+            }
+
+            return -1;
+        }
+
+        private static string EscapeJson(string value)
+        {
+            return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n");
         }
 
         public static string BuildSchemaReviewReason(ContractTableSpec table)

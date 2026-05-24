@@ -20,6 +20,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("registry migration cleans default rows and fields", () => RunSync(RegistryMigrationCleansDefaults)),
     ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
+    ("excel to so updater appends json settings", () => RunSync(ExcelToSoUpdaterAppendsJsonSettings)),
     ("portable subset blocks unsupported structures", () => RunSync(PortableSubsetBlocksUnsupportedStructures)),
     ("triangulation passes and fails with readable diffs", () => RunSync(TriangulationPassesAndFailsWithReadableDiffs)),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
@@ -301,6 +302,21 @@ static async Task LifecycleNewTableApplyMockCompletesSteps()
             Directory.Delete(temp, recursive: true);
         }
     }
+}
+
+static void ExcelToSoUpdaterAppendsJsonSettings()
+{
+    var json = "{\n  \"configs\": [\n    { \"tableId\": \"SkillsData\", \"excelPath\": \"Excel/SkillsData.xlsx\" }\n  ]\n}\n";
+    var updated = UnityExcelToSoSettingsUpdater.UpsertText(json, new UnityExcelToSoEntry
+    {
+        TableId = "MonsterData",
+        ExcelPath = "Excel/MonsterData.xlsx",
+        ScriptableObjectType = "MonsterConfig"
+    });
+
+    AssertTrue(updated.Contains("\"tableId\": \"SkillsData\""), "Existing JSON entry should stay.");
+    AssertTrue(updated.Contains("\"tableId\": \"MonsterData\""), "New JSON entry should be appended.");
+    AssertTrue(updated.IndexOf("SkillsData", StringComparison.Ordinal) < updated.IndexOf("MonsterData", StringComparison.Ordinal), "Existing entry should not be reordered after the new entry.");
 }
 
 static void PortableSubsetBlocksUnsupportedStructures()
