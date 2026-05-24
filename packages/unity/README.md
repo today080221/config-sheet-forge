@@ -2,17 +2,36 @@
 
 这个包提供 Unity Editor 窗口，用于在 Unity 项目中运行 Config Sheet Forge 命令。
 
-打开入口：`Tools > Config Sheet Forge > 打开同步窗口`。
+打开入口：`Tools > Config Sheet Forge` 或 `Tools > Config Sheet Forge > 打开同步窗口`。
 
 窗口包含：
 
 - `状态`：只读刷新项目配置、doctor、root discovery、gate。
-- `配表`：注册并同步 source-of-truth 表；项目正式流程建议由 contract 驱动。
-- `合并`：从 semantic workbook JSON 生成三方合并报告。
-- `PR 检查`：提交或开 PR 前执行校验并生成 gate report。
+- `配表`：发现 `ProjectSettings/*ConfigSheetForge*.json` 且配置了 adapter 时，走项目 adapter 生成 `new-table` lifecycle contract dry-run；否则提供 generic registry fallback。
+- `合并`：项目 adapter 模式下生成 `compare-merge` lifecycle contract 预览；否则从 semantic workbook JSON 生成三方合并报告。
+- `PR 检查`：项目 adapter 模式下生成 `pr-gate-report`；否则执行 generic gate。
 - `输出`：查看和复制命令输出。
 
 Editor assembly 引用 `ConfigSheetForge.Core`，也就是 CLI 编译的同一份语义工作簿 core。Provider 访问不放在 Unity 里，统一交给已安装的 `config-sheet-forge` CLI。
+
+稳定菜单契约：
+
+- `Tools > Config Sheet Forge`
+- `Tools > Config Sheet Forge > 打开同步窗口`
+- `Tools > Config Sheet Forge > 新建配表向导`
+- `Tools > Config Sheet Forge > 三方比较与合并`
+- `Tools > Config Sheet Forge > PR 同步检查`
+
+稳定 Editor API：
+
+- `ConfigSheetForgeEditorApi.OpenStatusWindow()`
+- `ConfigSheetForgeEditorApi.OpenNewTableWizard()`
+- `ConfigSheetForgeEditorApi.OpenCompareMerge()`
+- `ConfigSheetForgeEditorApi.OpenPrGate()`
+
+下游 Unity 项目推荐只保留薄菜单 adapter 和项目 config。通用窗口、向导、contract 执行、三方比较、gate UI 都由本包维护；项目 adapter 只负责把项目配置转成 lifecycle contract。
+
+接入时注意：Unity UPM 重新 resolve `packages-lock.json` 时，可能顺带刷新其它 git dependency 的 hash。这通常不是 Config Sheet Forge 包本身的改动；请在 PR 里单独核对 manifest/lock diff。
 
 ## 安装
 

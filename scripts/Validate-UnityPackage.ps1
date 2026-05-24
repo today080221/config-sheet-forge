@@ -58,4 +58,30 @@ if ($portableStructures -notmatch "#if !UNITY_5_3_OR_NEWER") {
   throw "CLI-only xlsx reader must be excluded from Unity compilation."
 }
 
+$window = Get-Content -Raw packages/unity/Editor/ConfigSheetForgeWindow.cs
+$requiredMenus = @(
+  'MenuItem("Tools/Config Sheet Forge"',
+  'MenuItem("Tools/Config Sheet Forge/打开同步窗口"',
+  'MenuItem("Tools/Config Sheet Forge/新建配表向导"',
+  'MenuItem("Tools/Config Sheet Forge/三方比较与合并"',
+  'MenuItem("Tools/Config Sheet Forge/PR 同步检查"'
+)
+foreach ($menu in $requiredMenus) {
+  if ($window -notlike "*$menu*") {
+    throw "Missing stable Unity menu contract: $menu"
+  }
+}
+
+$requiredApis = @(
+  "OpenStatusWindow",
+  "OpenNewTableWizard",
+  "OpenCompareMerge",
+  "OpenPrGate"
+)
+foreach ($api in $requiredApis) {
+  if ($window -notmatch "public static void\s+$api\s*\(") {
+    throw "Missing stable Unity Editor API: $api"
+  }
+}
+
 Write-Host "Unity package structure and import smoke checks look valid."

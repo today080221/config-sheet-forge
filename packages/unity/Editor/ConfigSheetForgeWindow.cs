@@ -12,6 +12,10 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
+        private const int StatusTab = 0;
+        private const int TablesTab = 1;
+        private const int MergeTab = 2;
+        private const int GateTab = 3;
 
         private string _cliPath = "config-sheet-forge";
         private string _rootQuery = "";
@@ -28,18 +32,53 @@ namespace ConfigSheetForge.Unity.Editor
         private string _output = "";
         private string _lastCommand = "";
         private int _selectedTab;
+        private ProjectConfigSummary _projectConfig = new ProjectConfigSummary();
+        private string _currentGitBranch = "";
         private Vector2 _mainScroll;
         private Vector2 _outputScroll;
 
+        [MenuItem("Tools/Config Sheet Forge", false, 1000)]
+        public static void OpenStatusWindow()
+        {
+            OpenTab(StatusTab);
+        }
+
         [MenuItem("Tools/Config Sheet Forge/打开同步窗口")]
-        public static void Open()
+        public static void OpenStatusWindowMenu()
+        {
+            OpenStatusWindow();
+        }
+
+        [MenuItem("Tools/Config Sheet Forge/新建配表向导")]
+        public static void OpenNewTableWizard()
+        {
+            OpenTab(TablesTab);
+        }
+
+        [MenuItem("Tools/Config Sheet Forge/三方比较与合并")]
+        public static void OpenCompareMerge()
+        {
+            OpenTab(MergeTab);
+        }
+
+        [MenuItem("Tools/Config Sheet Forge/PR 同步检查")]
+        public static void OpenPrGate()
+        {
+            OpenTab(GateTab);
+        }
+
+        private static void OpenTab(int tab)
         {
             var window = GetWindow<ConfigSheetForgeWindow>("配表 Source of Truth");
             window.minSize = new Vector2(640, 520);
+            window._selectedTab = tab;
+            window.RefreshReadonlyStatus();
+            window.Show();
         }
 
         private void OnEnable()
         {
+            RefreshReadonlyStatus();
             var report = SchemaReviewer.Review(CreateSmokeWorkbook());
             _output = "配表 Source of Truth 窗口已打开。" + Environment.NewLine +
                       "这里只刷新本地状态，不会下载、不导出、不改文件。" + Environment.NewLine +
@@ -106,14 +145,24 @@ namespace ConfigSheetForge.Unity.Editor
             var projectRoot = FindProjectRoot();
             var configPath = ConfigSheetForgeEditorUtility.GetConfigPath(projectRoot);
             var registryPath = ConfigSheetForgeEditorUtility.GetRegistryPath(projectRoot);
-            var projectConfigPath = ConfigSheetForgeEditorUtility.FindProjectConfigPath(projectRoot);
+            if (_projectConfig == null)
+            {
+                RefreshReadonlyStatus();
+            }
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("当前项目", EditorStyles.boldLabel);
             DrawReadonlyRow("项目根目录", projectRoot, "CLI 会以此目录作为工作目录。");
-            DrawStatusRow("项目配置", !string.IsNullOrWhiteSpace(projectConfigPath), ToProjectRelativePath(projectConfigPath), "未发现 ProjectSettings/*ConfigSheetForge*.json。");
+            DrawStatusRow("项目配置", _projectConfig.Exists, ToProjectRelativePath(_projectConfig.ProjectConfigPath), "未发现 ProjectSettings/*ConfigSheetForge*.json。");
+            DrawReadonlyRow("schemaVersion", FirstNonEmpty(_projectConfig.SchemaVersion, "未声明"), "项目 config 中声明的 schema 版本。");
+            DrawReadonlyRow("表数量", _projectConfig.TableCount > 0 ? _projectConfig.TableCount.ToString() : "未声明", "项目 config 中登记的配表数量。");
+            DrawReadonlyRow("lifecycle 模式", FirstNonEmpty(_projectConfig.LifecycleApplyMode, "未声明"), "项目 config 中声明的 lifecycle 写入模式。");
+            DrawReadonlyRow("Gate 报告", FirstNonEmpty(_projectConfig.GateReportPath, "未声明"), "PR gate report 输出路径。");
+            DrawReadonlyRow("Git 分支", FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch, "未知"), "当前本地 git branch。");
+            DrawReadonlyRow("Feishu Profile", FirstNonEmpty(_projectConfig.BranchProfile, "未声明"), "项目 config 中绑定的 Feishu branch/profile。");
             DrawStatusRow("本地配置", File.Exists(configPath), "已找到 .config-sheet-forge/config.json", "未找到；项目 adapter 可直接提供 contract。");
             DrawStatusRow("本地 Registry", File.Exists(registryPath), "已找到 .config-sheet-forge/registry.json", "未找到；在线 Base 注册中心可由 contract 驱动。");
+            DrawStatusRow("项目 Adapter", _projectConfig.HasLifecycleAdapter, _projectConfig.AdapterDescription, "未配置 adapterScript 或 contractCommand。");
             _cliPath = EditorGUILayout.TextField(new GUIContent("CLI", "CLI 可执行文件或绝对路径，通常是 config-sheet-forge。"), _cliPath);
             EditorGUILayout.EndVertical();
         }
@@ -169,6 +218,18 @@ namespace ConfigSheetForge.Unity.Editor
             DrawSectionTitle("配表");
             EditorGUILayout.HelpBox("低风险操作可预览；创建在线表、改 schema、写回 main 等危险动作必须通过项目 contract 和确认流程。", MessageType.None);
 
+            if (_projectConfig.Exists)
+            {
+                DrawProjectLifecycleCard(
+                    "新建配表向导",
+                    "发现项目配置后，这里走 adapter 生成 new-table lifecycle contract，再交给 core apply-contract dry-run。",
+                    "生成 dry-run 预览",
+                    "new-table",
+                    dryRun: true,
+                    includeNewTableSteps: true);
+                return;
+            }
+
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             _tableId = EditorGUILayout.TextField(new GUIContent("配表ID", "稳定机器 key，例如 SkillsData。"), _tableId);
             _tableName = EditorGUILayout.TextField(new GUIContent("显示名称", "报告和窗口里给策划看的名称。"), _tableName);
@@ -207,6 +268,18 @@ namespace ConfigSheetForge.Unity.Editor
             DrawSectionTitle("合并审查");
             EditorGUILayout.HelpBox("三方合并只生成报告和预览；写回 main 必须由项目 contract 显式确认。", MessageType.None);
 
+            if (_projectConfig.Exists)
+            {
+                DrawProjectLifecycleCard(
+                    "项目三方比较与合并",
+                    "发现项目配置后，这里走 adapter 生成 compare-merge lifecycle contract。低风险 merge 默认只生成预览。",
+                    "生成合并预览",
+                    "compare-merge",
+                    dryRun: true,
+                    includeNewTableSteps: false);
+                return;
+            }
+
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             DrawPathField("基线", ref _basePath, "共同祖先 semantic workbook JSON。");
             DrawPathField("本分支", ref _oursPath, "本地 semantic workbook JSON。");
@@ -235,7 +308,11 @@ namespace ConfigSheetForge.Unity.Editor
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("运行 Gate", "检查 semantic cache 和同步报告。"), GUILayout.Height(28)))
+            if (_projectConfig.Exists && GUILayout.Button(new GUIContent("生成 PR gate report", "通过项目 adapter 生成 pr-gate-report contract，再由 core 输出 gate report。"), GUILayout.Height(28)))
+            {
+                RunProjectLifecycle("pr-gate-report", dryRun: false);
+            }
+            else if (!_projectConfig.Exists && GUILayout.Button(new GUIContent("运行 Gate", "检查 semantic cache 和同步报告。"), GUILayout.Height(28)))
             {
                 RunCli("gate", "--details");
             }
@@ -259,6 +336,40 @@ namespace ConfigSheetForge.Unity.Editor
                 CopyCommand("gate", "--details");
             }
             EditorGUILayout.EndHorizontal();
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawProjectLifecycleCard(string title, string body, string buttonLabel, string operation, bool dryRun, bool includeNewTableSteps)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(body, EditorStyles.wordWrappedLabel);
+            if (!_projectConfig.HasLifecycleAdapter)
+            {
+                EditorGUILayout.HelpBox("项目配置已找到，但没有 adapterScript 或 contractCommand。请让项目 adapter 在 config 中声明 contract 生成入口。", MessageType.Warning);
+            }
+            else
+            {
+                DrawReadonlyRow("Adapter", _projectConfig.AdapterDescription, "项目 adapter 负责把项目 config 转成 lifecycle contract。");
+                DrawReadonlyRow("输出请求", "Temp/ConfigSheetForge/unity-lifecycle", "Unity 窗口生成的临时 contract/result 目录。");
+                if (includeNewTableSteps)
+                {
+                    EditorGUILayout.LabelField("dry-run 预览会展示：创建 Sheet、写模板三行、登记 Base、更新 ExcelToSO、创建 SchemaReviews。", EditorStyles.wordWrappedMiniLabel);
+                }
+
+                EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button(new GUIContent(buttonLabel, "先生成 contract，再运行 apply-contract。dry-run 不写飞书、不改本地文件。"), GUILayout.Height(28)))
+                {
+                    RunProjectLifecycle(operation, dryRun);
+                }
+
+                if (GUILayout.Button(new GUIContent("复制 adapter 命令", "复制将要调用的 adapter 命令。"), GUILayout.Width(128), GUILayout.Height(28)))
+                {
+                    CopyProjectLifecycleAdapterCommand(operation, dryRun);
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+
             EditorGUILayout.EndVertical();
         }
 
@@ -363,49 +474,74 @@ namespace ConfigSheetForge.Unity.Editor
 
             try
             {
-                var startInfo = new ProcessStartInfo
+                _output = RunProcessCapture(ConfigSheetForgeEditorUtility.ResolveExecutable(_cliPath), cleanArgs, FindProjectRoot()).Render(_lastCommand);
+            }
+            catch (Exception ex)
+            {
+                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message);
+            }
+        }
+
+        private void RunProjectLifecycle(string operation, bool dryRun)
+        {
+            RefreshReadonlyStatus();
+            if (!_projectConfig.Exists)
+            {
+                _output = "未发现项目配置。请确认 ProjectSettings 下存在 *ConfigSheetForge*.json。";
+                return;
+            }
+
+            if (!_projectConfig.HasLifecycleAdapter)
+            {
+                _output = "项目配置缺少 adapterScript 或 contractCommand，无法生成 lifecycle contract。";
+                return;
+            }
+
+            var projectRoot = FindProjectRoot();
+            var workDir = Path.Combine(projectRoot, "Temp", "ConfigSheetForge", "unity-lifecycle");
+            Directory.CreateDirectory(workDir);
+            var defaultRequestPath = Path.Combine(workDir, operation + ".contract.json");
+            var requestPath = string.IsNullOrWhiteSpace(_projectConfig.ContractRequestPath)
+                ? defaultRequestPath
+                : ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, ConfigSheetForgeEditorUtility.ExpandToken(_projectConfig.ContractRequestPath, projectRoot, _projectConfig, operation, defaultRequestPath, dryRun));
+            var resultPath = Path.Combine(workDir, operation + ".result.json");
+
+            var adapter = ConfigSheetForgeEditorUtility.CreateProjectLifecycleCommand(_projectConfig, projectRoot, operation, requestPath, dryRun);
+            _lastCommand = adapter.ToCommandLine() + Environment.NewLine +
+                           ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, new[] { "apply-contract", "--request", requestPath, "--out", resultPath });
+
+            try
+            {
+                var output = new StringBuilder();
+                var adapterResult = RunProcessCapture(ConfigSheetForgeEditorUtility.ResolveExecutable(adapter.Executable), adapter.Arguments, projectRoot);
+                output.AppendLine(adapterResult.Render(adapter.ToCommandLine()));
+                if (adapterResult.ExitCode != 0)
                 {
-                    FileName = ConfigSheetForgeEditorUtility.ResolveExecutable(_cliPath),
-                    Arguments = ConfigSheetForgeEditorUtility.JoinArguments(cleanArgs),
-                    WorkingDirectory = FindProjectRoot(),
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                    StandardOutputEncoding = Encoding.UTF8,
-                    StandardErrorEncoding = Encoding.UTF8
-                };
-
-                using (var process = Process.Start(startInfo))
-                {
-                    if (process == null)
-                    {
-                        _output = "Could not start CLI process.";
-                        return;
-                    }
-
-                    var stdout = process.StandardOutput.ReadToEnd();
-                    var stderr = process.StandardError.ReadToEnd();
-                    process.WaitForExit();
-
-                    var builder = new StringBuilder();
-                    builder.AppendLine("Command: " + _lastCommand);
-                    builder.AppendLine("ExitCode: " + process.ExitCode);
-                    if (!string.IsNullOrWhiteSpace(stdout))
-                    {
-                        builder.AppendLine();
-                        builder.AppendLine(stdout.TrimEnd());
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(stderr))
-                    {
-                        builder.AppendLine();
-                        builder.AppendLine("stderr:");
-                        builder.AppendLine(stderr.TrimEnd());
-                    }
-
-                    _output = builder.ToString();
+                    output.AppendLine("adapter 没有成功生成 contract，请按上面的错误处理。");
+                    _output = output.ToString();
+                    return;
                 }
+
+                if (!File.Exists(requestPath))
+                {
+                    output.AppendLine("adapter 运行成功，但没有生成 contract request：");
+                    output.AppendLine(requestPath);
+                    output.AppendLine("请检查项目 config 的 contractArgs/contractRequestPath 设置。");
+                    _output = output.ToString();
+                    return;
+                }
+
+                output.AppendLine("Contract request: " + requestPath);
+                var applyArgs = new[] { "apply-contract", "--request", requestPath, "--out", resultPath };
+                var applyResult = RunProcessCapture(ConfigSheetForgeEditorUtility.ResolveExecutable(_cliPath), applyArgs, projectRoot);
+                output.AppendLine(applyResult.Render(ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, applyArgs)));
+                if (File.Exists(resultPath))
+                {
+                    output.AppendLine("Contract result: " + resultPath);
+                    output.AppendLine(File.ReadAllText(resultPath));
+                }
+
+                _output = output.ToString();
             }
             catch (Exception ex)
             {
@@ -433,10 +569,69 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUIUtility.systemCopyBuffer = ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, cleanArgs);
         }
 
+        private void CopyProjectLifecycleAdapterCommand(string operation, bool dryRun)
+        {
+            RefreshReadonlyStatus();
+            var projectRoot = FindProjectRoot();
+            var requestPath = Path.Combine(projectRoot, "Temp", "ConfigSheetForge", "unity-lifecycle", operation + ".contract.json");
+            var adapter = ConfigSheetForgeEditorUtility.CreateProjectLifecycleCommand(_projectConfig, projectRoot, operation, requestPath, dryRun);
+            EditorGUIUtility.systemCopyBuffer = adapter.ToCommandLine();
+        }
+
+        private void RefreshReadonlyStatus()
+        {
+            var projectRoot = FindProjectRoot();
+            _projectConfig = ConfigSheetForgeEditorUtility.LoadProjectConfigSummary(projectRoot);
+            _currentGitBranch = TryRunReadOnlyGit("branch", "--show-current");
+        }
+
         private static string FindProjectRoot()
         {
             var dataPath = Application.dataPath;
             return string.IsNullOrWhiteSpace(dataPath) ? Directory.GetCurrentDirectory() : Directory.GetParent(dataPath).FullName;
+        }
+
+        private static string TryRunReadOnlyGit(params string[] args)
+        {
+            try
+            {
+                var result = RunProcessCapture("git", args, FindProjectRoot());
+                return result.ExitCode == 0 ? result.Stdout.Trim() : "";
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private static ProcessCaptureResult RunProcessCapture(string executable, IEnumerable<string> args, string workingDirectory)
+        {
+            var cleanArgs = CleanArgs(args);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                Arguments = ConfigSheetForgeEditorUtility.JoinArguments(cleanArgs),
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+
+            using (var process = Process.Start(startInfo))
+            {
+                if (process == null)
+                {
+                    return new ProcessCaptureResult { ExitCode = -1, Stderr = "Could not start process." };
+                }
+
+                var stdout = process.StandardOutput.ReadToEnd();
+                var stderr = process.StandardError.ReadToEnd();
+                process.WaitForExit();
+                return new ProcessCaptureResult { ExitCode = process.ExitCode, Stdout = stdout, Stderr = stderr };
+            }
         }
 
         private static string ToProjectRelativePath(string path)
@@ -477,6 +672,70 @@ namespace ConfigSheetForge.Unity.Editor
             sheet.Rows.Add(row);
             workbook.Sheets.Add(sheet);
             return workbook;
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return "";
+        }
+    }
+
+    public static class ConfigSheetForgeEditorApi
+    {
+        public static void OpenStatusWindow()
+        {
+            ConfigSheetForgeWindow.OpenStatusWindow();
+        }
+
+        public static void OpenNewTableWizard()
+        {
+            ConfigSheetForgeWindow.OpenNewTableWizard();
+        }
+
+        public static void OpenCompareMerge()
+        {
+            ConfigSheetForgeWindow.OpenCompareMerge();
+        }
+
+        public static void OpenPrGate()
+        {
+            ConfigSheetForgeWindow.OpenPrGate();
+        }
+    }
+
+    internal sealed class ProcessCaptureResult
+    {
+        public int ExitCode { get; set; }
+        public string Stdout { get; set; } = "";
+        public string Stderr { get; set; } = "";
+
+        public string Render(string command)
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("Command: " + command);
+            builder.AppendLine("ExitCode: " + ExitCode);
+            if (!string.IsNullOrWhiteSpace(Stdout))
+            {
+                builder.AppendLine();
+                builder.AppendLine(Stdout.TrimEnd());
+            }
+
+            if (!string.IsNullOrWhiteSpace(Stderr))
+            {
+                builder.AppendLine();
+                builder.AppendLine("stderr:");
+                builder.AppendLine(Stderr.TrimEnd());
+            }
+
+            return builder.ToString();
         }
     }
 }

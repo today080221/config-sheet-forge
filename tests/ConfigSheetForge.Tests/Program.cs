@@ -21,6 +21,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
     ("excel to so updater appends json settings", () => RunSync(ExcelToSoUpdaterAppendsJsonSettings)),
+    ("project config probe reads lifecycle summary", () => RunSync(ProjectConfigProbeReadsLifecycleSummary)),
     ("portable subset blocks unsupported structures", () => RunSync(PortableSubsetBlocksUnsupportedStructures)),
     ("triangulation passes and fails with readable diffs", () => RunSync(TriangulationPassesAndFailsWithReadableDiffs)),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
@@ -317,6 +318,38 @@ static void ExcelToSoUpdaterAppendsJsonSettings()
     AssertTrue(updated.Contains("\"tableId\": \"SkillsData\""), "Existing JSON entry should stay.");
     AssertTrue(updated.Contains("\"tableId\": \"MonsterData\""), "New JSON entry should be appended.");
     AssertTrue(updated.IndexOf("SkillsData", StringComparison.Ordinal) < updated.IndexOf("MonsterData", StringComparison.Ordinal), "Existing entry should not be reordered after the new entry.");
+}
+
+static void ProjectConfigProbeReadsLifecycleSummary()
+{
+    var json = """
+    {
+      "schemaVersion": "example.config-source/v1",
+      "lifecycleApplyMode": "dry-run-only",
+      "gateReportPath": "Temp/ConfigSheetForge/pr-gate-report.json",
+      "adapterScript": "tools/config_bridge.py",
+      "contractArgs": ["--config", "{projectConfig}", "--operation", "{operation}", "--out", "{request}"],
+      "gitBranch": "feature/config",
+      "profile": "feature-config",
+      "tables": [
+        { "id": "ItemsData" },
+        { "id": "SkillsData" }
+      ]
+    }
+    """;
+
+    var summary = ProjectConfigProbe.ProbeJson("ProjectSettings/Example.ConfigSheetForge.json", json);
+
+    AssertTrue(summary.Exists, "Project config should be marked as existing.");
+    AssertEqual("example.config-source/v1", summary.SchemaVersion, "schemaVersion should be read.");
+    AssertEqual("2", summary.TableCount.ToString(), "table count should be read from tables array.");
+    AssertEqual("dry-run-only", summary.LifecycleApplyMode, "lifecycle mode should be read.");
+    AssertEqual("Temp/ConfigSheetForge/pr-gate-report.json", summary.GateReportPath, "gate report path should be read.");
+    AssertEqual("feature/config", summary.GitBranch, "git branch should be read.");
+    AssertEqual("feature-config", summary.Profile, "profile should be read.");
+    AssertEqual("tools/config_bridge.py", summary.AdapterScript, "adapter script should be read.");
+    AssertEqual("6", summary.ContractArguments.Count.ToString(), "contract args should be read.");
+    AssertTrue(summary.HasLifecycleAdapter, "adapterScript should enable project lifecycle mode.");
 }
 
 static void PortableSubsetBlocksUnsupportedStructures()
