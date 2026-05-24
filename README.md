@@ -28,6 +28,19 @@ dotnet run --project src/cli/ConfigSheetForge.Cli -- gate --annotations github
 
 本地状态写入 `.config-sheet-forge/`，该目录已被 git 忽略。
 
+`sync` 会先导出到临时目录，完成 portable subset 检查和在线读取 / xlsx 导出 / 语义归一化三方一致性比较后，才更新正式 cache。semantic hash 没变时不会重写 `.xlsx`、`.semantic.json` 或 `.sha256`。
+
+## Contract lifecycle
+
+项目 adapter 可以用 JSON contract 调通用生命周期入口：
+
+```bash
+dotnet run --project src/cli/ConfigSheetForge.Cli -- apply-contract --request contract.json --out result.json
+dotnet run --project src/cli/ConfigSheetForge.Cli -- registry-migrate --base "<base-token>" --locale zh-Hans --cleanup-default-rows --cleanup-default-fields --dry-run
+```
+
+core 支持 `bootstrap-registry`、`new-table`、`sync-cache`、`compare-merge`、`pr-gate-report` 这些 operation。Base 和字段会保留 machine key 到中文显示名的映射，程序逻辑不依赖中文字段名。
+
 ## Unity UPM 安装
 
 ```text

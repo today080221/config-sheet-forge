@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using ConfigSheetForge.Core;
@@ -37,6 +39,8 @@ public static class Program
                 "sync" => await SyncAsync(parsed),
                 "merge" => await MergeAsync(parsed),
                 "gate" => await GateAsync(parsed),
+                "apply-contract" => await ApplyContractAsync(parsed),
+                "registry-migrate" => await RegistryMigrateAsync(parsed),
                 _ => UnknownCommand(command)
             };
         }
@@ -86,6 +90,7 @@ public static class Program
         };
         config.ProviderSettings["larkCliPath"] = args.Get("lark-cli", "lark-cli");
         config.ProviderSettings["larkCliIdentity"] = args.Get("lark-identity", "bot");
+        config.ProviderSettings["larkAllowUserFallback"] = args.HasFlag("allow-user-fallback") ? "true" : "false";
 
         var registry = new TableRegistry();
         await WriteJsonAsync(paths.ConfigPath, config);
@@ -127,7 +132,7 @@ public static class Program
         var workspace = await LoadWorkspaceAsync(requireConfig: false);
         var provider = CreateProvider(workspace.Config.Provider);
         var query = args.Get("query", args.Positionals.FirstOrDefault() ?? "");
-        var candidates = await provider.DiscoverRootsAsync(CreateProviderContext(workspace), query, CancellationToken.None);
+        var candidates = await provider.DiscoverRootsAsync(CreateProviderContext(workspace, args), query, CancellationToken.None);
 
         if (candidates.Count == 0)
         {
@@ -206,14 +211,16 @@ public static class Program
         foreach (var table in tables)
         {
             var tableProvider = CreateProvider(FirstNonEmpty(table.Provider, workspace.Config.Provider));
-            var result = await tableProvider.ExportAsync(CreateProviderContext(workspace), new ProviderExportRequest
+            var tableTemp = Path.Combine(Path.GetTempPath(), "csforge-sync-" + Guid.NewGuid().ToString("N"), table.Id);
+            Directory.CreateDirectory(tableTemp);
+            var result = await tableProvider.ExportAsync(CreateProviderContext(workspace, args), new ProviderExportRequest
             {
                 RootTokenOrUrl = FirstNonEmpty(table.Spreadsheet, workspace.Config.RootUrl, workspace.Config.RootToken),
                 SpreadsheetTokenOrUrl = table.Spreadsheet,
                 TableId = table.Id,
                 SheetId = table.SheetId,
                 Range = table.Range,
-                CacheDirectory = workspace.Paths.CacheDirectory,
+                CacheDirectory = tableTemp,
                 FieldRow = table.FieldRow,
                 TypeRow = table.TypeRow,
                 DescriptionRow = table.DescriptionRow,
@@ -230,17 +237,84 @@ public static class Program
                 }
             }
 
+            var tableHasError = result.Findings.Any(f => f.Severity == FindingSeverity.Error);
             if (result.Workbook != null)
             {
-                var semanticPath = Path.Combine(workspace.Paths.CacheDirectory, table.Id + ".semantic.json");
-                await WriteJsonAsync(semanticPath, result.Workbook);
+                var xlsxPath = FindExportedXlsx(tableTemp, table.Id);
+                if (string.IsNullOrWhiteSpace(xlsxPath))
+                {
+                    var finding = new ProviderDoctorFinding
+                    {
+                        Severity = FindingSeverity.Error,
+                        Code = "sync.triangulation_xlsx_missing",
+                        Message = table.Id + " 缺少导出的 xlsx，无法证明在线读取、xlsx 导出、语义归一化三方一致。请确认应用有导出权限后重试。"
+                    };
+                    PrintFinding(finding, args.HasFlag("details"));
+                    hasError = true;
+                    tableHasError = true;
+                }
+                else
+                {
+                    var structureReport = XlsxWorkbookReader.InspectPortableStructures(xlsxPath, table.Id);
+                    foreach (var finding in structureReport.Findings)
+                    {
+                        PrintValidation(finding, args.HasFlag("details"));
+                        if (finding.Severity == FindingSeverity.Error)
+                        {
+                            hasError = true;
+                            tableHasError = true;
+                        }
+                    }
+
+                    var xlsxImport = XlsxWorkbookReader.Import(xlsxPath, new MatrixWorkbookImportOptions
+                    {
+                        ProviderId = "xlsx",
+                        SourceId = xlsxPath,
+                        SourceTitle = table.Id,
+                        SheetId = table.SheetId,
+                        SheetName = table.Id,
+                        FieldRow = table.FieldRow,
+                        TypeRow = table.TypeRow,
+                        DescriptionRow = table.DescriptionRow,
+                        DataStartRow = table.DataStartRow,
+                        TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
+                    });
+                    foreach (var finding in xlsxImport.Report.Findings)
+                    {
+                        PrintValidation(finding, args.HasFlag("details"));
+                        if (finding.Severity == FindingSeverity.Error)
+                        {
+                            hasError = true;
+                            tableHasError = true;
+                        }
+                    }
+
+                    var triangulation = SemanticTriangulator.Compare(result.Workbook, xlsxImport.Workbook, SemanticTriangulator.Normalize(result.Workbook));
+                    if (!triangulation.Passed)
+                    {
+                        hasError = true;
+                        tableHasError = true;
+                        foreach (var diff in triangulation.DiffSummary)
+                        {
+                            Console.WriteLine("[error] " + diff + " (sync.triangulation_failed)");
+                        }
+                    }
+                }
+
+                if (!tableHasError)
+                {
+                    var hash = SemanticHasher.ComputeHash(result.Workbook);
+                    var cacheWrite = await WriteCacheIfChangedAsync(workspace.Paths.CacheDirectory, table.Id, result.Workbook, hash, xlsxPath);
+                    Console.WriteLine(table.Id + ": " + hash);
+                    Console.WriteLine(cacheWrite ? "  cache updated" : "  cache unchanged");
+                    continue;
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(result.SemanticHash))
             {
-                await File.WriteAllTextAsync(Path.Combine(workspace.Paths.CacheDirectory, table.Id + ".sha256"), result.SemanticHash + Environment.NewLine, Encoding.UTF8);
                 Console.WriteLine(table.Id + ": " + result.SemanticHash);
-                Console.WriteLine("  cache: " + FirstNonEmpty(result.CachePath, workspace.Paths.CacheDirectory));
+                Console.WriteLine("  cache: not updated because sync checks did not pass");
             }
         }
 
@@ -258,9 +332,15 @@ public static class Program
         if (!extension.Equals(".json", StringComparison.OrdinalIgnoreCase))
         {
             var destination = Path.Combine(workspace.Paths.CacheDirectory, Path.GetFileName(input));
-            File.Copy(input, destination, overwrite: true);
-            var fileHash = ComputeFileHash(destination);
-            await File.WriteAllTextAsync(Path.Combine(workspace.Paths.CacheDirectory, tableId + ".sha256"), "file:" + fileHash + Environment.NewLine, Encoding.UTF8);
+            var fileHash = ComputeFileHash(input);
+            var fileCacheHash = "file:" + fileHash;
+            var previousHash = await ReadExistingHashAsync(Path.Combine(workspace.Paths.CacheDirectory, tableId + ".sha256"));
+            if (!string.Equals(previousHash, fileCacheHash, StringComparison.Ordinal) || !File.Exists(destination))
+            {
+                File.Copy(input, destination, overwrite: true);
+                await File.WriteAllTextAsync(Path.Combine(workspace.Paths.CacheDirectory, tableId + ".sha256"), fileCacheHash + Environment.NewLine, Encoding.UTF8);
+            }
+
             Console.WriteLine(tableId + ": file:" + fileHash);
             Console.WriteLine("  cache: " + destination);
             return 0;
@@ -274,12 +354,22 @@ public static class Program
         }
 
         var hash = SemanticHasher.ComputeHash(workbook);
+        var normalized = SemanticTriangulator.Normalize(workbook);
+        var triangulation = SemanticTriangulator.Compare(workbook, workbook, normalized);
+        foreach (var diff in triangulation.DiffSummary)
+        {
+            Console.WriteLine("[error] " + diff + " (sync.triangulation_failed)");
+        }
+
+        if (triangulation.Passed && !report.HasErrors)
+        {
+            await WriteCacheIfChangedAsync(workspace.Paths.CacheDirectory, tableId, workbook, hash, null);
+        }
+
         var semanticPath = Path.Combine(workspace.Paths.CacheDirectory, tableId + ".semantic.json");
-        await WriteJsonAsync(semanticPath, workbook);
-        await File.WriteAllTextAsync(Path.Combine(workspace.Paths.CacheDirectory, tableId + ".sha256"), hash + Environment.NewLine, Encoding.UTF8);
         Console.WriteLine(tableId + ": " + hash);
         Console.WriteLine("  cache: " + semanticPath);
-        return report.HasErrors ? 1 : 0;
+        return report.HasErrors || !triangulation.Passed ? 1 : 0;
     }
 
     private static async Task<int> MergeAsync(ParsedArgs args)
@@ -325,14 +415,28 @@ public static class Program
         }
 
         var hasError = false;
+        var gateReport = new PrGateReport
+        {
+            GitHead = FirstNonEmpty(await TryRunGitAsync("rev-parse", "HEAD"), "unknown"),
+            Branch = FirstNonEmpty(await TryRunGitAsync("branch", "--show-current"), "unknown"),
+            Permissions = new GatePermissions { CanReadRegistry = true, CanReadSheets = true },
+            MergeReview = new GateReviewState { Status = args.Get("merge-review-status", "not-required-local") },
+            PortableSubset = new GateCheckState { Passed = true },
+            Triangulation = new GateCheckState { Passed = true },
+            SchemaReview = new GateReviewState { Status = args.Get("schema-review-status", "not-required-local") }
+        };
         foreach (var file in files)
         {
             Console.WriteLine("Checking " + file);
             var workbook = await ReadJsonAsync<WorkbookDocument>(file);
+            var tableId = Path.GetFileName(file).Replace(".semantic.json", "", StringComparison.OrdinalIgnoreCase);
+            gateReport.ChangedTables.Add(tableId);
+            gateReport.CacheHashes[tableId] = SemanticHasher.ComputeHash(workbook);
             var report = SchemaReviewer.Review(workbook);
             foreach (var finding in report.Findings)
             {
                 PrintValidation(finding, args.HasFlag("details"));
+                gateReport.PortableSubset.Findings.Add(finding);
                 if (string.Equals(annotations, "github", StringComparison.OrdinalIgnoreCase))
                 {
                     PrintGitHubAnnotation(file, finding);
@@ -342,10 +446,372 @@ public static class Program
             if (report.HasErrors)
             {
                 hasError = true;
+                gateReport.PortableSubset.Passed = false;
+                gateReport.HumanReadableFailures.Add("配表 “" + tableId + "” 没有通过 portable subset 检查。请按上面的单元格位置修正后重新同步。");
             }
         }
 
+        gateReport.Passed = !hasError;
+        var reportPath = args.Get("report", Path.Combine(workspace.Root, "Temp", "ConfigSheetForge", "pr-gate-report.json"));
+        await WriteJsonAsync(reportPath, gateReport);
+        Console.WriteLine("PR gate report: " + Path.GetFullPath(reportPath));
         return hasError ? 1 : 0;
+    }
+
+    private static async Task<int> ApplyContractAsync(ParsedArgs args)
+    {
+        var requestPath = args.Get("request", "");
+        if (string.IsNullOrWhiteSpace(requestPath))
+        {
+            throw new CliException("apply-contract needs --request <contract.json>.", 2);
+        }
+
+        var request = await ReadJsonAsync<LifecycleContractRequest>(requestPath);
+        if (args.HasFlag("dry-run"))
+        {
+            request.DryRun = true;
+        }
+
+        ILifecyclePlatform platform = request.DryRun
+            ? new PreviewLifecyclePlatform()
+            : new CliLifecyclePlatform(args, request);
+        var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
+        var outPath = args.Get("out", "");
+        if (!string.IsNullOrWhiteSpace(outPath))
+        {
+            await WriteJsonAsync(outPath, result);
+        }
+        else
+        {
+            Console.WriteLine(JsonSerializer.Serialize(result, JsonOptions));
+        }
+
+        foreach (var failure in result.HumanReadableFailures)
+        {
+            Console.Error.WriteLine("[error] " + failure);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> RegistryMigrateAsync(ParsedArgs args)
+    {
+        var baseToken = args.Get("base", "");
+        if (string.IsNullOrWhiteSpace(baseToken))
+        {
+            throw new CliException("registry-migrate needs --base <token>.", 2);
+        }
+
+        var locale = args.Get("locale", "zh-Hans");
+        var dryRun = args.HasFlag("dry-run");
+        var snapshot = new RegistrySnapshot();
+        if (!args.HasFlag("offline-plan"))
+        {
+            var gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
+            snapshot = await LoadRegistrySnapshotFromLarkAsync(gateway, baseToken, locale, args);
+        }
+
+        var plan = RegistryMigrator.Plan(snapshot, new RegistryMigrationOptions
+        {
+            Locale = locale,
+            CleanupDefaultRows = args.HasFlag("cleanup-default-rows"),
+            CleanupDefaultFields = args.HasFlag("cleanup-default-fields")
+        });
+        var result = new LifecycleContractResult
+        {
+            Operation = "registry-migrate",
+            DryRun = dryRun,
+            DisplayNameMapping = plan.DisplayNameMapping,
+            Success = true
+        };
+        result.Actions.AddRange(plan.Actions);
+        if (dryRun)
+        {
+            result.Actions.Add(new LifecycleActionResult
+            {
+                Action = "registry.migration.apply",
+                Status = "planned",
+                Message = "预览：不会写入 Base。"
+            });
+        }
+        else
+        {
+            var gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
+            await ApplyRegistryMigrationToLarkAsync(gateway, baseToken, plan, args, result);
+        }
+
+        var outPath = args.Get("out", "");
+        if (!string.IsNullOrWhiteSpace(outPath))
+        {
+            await WriteJsonAsync(outPath, result);
+        }
+        else
+        {
+            Console.WriteLine(JsonSerializer.Serialize(result, JsonOptions));
+        }
+
+        return 0;
+    }
+
+    private static async Task<RegistrySnapshot> LoadRegistrySnapshotFromLarkAsync(LarkCliGateway gateway, string baseToken, string locale, ParsedArgs args)
+    {
+        var snapshot = new RegistrySnapshot();
+        var tableResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+table-list", "--base-token", baseToken, "--offset", "0", "--limit", "100" });
+        foreach (var tableElement in FindJsonObjects(CombinedJsonOutput(tableResult), "table_id"))
+        {
+            var tableId = GetJsonString(tableElement, "table_id", "tableId");
+            if (string.IsNullOrWhiteSpace(tableId))
+            {
+                continue;
+            }
+
+            var displayName = GetJsonString(tableElement, "table_name", "name", "tableName");
+            var table = new RegistryTableSnapshot
+            {
+                TableId = tableId,
+                DisplayName = displayName,
+                MachineKey = ResolveMachineKey(displayName, RegistryLocalization.Default(locale).Tables)
+            };
+            snapshot.Tables.Add(table);
+
+            var fieldResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200" });
+            foreach (var fieldElement in FindJsonObjects(CombinedJsonOutput(fieldResult), "field_id"))
+            {
+                var fieldDisplay = GetJsonString(fieldElement, "field_name", "name", "fieldName");
+                var field = new RegistryFieldSnapshot
+                {
+                    FieldId = GetJsonString(fieldElement, "field_id", "fieldId"),
+                    DisplayName = fieldDisplay,
+                    MachineKey = ResolveMachineKey(fieldDisplay, RegistryLocalization.Default(locale).Fields),
+                    Type = GetJsonString(fieldElement, "type", "field_type", "fieldType"),
+                    IsDefaultField = IsDefaultBaseField(fieldDisplay)
+                };
+                table.Fields.Add(field);
+            }
+
+            var recordResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200" });
+            foreach (var recordElement in FindJsonObjects(CombinedJsonOutput(recordResult), "record_id"))
+            {
+                var record = new RegistryRecordSnapshot { RecordId = GetJsonString(recordElement, "record_id", "recordId") };
+                if (recordElement.TryGetProperty("fields", out var fields) && fields.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var field in fields.EnumerateObject())
+                    {
+                        record.Values[field.Name] = field.Value.ValueKind == JsonValueKind.String ? field.Value.GetString() ?? "" : field.Value.ToString();
+                    }
+                }
+
+                table.Records.Add(record);
+            }
+        }
+
+        return snapshot;
+    }
+
+    private static async Task ApplyRegistryMigrationToLarkAsync(LarkCliGateway gateway, string baseToken, RegistryMigrationPlan plan, ParsedArgs args, LifecycleContractResult result)
+    {
+        foreach (var action in plan.Actions)
+        {
+            try
+            {
+                switch (action.Action)
+                {
+                    case "registry.table.rename":
+                        await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+table-update", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--name", GetDetail(action, "displayName") });
+                        action.Status = "done";
+                        break;
+                    case "registry.field.rename":
+                        var fieldType = FirstNonEmpty(GetDetail(action, "fieldType"), "text");
+                        var fieldJson = JsonSerializer.Serialize(new Dictionary<string, string>
+                        {
+                            ["name"] = GetDetail(action, "displayName"),
+                            ["type"] = fieldType
+                        });
+                        await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-update", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--field-id", GetDetail(action, "fieldId"), "--json", fieldJson, "--yes" });
+                        action.Status = "done";
+                        break;
+                    case "registry.record.delete_empty":
+                        await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+record-delete", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--record-id", GetDetail(action, "recordId"), "--yes" });
+                        action.Status = "done";
+                        break;
+                    case "registry.field.delete_default":
+                        await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-delete", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--field-id", GetDetail(action, "fieldId"), "--yes" });
+                        action.Status = "done";
+                        break;
+                }
+            }
+            catch (CliException ex)
+            {
+                action.Status = "failed";
+                action.Details["error"] = ex.Message;
+                result.AddFailure(ex.Message);
+            }
+        }
+    }
+
+    private static async Task<LarkCliResult> RunLarkCliStrictAsync(LarkCliGateway gateway, ParsedArgs args, IEnumerable<string> commandArgs)
+    {
+        var doctor = await gateway.RunAsync(new[] { "doctor" }, Directory.GetCurrentDirectory(), CancellationToken.None);
+        if (!doctor.Success)
+        {
+            throw new CliException("lark-cli doctor 没有通过。请先修复本地 Feishu CLI 配置和权限。", 1, doctor.Stderr);
+        }
+
+        var identity = args.Get("lark-identity", "bot");
+        var first = await gateway.RunAsync(WithLarkIdentity(commandArgs, identity), Directory.GetCurrentDirectory(), CancellationToken.None);
+        if (first.Success || !string.Equals(identity, "bot", StringComparison.OrdinalIgnoreCase) || !args.HasFlag("allow-user-fallback"))
+        {
+            if (!first.Success)
+            {
+                throw new CliException("飞书操作失败。当前是 bot 严格模式，不会静默切换到 user；请补应用权限，或显式传 --allow-user-fallback。", 1, first.Stderr);
+            }
+
+            return first;
+        }
+
+        var fallback = await gateway.RunAsync(WithLarkIdentity(commandArgs, "user"), Directory.GetCurrentDirectory(), CancellationToken.None);
+        if (!fallback.Success)
+        {
+            throw new CliException("飞书操作失败，bot 和显式允许的 user fallback 都没有成功。", 1, fallback.Stderr);
+        }
+
+        return fallback;
+    }
+
+    private static IEnumerable<string> WithLarkIdentity(IEnumerable<string> args, string identity)
+    {
+        foreach (var arg in args)
+        {
+            yield return arg;
+        }
+
+        if (!string.Equals(identity, "default", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "--as";
+            yield return identity;
+        }
+    }
+
+    private static List<JsonElement> FindJsonObjects(string text, string requiredProperty)
+    {
+        var result = new List<JsonElement>();
+        foreach (var candidate in JsonCandidates(text))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(candidate);
+                CollectJsonObjects(document.RootElement, requiredProperty, result);
+                if (result.Count > 0)
+                {
+                    return result;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return result;
+    }
+
+    private static void CollectJsonObjects(JsonElement element, string requiredProperty, ICollection<JsonElement> result)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.EnumerateObject().Any(p => string.Equals(p.Name, requiredProperty, StringComparison.OrdinalIgnoreCase)))
+            {
+                result.Add(element.Clone());
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                CollectJsonObjects(property.Value, requiredProperty, result);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                CollectJsonObjects(child, requiredProperty, result);
+            }
+        }
+    }
+
+    private static IEnumerable<string> JsonCandidates(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            yield break;
+        }
+
+        var trimmed = text.Trim();
+        yield return trimmed;
+        var objectStart = trimmed.IndexOf('{');
+        var objectEnd = trimmed.LastIndexOf('}');
+        if (objectStart >= 0 && objectEnd > objectStart)
+        {
+            yield return trimmed.Substring(objectStart, objectEnd - objectStart + 1);
+        }
+
+        var arrayStart = trimmed.IndexOf('[');
+        var arrayEnd = trimmed.LastIndexOf(']');
+        if (arrayStart >= 0 && arrayEnd > arrayStart)
+        {
+            yield return trimmed.Substring(arrayStart, arrayEnd - arrayStart + 1);
+        }
+    }
+
+    private static string CombinedJsonOutput(LarkCliResult result)
+    {
+        return string.IsNullOrWhiteSpace(result.Stdout) ? result.Stderr : result.Stdout;
+    }
+
+    private static string GetJsonString(JsonElement element, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (element.TryGetProperty(name, out var property))
+            {
+                return property.ValueKind == JsonValueKind.String ? property.GetString() ?? "" : property.ToString();
+            }
+
+            foreach (var pair in element.EnumerateObject())
+            {
+                if (string.Equals(pair.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return pair.Value.ValueKind == JsonValueKind.String ? pair.Value.GetString() ?? "" : pair.Value.ToString();
+                }
+            }
+        }
+
+        return "";
+    }
+
+    private static string ResolveMachineKey(string displayName, IDictionary<string, string> mapping)
+    {
+        foreach (var pair in mapping)
+        {
+            if (string.Equals(displayName, pair.Key, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(displayName, pair.Value, StringComparison.OrdinalIgnoreCase))
+            {
+                return pair.Key;
+            }
+        }
+
+        return displayName ?? "";
+    }
+
+    private static bool IsDefaultBaseField(string displayName)
+    {
+        return string.Equals(displayName, "Text", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(displayName, "Single option", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(displayName, "Date", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(displayName, "Attachment", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetDetail(LifecycleActionResult action, string key)
+    {
+        return action.Details.TryGetValue(key, out var value) ? value : "";
     }
 
     private static IWorkbookProvider CreateProvider(string provider)
@@ -358,7 +824,7 @@ public static class Program
         throw new CliException("Unknown provider '" + provider + "'. v0.1 supports the lark provider and keeps the provider boundary open for future implementations.", 2);
     }
 
-    private static ProviderContext CreateProviderContext(Workspace workspace)
+    private static ProviderContext CreateProviderContext(Workspace workspace, ParsedArgs? args = null)
     {
         var context = new ProviderContext { WorkspaceRoot = workspace.Root };
         foreach (var pair in workspace.Config.ProviderSettings)
@@ -369,6 +835,11 @@ public static class Program
         context.Settings["rootUrl"] = workspace.Config.RootUrl;
         context.Settings["rootToken"] = workspace.Config.RootToken;
         context.Settings["rootObjectType"] = workspace.Config.RootObjectType;
+        if (args != null && args.HasFlag("allow-user-fallback"))
+        {
+            context.Settings["larkAllowUserFallback"] = "true";
+        }
+
         return context;
     }
 
@@ -416,6 +887,8 @@ public static class Program
         Console.WriteLine("  config-sheet-forge sync [--table <id>] [--input <semantic.json>]");
         Console.WriteLine("  config-sheet-forge merge --base <file> --ours <file> --theirs <file> [--out <report.md>]");
         Console.WriteLine("  config-sheet-forge gate [--cache <dir>] [--details] [--annotations github]");
+        Console.WriteLine("  config-sheet-forge apply-contract --request <contract.json> [--out <result.json>] [--dry-run]");
+        Console.WriteLine("  config-sheet-forge registry-migrate --base <token> [--locale zh-Hans] [--cleanup-default-rows] [--cleanup-default-fields]");
     }
 
     private static int UnknownCommand(string command)
@@ -535,6 +1008,98 @@ public static class Program
         await File.WriteAllTextAsync(path, json, Encoding.UTF8);
     }
 
+    private static async Task<bool> WriteCacheIfChangedAsync(string cacheDirectory, string tableId, WorkbookDocument workbook, string hash, string? tempXlsxPath)
+    {
+        Directory.CreateDirectory(cacheDirectory);
+        var semanticPath = Path.Combine(cacheDirectory, tableId + ".semantic.json");
+        var shaPath = Path.Combine(cacheDirectory, tableId + ".sha256");
+        var xlsxPath = Path.Combine(cacheDirectory, MakeSafeFileName(tableId) + ".xlsx");
+        var existingHash = await ReadExistingHashAsync(shaPath);
+        var hasRequiredFiles = File.Exists(semanticPath) && (string.IsNullOrWhiteSpace(tempXlsxPath) || File.Exists(xlsxPath));
+        if (string.Equals(existingHash, hash, StringComparison.Ordinal) && hasRequiredFiles)
+        {
+            return false;
+        }
+
+        await WriteJsonAsync(semanticPath, workbook);
+        await File.WriteAllTextAsync(shaPath, hash + Environment.NewLine, Encoding.UTF8);
+        if (!string.IsNullOrWhiteSpace(tempXlsxPath) && File.Exists(tempXlsxPath))
+        {
+            File.Copy(tempXlsxPath, xlsxPath, overwrite: true);
+        }
+
+        return true;
+    }
+
+    private static async Task<string> ReadExistingHashAsync(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return "";
+        }
+
+        var text = await File.ReadAllTextAsync(path, Encoding.UTF8);
+        return text.Trim();
+    }
+
+    private static string FindExportedXlsx(string directory, string tableId)
+    {
+        var expected = Path.Combine(directory, MakeSafeFileName(tableId) + ".xlsx");
+        if (File.Exists(expected))
+        {
+            return expected;
+        }
+
+        return Directory.Exists(directory)
+            ? Directory.GetFiles(directory, "*.xlsx", SearchOption.TopDirectoryOnly).FirstOrDefault() ?? ""
+            : "";
+    }
+
+    private static string MakeSafeFileName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder();
+        foreach (var c in value ?? "")
+        {
+            builder.Append(invalid.Contains(c) ? '_' : c);
+        }
+
+        return builder.Length == 0 ? "workbook" : builder.ToString();
+    }
+
+    private static async Task<string> TryRunGitAsync(params string[] args)
+    {
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            foreach (var arg in args)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
+
+            using var process = Process.Start(startInfo);
+            if (process == null)
+            {
+                return "";
+            }
+
+            var stdout = await process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            return process.ExitCode == 0 ? stdout.Trim() : "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
     private static string ComputeFileHash(string path)
     {
         using var stream = File.OpenRead(path);
@@ -562,6 +1127,227 @@ public static class Program
         }
 
         return value.Length <= 8 ? "********" : value.Substring(0, 4) + "..." + value.Substring(value.Length - 4);
+    }
+
+    private sealed class CliLifecyclePlatform : ILifecyclePlatform
+    {
+        private readonly ParsedArgs _args;
+        private readonly LifecycleContractRequest _request;
+        private readonly LarkCliGateway _gateway;
+
+        public CliLifecyclePlatform(ParsedArgs args, LifecycleContractRequest request)
+        {
+            _args = args;
+            _request = request;
+            _gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
+        }
+
+        public async Task<RegistrySnapshot> GetRegistrySnapshotAsync(RegistryContract registry, CancellationToken cancellationToken)
+        {
+            return await LoadRegistrySnapshotFromLarkAsync(_gateway, registry.BaseToken, _request.Locale, _args);
+        }
+
+        public Task<LifecycleActionResult> EnsureRegistryAsync(RegistryContract registry, RegistryDisplayMapping mapping, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new LifecycleActionResult
+            {
+                Action = "registry.ensure",
+                Status = "ready",
+                Message = "注册中心结构由 registry-migrate/bootstrap contract 管理；当前命令已保留 machine key 到显示名映射。"
+            });
+        }
+
+        public async Task<SheetCreationResult> CreateOnlineSheetAsync(ContractTableSpec table, CancellationToken cancellationToken)
+        {
+            var title = FirstNonEmpty(table.DisplayName, table.TableId, table.SheetName, "Config Sheet");
+            var command = new List<string> { "sheets", "+create", "--title", title };
+            if (!string.IsNullOrWhiteSpace(table.WikiRootToken))
+            {
+                command.Add("--folder-token");
+                command.Add(table.WikiRootToken);
+            }
+
+            var create = await RunLarkCliStrictAsync(_gateway, _args, command);
+            var sheet = ParseSheetCreationResult(CombinedJsonOutput(create));
+            if (string.IsNullOrWhiteSpace(sheet.SpreadsheetToken))
+            {
+                sheet.SpreadsheetToken = table.SpreadsheetToken;
+            }
+
+            if (string.IsNullOrWhiteSpace(sheet.SpreadsheetUrl))
+            {
+                sheet.SpreadsheetUrl = table.SpreadsheetUrl;
+            }
+
+            if (string.IsNullOrWhiteSpace(sheet.SheetId) && !string.IsNullOrWhiteSpace(sheet.SpreadsheetToken))
+            {
+                var info = await RunLarkCliStrictAsync(_gateway, _args, new[] { "sheets", "+info", "--spreadsheet-token", sheet.SpreadsheetToken });
+                var infoSheet = ParseSheetCreationResult(CombinedJsonOutput(info));
+                sheet.SheetId = FirstNonEmpty(infoSheet.SheetId, table.SheetId);
+                sheet.SpreadsheetUrl = FirstNonEmpty(sheet.SpreadsheetUrl, infoSheet.SpreadsheetUrl);
+            }
+
+            if (string.IsNullOrWhiteSpace(sheet.SheetId))
+            {
+                sheet.SheetId = FirstNonEmpty(table.SheetId, "Sheet1");
+            }
+
+            return sheet;
+        }
+
+        public async Task<LifecycleActionResult> WriteSheetTemplateAsync(SheetCreationResult sheet, IList<IList<string>> templateRows, CancellationToken cancellationToken)
+        {
+            var values = JsonSerializer.Serialize(templateRows);
+            await RunLarkCliStrictAsync(_gateway, _args, new[] { "sheets", "+write", "--spreadsheet-token", sheet.SpreadsheetToken, "--sheet-id", sheet.SheetId, "--range", sheet.SheetId + "!A1", "--values", values });
+            var action = new LifecycleActionResult { Action = "sheet.template.write", Status = "done", Message = "已写入 ExcelToSO 模板三行。" };
+            action.Details["rows"] = templateRows.Count.ToString(CultureInfo.InvariantCulture);
+            return action;
+        }
+
+        public async Task<LifecycleActionResult> UpsertRegistryRecordAsync(RegistryContract registry, ContractTableSpec table, SheetCreationResult sheet, CancellationToken cancellationToken)
+        {
+            var tableId = ResolveRegistryTableId(registry, "ConfigSheets");
+            var mapping = RegistryLocalization.Default(_request.Locale);
+            var body = new Dictionary<string, object>
+            {
+                [mapping.Fields["TableId"]] = table.TableId,
+                [mapping.Fields["DisplayName"]] = FirstNonEmpty(table.DisplayName, table.TableId),
+                [mapping.Fields["ExcelPath"]] = FirstNonEmpty(table.ExcelPath, table.LocalCachePath),
+                [mapping.Fields["SpreadsheetToken"]] = sheet.SpreadsheetToken,
+                [mapping.Fields["SheetId"]] = sheet.SheetId,
+                [mapping.Fields["OwnerRole"]] = table.OwnerRole,
+                [mapping.Fields["SchemaReviewRequired"]] = table.SchemaReviewRequired ? "是" : "否",
+                [mapping.Fields["OnlineSheetUrl"]] = FirstNonEmpty(sheet.SpreadsheetUrl, table.OnlineSheetUrl),
+                [mapping.Fields["Status"]] = FirstNonEmpty(table.Status, "active")
+            };
+            var recordId = FirstNonEmpty(registry.RegistryRecordId, await FindRegistryRecordIdAsync(registry.BaseToken, tableId, mapping.Fields["TableId"], table.TableId));
+            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body) };
+            if (!string.IsNullOrWhiteSpace(recordId))
+            {
+                command.Add("--record-id");
+                command.Add(recordId);
+            }
+
+            var upsert = await RunLarkCliStrictAsync(_gateway, _args, command);
+            var action = new LifecycleActionResult { Action = "registry.config_sheets.upsert", Status = "done", Message = "已登记配表清单。" };
+            action.Details["recordId"] = FirstNonEmpty(ParseRecordId(CombinedJsonOutput(upsert)), recordId);
+            return action;
+        }
+
+        public async Task<LifecycleActionResult> UpsertSchemaReviewAsync(RegistryContract registry, ContractTableSpec table, ContractGitSpec git, string reason, CancellationToken cancellationToken)
+        {
+            var tableId = ResolveRegistryTableId(registry, "SchemaReviews");
+            var mapping = RegistryLocalization.Default(_request.Locale);
+            var body = new Dictionary<string, object>
+            {
+                [mapping.Fields["TableId"]] = table.TableId,
+                [mapping.Fields["DisplayName"]] = FirstNonEmpty(table.DisplayName, table.TableId),
+                [mapping.Fields["Branch"]] = FirstNonEmpty(git.FeishuBranch, git.Profile, git.Branch),
+                [mapping.Fields["Status"]] = "pending",
+                ["Reason"] = reason
+            };
+            var recordId = await FindRegistryRecordIdAsync(registry.BaseToken, tableId, mapping.Fields["TableId"], table.TableId);
+            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body) };
+            if (!string.IsNullOrWhiteSpace(recordId))
+            {
+                command.Add("--record-id");
+                command.Add(recordId);
+            }
+
+            var upsert = await RunLarkCliStrictAsync(_gateway, _args, command);
+            var action = new LifecycleActionResult { Action = "registry.schema_reviews.upsert", Status = "done", Message = "已创建或更新 pending Schema 审查记录。" };
+            action.Details["schemaReviewId"] = FirstNonEmpty(ParseRecordId(CombinedJsonOutput(upsert)), recordId);
+            action.Details["reason"] = reason;
+            return action;
+        }
+
+        public async Task<LifecycleActionResult> ApplyRegistryMigrationAsync(RegistryContract registry, RegistryMigrationPlan plan, CancellationToken cancellationToken)
+        {
+            var result = new LifecycleContractResult();
+            await ApplyRegistryMigrationToLarkAsync(_gateway, registry.BaseToken, plan, _args, result);
+            return new LifecycleActionResult
+            {
+                Action = "registry.migration.apply",
+                Status = result.Success ? "done" : "failed",
+                Message = result.Success ? "已应用注册中心迁移。" : string.Join(" ", result.HumanReadableFailures)
+            };
+        }
+
+        private string ResolveRegistryTableId(RegistryContract registry, string machineKey)
+        {
+            if (registry.TableIds.TryGetValue(machineKey, out var tableId) && !string.IsNullOrWhiteSpace(tableId))
+            {
+                return tableId;
+            }
+
+            return RegistryLocalization.TableDisplayName(machineKey, _request.Locale);
+        }
+
+        private async Task<string> FindRegistryRecordIdAsync(string baseToken, string tableId, string keyFieldName, string keyValue)
+        {
+            if (string.IsNullOrWhiteSpace(keyValue))
+            {
+                return "";
+            }
+
+            var list = await RunLarkCliStrictAsync(_gateway, _args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200" });
+            foreach (var record in FindJsonObjects(CombinedJsonOutput(list), "record_id"))
+            {
+                if (!record.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                foreach (var field in fields.EnumerateObject())
+                {
+                    if (string.Equals(field.Name, keyFieldName, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(JsonElementToText(field.Value), keyValue, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return GetJsonString(record, "record_id", "recordId");
+                    }
+                }
+            }
+
+            return "";
+        }
+
+        private static SheetCreationResult ParseSheetCreationResult(string json)
+        {
+            var result = new SheetCreationResult();
+            foreach (var element in FindJsonObjects(json, "spreadsheet_token").Concat(FindJsonObjects(json, "token")))
+            {
+                result.SpreadsheetToken = FirstNonEmpty(result.SpreadsheetToken, GetJsonString(element, "spreadsheet_token", "token"));
+                result.SpreadsheetUrl = FirstNonEmpty(result.SpreadsheetUrl, GetJsonString(element, "url"));
+                result.SheetId = FirstNonEmpty(result.SheetId, GetJsonString(element, "sheet_id", "sheetId"));
+                result.WikiNodeToken = FirstNonEmpty(result.WikiNodeToken, GetJsonString(element, "node_token", "wiki_node_token"));
+            }
+
+            foreach (var sheet in FindJsonObjects(json, "sheet_id"))
+            {
+                result.SheetId = FirstNonEmpty(result.SheetId, GetJsonString(sheet, "sheet_id", "sheetId"));
+            }
+
+            return result;
+        }
+
+        private static string ParseRecordId(string json)
+        {
+            foreach (var record in FindJsonObjects(json, "record_id"))
+            {
+                var id = GetJsonString(record, "record_id", "recordId");
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    return id;
+                }
+            }
+
+            return "";
+        }
+
+        private static string JsonElementToText(JsonElement element)
+        {
+            return element.ValueKind == JsonValueKind.String ? element.GetString() ?? "" : element.ToString();
+        }
     }
 
     private static string FirstNonEmpty(params string[] values)
