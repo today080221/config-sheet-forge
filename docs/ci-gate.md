@@ -13,9 +13,9 @@ pwsh scripts/Check-NoPrivateContent.ps1
 
 `gate` 会读取 semantic workbook JSON，执行便携子集和 schema review。传入 `--annotations github` 时，会输出 GitHub workflow command annotation，让 PR 页面能直接显示错误或 warning。
 
-每次 gate 还会写出 PR gate report，默认位置是 `Temp/ConfigSheetForge/pr-gate-report.json`，可用 `--report <path>` 覆盖。report 包含 gitHead、branch、权限状态、portable subset、三方一致性、schema review、waiver、changedTables、cache hashes 和面向策划的失败原因。
+每次 gate 还会写出 PR gate report，默认位置是 `Temp/ConfigSheetForge/pr-gate-report.json`，可用 `--report <path>` 覆盖。report 包含 gitHead、branch、BranchBindings 状态、权限状态、portable subset、三方一致性、schema review、waiver、changedTables、cache hashes 和面向策划的失败原因。
 
-项目 adapter 需要把 merge review、waiver、SchemaReviews 等注册中心状态填进 `pr-gate-report` lifecycle contract，再由 core 统一生成可消费 report。过期 waiver、非配置负责人批准、schema review 未完成、无权限读取注册中心、缺同步报告等都会生成普通人能看懂的失败文案。
+项目 adapter 需要把 BranchBindings、MergeReviews、Waivers、SchemaReviews 等注册中心状态填进 `pr-gate-report` lifecycle contract，再由 core 统一生成可消费 report。分支未绑定、绑定冲突、过期 waiver、非配置负责人批准、schema review 未完成、无权限读取注册中心、缺同步报告等都会生成普通人能看懂的失败文案。
 
 ## CI 不应该做什么
 

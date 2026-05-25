@@ -72,7 +72,7 @@ config-sheet-forge seed-from-xlsx --table ItemsData --source-xlsx "Assets/Config
 config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.ConfigSheetForge.json" --dry-run --out Temp/ConfigSheetForge/seed.result.json
 ```
 
-dry-run 会检查公式、图片、合并单元格、富文本、跨表/跨工作簿引用、@人/@文档、日期对象、错误单元格和不支持结构，并输出每张表的 planned actions。它不会写飞书、不会改 cache、不会改 ProjectSettings。
+dry-run 会检查公式、图片、合并单元格、富文本、跨表/跨工作簿引用、@人/@文档、日期对象、错误单元格和不支持结构，并输出每张表的 planned actions。它还会展示当前 git branch / Feishu profile 将使用或创建的 Wiki 工作区节点，例如 `项目配置表/branch-codex-config-sheet-seed-feishu-main`。它不会写飞书、不会改 cache、不会改 ProjectSettings。
 
 apply 模式会在本地 xlsx、在线回读、在线导出 xlsx 三方语义一致后，才写 `.config-sheet-forge/excel-cache/<TableId>.xlsx`、`.config-sheet-forge/cache/<TableId>.semantic.json`、`.sha256`、项目配置和 Base 注册中心。执行 apply 必须显式确认：
 
@@ -80,12 +80,14 @@ apply 模式会在本地 xlsx、在线回读、在线导出 xlsx 三方语义一
 config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.ConfigSheetForge.json" --yes --confirm-excel-to-so
 ```
 
+策划后续只改飞书 branch 在线表时，先让项目 adapter 生成 `sync-cache` lifecycle contract，再 dry-run / apply。无变化时 semantic hash gate 不会重写 `.xlsx`、`.semantic.json` 或 `.sha256`，mtime 保持不变。
+
 ## Unity
 
 通过 Unity Package Manager 安装：
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.0
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.1
 ```
 
 打开 `Tools > Config Sheet Forge`。Unity 窗口会使用同一份共享 core 做本地检查，provider 访问仍交给已安装的 CLI。

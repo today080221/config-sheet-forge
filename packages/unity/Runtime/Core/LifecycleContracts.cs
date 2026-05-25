@@ -20,6 +20,8 @@ namespace ConfigSheetForge.Core
         public MergePolicyContract MergePolicy { get; set; } = new MergePolicyContract();
         public PrGateReport GateReport { get; set; } = new PrGateReport();
         public SeedFromLocalXlsxContract SeedFromLocalXlsx { get; set; } = new SeedFromLocalXlsxContract();
+        public SyncCacheContract SyncCache { get; set; } = new SyncCacheContract();
+        public BranchWorkspaceContract BranchWorkspace { get; set; } = new BranchWorkspaceContract();
         public string GateReportPath { get; set; } = "";
         public string ReportPath { get; set; } = "";
         public List<BranchBindingContract> BranchBindings { get; set; } = new List<BranchBindingContract>();
@@ -54,6 +56,10 @@ namespace ConfigSheetForge.Core
         public string SheetName { get; set; } = "";
         public string WikiRootToken { get; set; } = "";
         public string WikiNodeToken { get; set; } = "";
+        public string WikiNodeUrl { get; set; } = "";
+        public string Branch { get; set; } = "";
+        public string Profile { get; set; } = "";
+        public string SemanticHash { get; set; } = "";
         public string OwnerRole { get; set; } = "";
         public bool SchemaReviewRequired { get; set; } = true;
         public string OnlineSheetUrl { get; set; } = "";
@@ -105,7 +111,23 @@ namespace ConfigSheetForge.Core
         public string GitBranch { get; set; } = "";
         public string FeishuBranch { get; set; } = "";
         public string Profile { get; set; } = "";
+        public string Slug { get; set; } = "";
+        public string NodeTitle { get; set; } = "";
+        public string WikiNodeToken { get; set; } = "";
+        public string WikiNodeUrl { get; set; } = "";
         public string Status { get; set; } = "";
+        public string OwnerRole { get; set; } = "";
+        public string CreatedBy { get; set; } = "";
+        public string CreatedAt { get; set; } = "";
+        public string UpdatedAt { get; set; } = "";
+    }
+
+    public sealed class SyncCacheContract
+    {
+        public string TableId { get; set; } = "";
+        public string CacheDirectory { get; set; } = ".config-sheet-forge/cache";
+        public string ExcelCacheDirectory { get; set; } = ".config-sheet-forge/excel-cache";
+        public bool ConfirmApply { get; set; }
     }
 
     public sealed class LifecycleContractResult
@@ -124,6 +146,7 @@ namespace ConfigSheetForge.Core
         public string SchemaReviewReason { get; set; } = "";
         public string BaseUrl { get; set; } = "";
         public string OnlineSheetUrl { get; set; } = "";
+        public BranchWorkspaceResolution BranchWorkspace { get; set; } = new BranchWorkspaceResolution();
         public RegistryDisplayMapping DisplayNameMapping { get; set; } = RegistryLocalization.Default("zh-Hans");
         public List<LifecycleActionResult> Actions { get; set; } = new List<LifecycleActionResult>();
         public List<string> HumanReadableFailures { get; set; } = new List<string>();
@@ -193,12 +216,19 @@ namespace ConfigSheetForge.Core
             mapping.Fields["SpreadsheetToken"] = "在线表Token";
             mapping.Fields["SheetId"] = "工作表ID";
             mapping.Fields["Branch"] = "Feishu分支";
+            mapping.Fields["FeishuBranch"] = "飞书分支";
+            mapping.Fields["Profile"] = "配置Profile";
+            mapping.Fields["WikiNodeToken"] = "Wiki节点Token";
+            mapping.Fields["WikiNodeUrl"] = "Wiki节点链接";
+            mapping.Fields["SemanticHash"] = "语义Hash";
             mapping.Fields["OwnerRole"] = "负责人角色";
             mapping.Fields["SchemaReviewRequired"] = "需要Schema审查";
             mapping.Fields["OnlineSheetUrl"] = "在线表链接";
             mapping.Fields["Status"] = "状态";
             mapping.Fields["GitBranch"] = "Git分支";
-            mapping.Fields["Profile"] = "配置Profile";
+            mapping.Fields["CreatedBy"] = "创建人";
+            mapping.Fields["CreatedAt"] = "创建时间";
+            mapping.Fields["UpdatedAt"] = "更新时间";
             mapping.Fields["ApprovedByRole"] = "批准角色";
             mapping.Fields["ExpiresAt"] = "过期时间";
             mapping.Fields["ReviewId"] = "审查ID";
@@ -224,7 +254,7 @@ namespace ConfigSheetForge.Core
                 mapping.Tables[table] = table;
             }
 
-            foreach (var field in new[] { "TableId", "DisplayName", "ExcelPath", "SpreadsheetToken", "SheetId", "Branch", "OwnerRole", "SchemaReviewRequired", "OnlineSheetUrl", "Status" })
+            foreach (var field in new[] { "TableId", "DisplayName", "ExcelPath", "SpreadsheetToken", "SheetId", "Branch", "FeishuBranch", "Profile", "WikiNodeToken", "WikiNodeUrl", "SemanticHash", "OwnerRole", "SchemaReviewRequired", "OnlineSheetUrl", "Status", "GitBranch", "CreatedBy", "CreatedAt", "UpdatedAt", "ApprovedByRole", "ExpiresAt", "ReviewId" })
             {
                 mapping.Fields[field] = field;
             }
@@ -407,7 +437,7 @@ namespace ConfigSheetForge.Core
         public string WikiNodeToken { get; set; } = "";
     }
 
-    public sealed class PreviewLifecyclePlatform : ILifecyclePlatform
+    public sealed class PreviewLifecyclePlatform : ILifecyclePlatform, IBranchWorkspacePlatform
     {
         public Task<RegistrySnapshot> GetRegistrySnapshotAsync(RegistryContract registry, CancellationToken cancellationToken)
         {
@@ -455,6 +485,32 @@ namespace ConfigSheetForge.Core
         public Task<LifecycleActionResult> ApplyRegistryMigrationAsync(RegistryContract registry, RegistryMigrationPlan plan, CancellationToken cancellationToken)
         {
             return Task.FromResult(Action("registry.migration.apply", "planned", "预览：应用注册中心本地化和默认数据清理。"));
+        }
+
+        public Task<BranchWorkspaceResolution> EnsureBranchWorkspaceAsync(BranchWorkspaceContract workspace, BranchWorkspaceResolution planned, CancellationToken cancellationToken)
+        {
+            planned.Status = "planned";
+            if (string.IsNullOrWhiteSpace(planned.WikiNodeToken))
+            {
+                planned.WikiNodeToken = "preview-branch-wiki-node-token";
+            }
+
+            if (string.IsNullOrWhiteSpace(planned.WikiNodeUrl))
+            {
+                planned.WikiNodeUrl = "preview://wiki/" + FirstNonEmpty(planned.NodeTitle, planned.Slug, "branch");
+            }
+
+            return Task.FromResult(planned);
+        }
+
+        public Task<LifecycleActionResult> UpsertBranchBindingAsync(RegistryContract registry, BranchWorkspaceResolution resolution, CancellationToken cancellationToken)
+        {
+            var action = Action("registry.branch_bindings.upsert", "planned", "预览：按 GitBranch + Profile 登记 BranchBindings。");
+            action.Details["recordId"] = "preview-branch-binding-record-id";
+            action.Details["gitBranch"] = resolution.GitBranch;
+            action.Details["profile"] = resolution.Profile;
+            action.Details["wikiNodeToken"] = resolution.WikiNodeToken;
+            return Task.FromResult(action);
         }
 
         private static LifecycleActionResult Action(string action, string status, string message)
@@ -518,7 +574,8 @@ namespace ConfigSheetForge.Core
                     await SeedFromLocalXlsxLifecycle.ExecuteAsync(request, platform, result, cancellationToken).ConfigureAwait(false);
                     break;
                 case "sync-cache":
-                    result.AddAction("sync-cache", request.DryRun ? "planned" : "ready", "sync-cache contract 已解析；实际同步由 provider 执行，并受三方一致性和 hash-gated cache 保护。");
+                case "sync-from-online-sheet":
+                    ApplySyncCachePlan(request, result);
                     break;
                 case "compare-merge":
                     ApplyMergePolicy(request, result);
@@ -571,10 +628,33 @@ namespace ConfigSheetForge.Core
 
         private static async Task NewTableAsync(LifecycleContractRequest request, ILifecyclePlatform platform, LifecycleContractResult result, CancellationToken cancellationToken)
         {
-            ValidateBranchBindings(request, result);
+            var branchWorkspace = BranchWorkspaceResolver.Resolve(request);
+            result.BranchWorkspace = branchWorkspace;
+            BranchWorkspaceResolver.ValidateOneToOne(request, branchWorkspace, result);
+            result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, request.DryRun ? "planned" : "ready", request.DryRun ? "预览：解析当前 Git 分支对应的 Feishu branch/profile 工作区。" : "已解析当前 Git 分支对应的 Feishu branch/profile 工作区。"));
             if (!result.Success)
             {
                 return;
+            }
+
+            if (!request.DryRun)
+            {
+                var branchPlatform = platform as IBranchWorkspacePlatform;
+                if (branchPlatform != null)
+                {
+                    branchWorkspace = await branchPlatform.EnsureBranchWorkspaceAsync(BranchWorkspaceResolver.NormalizeContract(request), branchWorkspace, cancellationToken).ConfigureAwait(false);
+                    result.BranchWorkspace = branchWorkspace;
+                    result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, FirstNonEmpty(branchWorkspace.Status, "done"), "已解析/创建分支工作区节点，新建配表会挂到该节点下。"));
+                    if (!string.IsNullOrWhiteSpace(branchWorkspace.WikiNodeToken))
+                    {
+                        request.Table.WikiRootToken = branchWorkspace.WikiNodeToken;
+                        request.Table.Branch = FirstNonEmpty(branchWorkspace.FeishuBranch, request.Table.Branch);
+                        request.Table.Profile = FirstNonEmpty(branchWorkspace.Profile, request.Table.Profile);
+                        request.Table.WikiNodeUrl = FirstNonEmpty(branchWorkspace.WikiNodeUrl, request.Table.WikiNodeUrl);
+                        var binding = await branchPlatform.UpsertBranchBindingAsync(request.Registry, branchWorkspace, cancellationToken).ConfigureAwait(false);
+                        result.Actions.Add(binding);
+                    }
+                }
             }
 
             var templateRows = BuildExcelToSoTemplateRows(request.Table);
@@ -628,6 +708,15 @@ namespace ConfigSheetForge.Core
 
         private static void ApplyMergePolicy(LifecycleContractRequest request, LifecycleContractResult result)
         {
+            var branchWorkspace = BranchWorkspaceResolver.Resolve(request);
+            result.BranchWorkspace = branchWorkspace;
+            BranchWorkspaceResolver.ValidateOneToOne(request, branchWorkspace, result);
+            result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, "ready", "compare-merge 将按 branch/profile 定位 main/base 与当前分支在线 Sheet。"));
+            if (!result.Success)
+            {
+                return;
+            }
+
             if (request.MergePolicy.LowRisk && !request.MergePolicy.ConfirmWriteMain)
             {
                 result.AddAction("merge.preview", "planned", "低风险合并默认只生成预览。写回 main 前必须显式确认。");
@@ -641,6 +730,38 @@ namespace ConfigSheetForge.Core
             }
 
             result.AddAction("merge.write_main", request.MergePolicy.ConfirmWriteMain ? "ready" : "planned", request.MergePolicy.ConfirmWriteMain ? "已确认写回 main。" : "仅生成合并预览。");
+        }
+
+        private static void ApplySyncCachePlan(LifecycleContractRequest request, LifecycleContractResult result)
+        {
+            var branchWorkspace = BranchWorkspaceResolver.Resolve(request);
+            result.BranchWorkspace = branchWorkspace;
+            BranchWorkspaceResolver.ValidateOneToOne(request, branchWorkspace, result);
+            result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, request.DryRun ? "planned" : "ready", request.DryRun ? "预览：从 BranchBindings 解析当前分支工作区，不写飞书或本地 cache。" : "已解析当前分支工作区。"));
+            if (!result.Success)
+            {
+                return;
+            }
+
+            if (request.BranchBindings.Count == 0 && string.IsNullOrWhiteSpace(branchWorkspace.WikiNodeToken))
+            {
+                result.AddFailure("sync-cache 需要先从 BranchBindings 确认当前 Git 分支 “" + branchWorkspace.GitBranch + "” 对应的 Feishu profile 和 Wiki 节点。请先运行 seed dry-run/apply 建立分支绑定，或在 contract.branchBindings 中提供当前分支记录。");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(branchWorkspace.WikiNodeToken) && request.BranchBindings.Count > 0)
+            {
+                result.AddFailure("当前 Git 分支 “" + branchWorkspace.GitBranch + "” 没有可用 BranchBindings Wiki 节点。请先运行 seed dry-run/apply 创建分支工作区，或修正 BranchBindings。");
+                return;
+            }
+
+            var sync = request.SyncCache ?? new SyncCacheContract();
+            var tableId = FirstNonEmpty(sync.TableId, request.Table.TableId);
+            var scope = string.IsNullOrWhiteSpace(tableId) ? "当前 branch/profile 下所有已登记配表" : "配表 “" + tableId + "”";
+            result.AddAction("sync-cache.online_read", request.DryRun ? "planned" : "ready", (request.DryRun ? "预览：" : "") + "从 ConfigSheets 按 TableId + Branch/Profile 找到在线 Sheet，并回读 " + scope + "。");
+            result.AddAction("sync-cache.export_xlsx", request.DryRun ? "planned" : "ready", (request.DryRun ? "预览：" : "") + "导出在线 Sheet 为 xlsx。");
+            result.AddAction("sync-cache.triangulation_compare", request.DryRun ? "planned" : "ready", (request.DryRun ? "预览：" : "") + "比较 online-read semantic、exported-xlsx semantic 与最新 semantic cache；不一致会阻断。");
+            result.AddAction("sync-cache.cache_hash_gate", request.DryRun ? "planned" : "ready", (request.DryRun ? "预览：" : "") + "semantic hash 无变化时不重写 xlsx/semantic/sha256，保持 mtime。");
         }
 
         private static void ValidateBranchBindings(LifecycleContractRequest request, LifecycleContractResult result)
@@ -1272,6 +1393,7 @@ namespace ConfigSheetForge.Core
         public string GitHead { get; set; } = "";
         public string Branch { get; set; } = "";
         public GatePermissions Permissions { get; set; } = new GatePermissions();
+        public GateReviewState BranchBinding { get; set; } = new GateReviewState();
         public GateReviewState MergeReview { get; set; } = new GateReviewState();
         public GateCheckState PortableSubset { get; set; } = new GateCheckState();
         public GateCheckState Triangulation { get; set; } = new GateCheckState();
@@ -1334,6 +1456,11 @@ namespace ConfigSheetForge.Core
             if (!report.Permissions.CanReadSheets)
             {
                 Add(report, FirstNonEmpty(report.Permissions.SheetsMessage, "当前账号或应用无权读取在线 Sheet。请确认表格权限后重新同步。"));
+            }
+
+            if (!string.IsNullOrWhiteSpace(report.BranchBinding.Status) && !ReviewPassed(report.BranchBinding.Status))
+            {
+                Add(report, FirstNonEmpty(report.BranchBinding.Message, "当前 Git 分支还没有有效的 BranchBindings 记录，或绑定存在冲突。请先运行 seed/sync dry-run 查看分支工作区，并在 BranchBindings 中修正 GitBranch 与 Profile 的一对一关系。"));
             }
 
             if (!ReviewPassed(report.MergeReview.Status))

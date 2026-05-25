@@ -32,6 +32,7 @@ namespace ConfigSheetForge.Core
         public string CacheXlsxPath { get; set; } = "";
         public string SemanticCachePath { get; set; } = "";
         public string HashCachePath { get; set; } = "";
+        public string SemanticHash { get; set; } = "";
         public string ProjectConfigPath { get; set; } = "";
         public string SpreadsheetToken { get; set; } = "";
         public string SpreadsheetUrl { get; set; } = "";
@@ -39,6 +40,9 @@ namespace ConfigSheetForge.Core
         public string SheetName { get; set; } = "";
         public string WikiRootToken { get; set; } = "";
         public string WikiNodeToken { get; set; } = "";
+        public string WikiNodeUrl { get; set; } = "";
+        public string Branch { get; set; } = "";
+        public string Profile { get; set; } = "";
         public string OwnerRole { get; set; } = "";
         public string RegistryRecordId { get; set; } = "";
         public bool SchemaReviewRequired { get; set; } = true;
@@ -65,6 +69,9 @@ namespace ConfigSheetForge.Core
         public string SpreadsheetUrl { get; set; } = "";
         public string SheetId { get; set; } = "";
         public string WikiNodeToken { get; set; } = "";
+        public string WikiNodeUrl { get; set; } = "";
+        public string Branch { get; set; } = "";
+        public string Profile { get; set; } = "";
         public string RegistryRecordId { get; set; } = "";
         public string SchemaReviewId { get; set; } = "";
         public bool SchemaChangeDetected { get; set; }
@@ -142,8 +149,49 @@ namespace ConfigSheetForge.Core
                 return;
             }
 
+            var branchWorkspace = BranchWorkspaceResolver.Resolve(request);
+            result.BranchWorkspace = branchWorkspace;
+            result.Branch = branchWorkspace.GitBranch;
+            BranchWorkspaceResolver.ValidateOneToOne(request, branchWorkspace, result);
+            if (!result.Success)
+            {
+                return;
+            }
+
+            if (request.DryRun)
+            {
+                result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, "planned", "预览：seed 会先使用/创建分支工作区节点，再把在线 Sheet 挂到该节点下。"));
+            }
+            else
+            {
+                var branchPlatform = platform as IBranchWorkspacePlatform;
+                if (branchPlatform == null)
+                {
+                    result.AddFailure("seed-from-local-xlsx apply 需要平台支持 Branch Workspace Resolver，避免把在线 Sheet 直接挂到 Wiki 根节点。");
+                    return;
+                }
+
+                branchWorkspace = await branchPlatform.EnsureBranchWorkspaceAsync(BranchWorkspaceResolver.NormalizeContract(request), branchWorkspace, cancellationToken).ConfigureAwait(false);
+                result.BranchWorkspace = branchWorkspace;
+                result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, FirstNonEmpty(branchWorkspace.Status, "done"), "已解析/创建分支工作区节点，后续 Sheet 会挂到该节点下。"));
+                if (string.IsNullOrWhiteSpace(branchWorkspace.WikiNodeToken))
+                {
+                    result.AddFailure("无法定位或创建分支工作区节点 “" + branchWorkspace.NodeTitle + "”。请检查 bot 的 wiki:node:create / wiki:node:retrieve 权限，以及根节点 “" + branchWorkspace.RootWikiTitle + "” 的共享权限。");
+                    return;
+                }
+
+                var binding = await branchPlatform.UpsertBranchBindingAsync(request.Registry, branchWorkspace, cancellationToken).ConfigureAwait(false);
+                result.Actions.Add(binding);
+                if (binding.Status == "failed")
+                {
+                    result.AddFailure(binding.Message);
+                    return;
+                }
+            }
+
             foreach (var table in tables)
             {
+                ApplyBranchWorkspace(seed, table, branchWorkspace);
                 await ExecuteTableAsync(request, seedPlatform, seed, table, result, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -183,6 +231,9 @@ namespace ConfigSheetForge.Core
                 Status = "running",
                 SourceXlsxPath = table.SourceXlsxPath
             };
+            tableResult.Branch = table.Branch;
+            tableResult.Profile = table.Profile;
+            tableResult.WikiNodeUrl = table.WikiNodeUrl;
             result.SeedTables.Add(tableResult);
 
             Add(tableResult, result, "seed.portable_preflight", request.DryRun ? "planned" : "running", "检查本地 xlsx 是否只包含可稳定迁移的便携内容。");
@@ -202,6 +253,7 @@ namespace ConfigSheetForge.Core
             AddFindings(tableResult, result, table, portable.Findings);
 
             tableResult.SemanticHash = FirstNonEmpty(local.SemanticHash, SemanticHasher.ComputeHash(local.Workbook));
+            table.SemanticHash = tableResult.SemanticHash;
             tableResult.SchemaChangeDetected = DetectSchemaChange(local.Workbook, table.Fields);
             Add(tableResult, result, "seed.local_xlsx.normalize", structure.HasErrors || portable.HasErrors || HasErrors(local.Findings) ? "blocked" : "done", "已把本地 xlsx 归一化为 semantic workbook，hash=" + tableResult.SemanticHash + "。");
 
@@ -233,6 +285,7 @@ namespace ConfigSheetForge.Core
             tableResult.SpreadsheetUrl = online.SpreadsheetUrl;
             tableResult.SheetId = online.SheetId;
             tableResult.WikiNodeToken = online.WikiNodeToken;
+            tableResult.WikiNodeUrl = table.WikiNodeUrl;
             tableResult.ImportMode = online.ImportMode;
             tableResult.CapabilityDifference = online.CapabilityDifference;
             var createStatus = online.Reused ? "reused" : online.Created ? "done" : "ready";
@@ -250,7 +303,10 @@ namespace ConfigSheetForge.Core
                 return;
             }
 
-            Add(tableResult, result, "seed.wiki.link", string.IsNullOrWhiteSpace(online.WikiNodeToken) ? "ready" : "done", "在线 Sheet 已按配置挂接到 Wiki/root；若 provider 只返回 Sheet token，请在详情中核对位置。");
+            var linkAction = Add(tableResult, result, "seed.wiki.link", string.IsNullOrWhiteSpace(online.WikiNodeToken) ? "ready" : "done", "在线 Sheet 已按配置挂接到分支工作区节点 “" + FirstNonEmpty(result.BranchWorkspace.NodeTitle, seed.WikiParentTitle, "项目配置表") + "”。");
+            linkAction.Details["branchNodeTitle"] = result.BranchWorkspace.NodeTitle;
+            linkAction.Details["branchWikiNodeToken"] = result.BranchWorkspace.WikiNodeToken;
+            linkAction.Details["branchWikiNodeUrl"] = result.BranchWorkspace.WikiNodeUrl;
 
             var roundTrip = await platform.ReadAndExportOnlineSheetAsync(seed, table, online, cancellationToken).ConfigureAwait(false);
             AddFindings(tableResult, result, table, roundTrip.Findings);
@@ -348,13 +404,18 @@ namespace ConfigSheetForge.Core
         private static void AddDryRunOrBlockedPlan(LifecycleContractRequest request, SeedFromLocalXlsxContract seed, SeedTableContract table, SeedTableLifecycleResult tableResult, LifecycleContractResult result)
         {
             Add(tableResult, result, "seed.sheet.import_or_create", "planned", "预览：创建或导入飞书在线 Sheet；优先 drive import xlsx，失败时可 fallback 到 sheets create + values write，并记录能力差异。");
-            Add(tableResult, result, "seed.wiki.link", "planned", "预览：把在线 Sheet 放到指定 Wiki/root 下的 “" + FirstNonEmpty(seed.WikiParentTitle, "项目配置表") + "”。");
+            var wiki = Add(tableResult, result, "seed.wiki.link", "planned", "预览：把在线 Sheet 放到分支工作区 “" + FirstNonEmpty(result.BranchWorkspace.RootWikiTitle, seed.WikiParentTitle, "项目配置表") + "/" + FirstNonEmpty(result.BranchWorkspace.NodeTitle, "main") + "”。");
+            wiki.Details["branchNodeTitle"] = result.BranchWorkspace.NodeTitle;
+            wiki.Details["branchWikiNodeToken"] = result.BranchWorkspace.WikiNodeToken;
+            wiki.Details["branchWikiNodeUrl"] = result.BranchWorkspace.WikiNodeUrl;
+            wiki.Details["gitBranch"] = result.BranchWorkspace.GitBranch;
+            wiki.Details["profile"] = result.BranchWorkspace.Profile;
             Add(tableResult, result, "seed.online_read", "planned", "预览：导入后必须在线回读 Sheet。");
             Add(tableResult, result, "seed.export_xlsx", "planned", "预览：导出在线 Sheet 为 xlsx，供三方比较使用。");
             Add(tableResult, result, "seed.triangulation_compare", "planned", "预览：比较 local xlsx semantic、online-read semantic、exported-xlsx semantic；任一不一致都会阻断写入。");
             Add(tableResult, result, "seed.cache.write_preview", "planned", "预览：三方一致后才写 .config-sheet-forge/excel-cache、semantic.json 和 sha256；hash 相同不改 mtime。");
-            Add(tableResult, result, "seed.project_config.preview", "planned", "预览：回填 ProjectSettings/*ConfigSheetForge*.json 中的 spreadsheetToken、sheetId 和 url。");
-            Add(tableResult, result, "seed.registry.config_sheets.preview", "planned", "预览：按 TableId upsert Base ConfigSheets，忽略空白默认行，不依赖行顺序。");
+            Add(tableResult, result, "seed.project_config.preview", "planned", "预览：回填 ProjectSettings/*ConfigSheetForge*.json 中当前 branch/profile 对应的 spreadsheetToken、sheetId、url、wikiNodeToken。");
+            Add(tableResult, result, "seed.registry.config_sheets.preview", "planned", "预览：按 TableId + Branch/Profile upsert Base ConfigSheets，忽略空白默认行，不依赖行顺序。");
             Add(tableResult, result, "seed.registry.schema_reviews.preview", "planned", "预览：创建 baseline/pending SchemaReviews 记录；schemaChangeDetected=" + tableResult.SchemaChangeDetected.ToString().ToLowerInvariant() + "。");
             Add(tableResult, result, "seed.unity.excel_to_so.preview", "planned", "预览：只追加/更新目标表的 ExcelToSO JSON/YAML settings；apply 需要显式确认。");
         }
@@ -369,6 +430,7 @@ namespace ConfigSheetForge.Core
                 CacheXlsxPath = FirstNonEmpty(table.CacheXlsxPath, table.LocalCachePath),
                 SemanticCachePath = table.SemanticCachePath,
                 HashCachePath = table.HashCachePath,
+                SemanticHash = table.SemanticHash,
                 ProjectConfigPath = table.ProjectConfigPath,
                 SpreadsheetToken = table.SpreadsheetToken,
                 SpreadsheetUrl = table.SpreadsheetUrl,
@@ -376,6 +438,9 @@ namespace ConfigSheetForge.Core
                 SheetName = table.SheetName,
                 WikiRootToken = table.WikiRootToken,
                 WikiNodeToken = table.WikiNodeToken,
+                WikiNodeUrl = table.WikiNodeUrl,
+                Branch = table.Branch,
+                Profile = table.Profile,
                 OwnerRole = table.OwnerRole,
                 RegistryRecordId = table.RegistryRecordId,
                 SchemaReviewRequired = table.SchemaReviewRequired,
@@ -419,6 +484,22 @@ namespace ConfigSheetForge.Core
                     }
                 }
             }
+        }
+
+        private static void ApplyBranchWorkspace(SeedFromLocalXlsxContract seed, SeedTableContract table, BranchWorkspaceResolution branchWorkspace)
+        {
+            if (branchWorkspace == null)
+            {
+                return;
+            }
+
+            seed.WikiRootToken = FirstNonEmpty(branchWorkspace.WikiNodeToken, seed.WikiRootToken);
+            seed.WikiParentTitle = FirstNonEmpty(branchWorkspace.NodeTitle, seed.WikiParentTitle);
+            table.WikiRootToken = FirstNonEmpty(branchWorkspace.WikiNodeToken, table.WikiRootToken, seed.WikiRootToken);
+            table.WikiNodeUrl = FirstNonEmpty(branchWorkspace.WikiNodeUrl, table.WikiNodeUrl);
+            table.Branch = FirstNonEmpty(branchWorkspace.FeishuBranch, table.Branch);
+            table.Profile = FirstNonEmpty(branchWorkspace.Profile, table.Profile);
+            table.OwnerRole = FirstNonEmpty(table.OwnerRole, branchWorkspace.OwnerRole);
         }
 
         private static bool DetectSchemaChange(WorkbookDocument workbook, IList<ContractFieldSpec> expectedFields)

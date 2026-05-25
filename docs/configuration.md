@@ -84,11 +84,68 @@ Config Sheet Forge 有两个本地文件：
   "excelCacheDirectory": ".config-sheet-forge/excel-cache",
   "semanticCacheDirectory": ".config-sheet-forge/cache",
   "wikiRootToken": "",
-  "baseToken": ""
+  "baseToken": "",
+  "branchWorkspace": {
+    "rootWikiToken": "",
+    "rootWikiTitle": "项目配置表",
+    "gitBranch": "codex/config-sheet-seed-feishu-main",
+    "profileNameTemplate": "{gitBranch}",
+    "branchNodeTitleTemplate": "branch-{slug}",
+    "mainGitBranch": "main",
+    "mainFeishuBranch": "main",
+    "createIfMissing": true,
+    "requireOneToOneBinding": true,
+    "bindingRegistryTable": "BranchBindings"
+  }
 }
 ```
 
 已有 `spreadsheetToken`/`spreadsheetUrl`/`sheetId` 时，seed apply 会先验证并复用在线 Sheet，不会创建重复表。dry-run 输出和 apply result 都包含 `seedTables`，可作为 Unity 窗口展示和失败后 resume 的依据。
+
+`excelPath` 在项目配置里通常表示本地 cache 或 ExcelToSO 使用路径，`seed-from-xlsx --all --manifest` 不会把它当成旧源 xlsx。旧 Excel 源必须显式写在 `sourceXlsxPath`、`sourceXlsx`、`oldExcelPath` 或 `localSourcePath`。
+
+## Branch Workspace
+
+branch/profile 工作区用于避免不同 git 分支把在线 Sheet 都挂到 Wiki 根节点。推荐由项目配置或 contract 提供：
+
+```json
+{
+  "branchWorkspace": {
+    "mode": "git-branch-to-feishu-branch-profile",
+    "rootWikiToken": "<项目配置表 wiki token>",
+    "rootWikiTitle": "项目配置表",
+    "gitBranch": "feature/config-balance",
+    "feishuBranch": "",
+    "profile": "",
+    "mainGitBranch": "main",
+    "mainFeishuBranch": "main",
+    "profileNameTemplate": "{gitBranch}",
+    "branchNodeTitleTemplate": "branch-{slug}",
+    "mainNodeTitle": "main",
+    "createIfMissing": true,
+    "requireOneToOneBinding": true,
+    "bindingRegistryTable": "BranchBindings"
+  },
+  "branchBindings": [
+    {
+      "gitBranch": "feature/config-balance",
+      "profile": "feature/config-balance",
+      "wikiNodeToken": "wik...",
+      "wikiNodeUrl": "https://...",
+      "status": "active"
+    }
+  ]
+}
+```
+
+非 main 分支会使用稳定 slug，例如 `feature/config-balance` -> `branch-feature-config-balance`。`requireOneToOneBinding=true` 时，同一 Git 分支不能对应多个 profile，同一 profile 不能被多个 Git 分支复用；冲突会阻断 lifecycle，并给出中文修复建议。
+
+Base 注册中心建议包含这些字段：
+
+- `BranchBindings`：`GitBranch`、`FeishuBranch`、`Profile`、`WikiNodeToken`、`WikiNodeUrl`、`Status`、`CreatedBy`、`OwnerRole`、`UpdatedAt`。
+- `ConfigSheets`：`TableId`、`DisplayName`、`Branch`/`Profile`、`WikiNodeToken`、`SpreadsheetToken`、`SheetId`、`OnlineSheetUrl`、`ExcelPath`、`SemanticHash`、`Status`、`OwnerRole`、`SchemaReviewRequired`、`UpdatedAt`。
+
+`registry-migrate` 会补齐这些 machine key 对应的中文字段显示名，并保留已有数据。
 
 ## lark-cli 路径
 
