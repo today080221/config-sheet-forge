@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.5
+
+- 修复 lark-cli 1.0.40 `base +table-list` 不支持 `--format` 的 argv 兼容问题。
+- `registry-migrate` registry snapshot 加载不再给 `table-list` / `field-list` 传 `--format json`；`record-list` 仍显式使用 `--format json`。
+- 新增 fake lark-cli CLI smoke，验证 `table-list` / `field-list` 无 `--format` 也能解析默认 JSON，并继续列出重复 BranchBindings record_id。
+
 ## 0.4.4
 
 - 修复 lark-cli 1.0.40 `base +table-list --format json` 的 `data.tables[].id/name` 解析，registry snapshot 不再因缺少 `table_id` 为空。
