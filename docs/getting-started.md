@@ -63,12 +63,29 @@ config-sheet-forge sync --table items --details
 config-sheet-forge gate --details --annotations github
 ```
 
+## 从旧本地 xlsx seed
+
+如果项目已经有 ExcelToSO xlsx，可以先做 dry-run：
+
+```bash
+config-sheet-forge seed-from-xlsx --table ItemsData --source-xlsx "Assets/Config/ItemsData.xlsx" --dry-run --out Temp/ConfigSheetForge/seed.result.json
+config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.ConfigSheetForge.json" --dry-run --out Temp/ConfigSheetForge/seed.result.json
+```
+
+dry-run 会检查公式、图片、合并单元格、富文本、跨表/跨工作簿引用、@人/@文档、日期对象、错误单元格和不支持结构，并输出每张表的 planned actions。它不会写飞书、不会改 cache、不会改 ProjectSettings。
+
+apply 模式会在本地 xlsx、在线回读、在线导出 xlsx 三方语义一致后，才写 `.config-sheet-forge/excel-cache/<TableId>.xlsx`、`.config-sheet-forge/cache/<TableId>.semantic.json`、`.sha256`、项目配置和 Base 注册中心。执行 apply 必须显式确认：
+
+```bash
+config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.ConfigSheetForge.json" --yes --confirm-excel-to-so
+```
+
 ## Unity
 
 通过 Unity Package Manager 安装：
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.2.0
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.3.0
 ```
 
 打开 `Tools > Config Sheet Forge`。Unity 窗口会使用同一份共享 core 做本地检查，provider 访问仍交给已安装的 CLI。

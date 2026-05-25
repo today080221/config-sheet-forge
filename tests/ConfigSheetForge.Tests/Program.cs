@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.IO.Compression;
 using ConfigSheetForge.Core;
 using ConfigSheetForge.Cli;
 using ConfigSheetForge.Providers.Lark;
@@ -21,12 +22,16 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
     ("excel to so updater appends json settings", () => RunSync(ExcelToSoUpdaterAppendsJsonSettings)),
+    ("excel to so updater updates existing json settings", () => RunSync(ExcelToSoUpdaterUpdatesExistingJsonSettings)),
     ("project config probe reads lifecycle summary", () => RunSync(ProjectConfigProbeReadsLifecycleSummary)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
+    ("seed dry-run plans xlsx migration without writes", SeedDryRunPlansXlsxMigrationWithoutWrites),
+    ("seed dry-run blocks merged xlsx cells", SeedDryRunBlocksMergedCells),
     ("portable subset blocks unsupported structures", () => RunSync(PortableSubsetBlocksUnsupportedStructures)),
     ("triangulation passes and fails with readable diffs", () => RunSync(TriangulationPassesAndFailsWithReadableDiffs)),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
+    ("seed lifecycle rejects user fallback", SeedLifecycleRejectsUserFallback),
     ("gate report evaluator reports human failures", () => RunSync(GateReportEvaluatorReportsHumanFailures)),
     ("powershell json safety flags inline json params", () => RunSync(PowerShellJsonSafetyFlagsInlineJsonParams)),
     ("gate can print github annotations", GateCanPrintGitHubAnnotations)
@@ -321,6 +326,23 @@ static void ExcelToSoUpdaterAppendsJsonSettings()
     AssertTrue(updated.IndexOf("SkillsData", StringComparison.Ordinal) < updated.IndexOf("MonsterData", StringComparison.Ordinal), "Existing entry should not be reordered after the new entry.");
 }
 
+static void ExcelToSoUpdaterUpdatesExistingJsonSettings()
+{
+    var json = "{\n  \"configs\": [\n    { \"tableId\": \"SkillsData\", \"excelPath\": \"Excel/SkillsData.xlsx\", \"scriptableObjectType\": \"OldType\" },\n    { \"tableId\": \"RoomData\", \"excelPath\": \"Excel/RoomData.xlsx\" }\n  ]\n}\n";
+    var updated = UnityExcelToSoSettingsUpdater.UpsertText(json, new UnityExcelToSoEntry
+    {
+        TableId = "SkillsData",
+        ExcelPath = ".config-sheet-forge/excel-cache/SkillsData.xlsx",
+        ScriptableObjectType = "SkillConfig"
+    });
+
+    AssertTrue(updated.Contains("\"tableId\": \"SkillsData\""), "Existing target entry should stay.");
+    AssertTrue(updated.Contains(".config-sheet-forge/excel-cache/SkillsData.xlsx"), "Existing target entry should update its xlsx path.");
+    AssertTrue(updated.Contains("\"scriptableObjectType\": \"SkillConfig\""), "Existing target entry should update metadata.");
+    AssertTrue(updated.Contains("\"tableId\": \"RoomData\""), "Unrelated entries should stay.");
+    AssertTrue(updated.IndexOf("SkillsData", StringComparison.Ordinal) < updated.IndexOf("RoomData", StringComparison.Ordinal), "Updater should not reorder unrelated entries.");
+}
+
 static void ProjectConfigProbeReadsLifecycleSummary()
 {
     var json = """
@@ -399,6 +421,68 @@ static async Task ApplyContractPrGateReportWritesStandardReport()
         if (Directory.Exists(root))
         {
             Directory.Delete(root, true);
+        }
+    }
+}
+
+static async Task SeedDryRunPlansXlsxMigrationWithoutWrites()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-seed-dry-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        var xlsx = Path.Combine(root, "ItemsData.xlsx");
+        CreateMinimalXlsx(xlsx, withMergedCells: false);
+        var resultPath = Path.Combine(root, "seed.result.json");
+
+        Directory.SetCurrentDirectory(root);
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "seed-from-xlsx", "--table", "ItemsData", "--source-xlsx", xlsx, "--dry-run", "--out", resultPath });
+
+        AssertEqual("0", exitCode.ToString(), "Seed dry-run should pass for a simple portable xlsx.");
+        var resultJson = File.ReadAllText(resultPath);
+        AssertTrue(resultJson.Contains("\"seedTables\""), "Result should expose per-table seed results for Unity.");
+        AssertTrue(resultJson.Contains("seed.sheet.import_or_create"), "Dry-run should plan online sheet create/import.");
+        AssertTrue(resultJson.Contains("seed.cache.write_preview"), "Dry-run should plan cache write preview.");
+        AssertTrue(!Directory.Exists(Path.Combine(root, ".config-sheet-forge", "cache")), "Dry-run must not write semantic cache.");
+        AssertTrue(!Directory.Exists(Path.Combine(root, ".config-sheet-forge", "excel-cache")), "Dry-run must not write xlsx cache.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task SeedDryRunBlocksMergedCells()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-seed-merge-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        var xlsx = Path.Combine(root, "SkillsData.xlsx");
+        CreateMinimalXlsx(xlsx, withMergedCells: true);
+        var resultPath = Path.Combine(root, "seed.result.json");
+
+        Directory.SetCurrentDirectory(root);
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "seed-from-xlsx", "--table", "SkillsData", "--source-xlsx", xlsx, "--dry-run", "--out", resultPath });
+
+        AssertEqual("1", exitCode.ToString(), "Merged cells should block seed dry-run.");
+        var resultJson = File.ReadAllText(resultPath);
+        AssertTrue(resultJson.Contains("B2:C2"), "Failure should include the merged range.");
+        AssertTrue(resultJson.Contains("请取消合并"), "Failure should include a human-readable repair suggestion.");
+        AssertTrue(!Directory.Exists(Path.Combine(root, ".config-sheet-forge", "cache")), "Blocked dry-run must not write semantic cache.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
         }
     }
 }
@@ -514,6 +598,29 @@ static async Task StrictBotModeDoesNotFallbackToUser()
     finally
     {
         Directory.Delete(temp, recursive: true);
+    }
+}
+
+static async Task SeedLifecycleRejectsUserFallback()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-seed-strict-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(temp);
+        var xlsx = Path.Combine(temp, "ItemsData.xlsx");
+        CreateMinimalXlsx(xlsx, withMergedCells: false);
+        Directory.SetCurrentDirectory(temp);
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "seed-from-xlsx", "--table", "ItemsData", "--source-xlsx", xlsx, "--dry-run", "--allow-user-fallback" });
+        AssertEqual("2", exitCode.ToString(), "Seed lifecycle should reject user fallback even when explicitly requested.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
     }
 }
 
@@ -667,6 +774,68 @@ static WorkbookDocument SampleWorkbook()
     sheet.Rows.Add(row2);
     workbook.Sheets.Add(sheet);
     return workbook;
+}
+
+static void CreateMinimalXlsx(string path, bool withMergedCells)
+{
+    using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+    AddZipText(archive, "[Content_Types].xml",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+          <Default Extension="xml" ContentType="application/xml"/>
+          <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+          <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+        </Types>
+        """);
+    AddZipText(archive, "_rels/.rels",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+        </Relationships>
+        """);
+    AddZipText(archive, "xl/workbook.xml",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <sheets>
+            <sheet name="Data" sheetId="1" r:id="rId1"/>
+          </sheets>
+        </workbook>
+        """);
+    AddZipText(archive, "xl/_rels/workbook.xml.rels",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+        </Relationships>
+        """);
+
+    var merge = withMergedCells ? "<mergeCells count=\"1\"><mergeCell ref=\"B2:C2\"/></mergeCells>" : "";
+    AddZipText(archive, "xl/worksheets/sheet1.xml",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <sheetData>
+            <row r="1">
+              <c r="A1" t="inlineStr"><is><t>id</t></is></c>
+              <c r="B1" t="inlineStr"><is><t>name</t></is></c>
+            </row>
+            <row r="2">
+              <c r="A2" t="inlineStr"><is><t>item_001</t></is></c>
+              <c r="B2" t="inlineStr"><is><t>Sword</t></is></c>
+            </row>
+          </sheetData>
+        """ + merge + "</worksheet>");
+}
+
+static void AddZipText(ZipArchive archive, string path, string text)
+{
+    var entry = archive.CreateEntry(path);
+    using var writer = new StreamWriter(entry.Open());
+    writer.Write(text.Trim());
 }
 
 static void AssertTrue(bool condition, string message)

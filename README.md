@@ -30,6 +30,15 @@ dotnet run --project src/cli/ConfigSheetForge.Cli -- gate --annotations github
 
 `sync` 会先导出到临时目录，完成 portable subset 检查和在线读取 / xlsx 导出 / 语义归一化三方一致性比较后，才更新正式 cache。semantic hash 没变时不会重写 `.xlsx`、`.semantic.json` 或 `.sha256`。
 
+一次性迁移旧 ExcelToSO xlsx 到在线 Sheet Source of Truth：
+
+```bash
+dotnet run --project src/cli/ConfigSheetForge.Cli -- seed-from-xlsx --table ItemsData --source-xlsx "Assets/Config/ItemsData.xlsx" --dry-run
+dotnet run --project src/cli/ConfigSheetForge.Cli -- seed-from-xlsx --all --manifest "ProjectSettings/Example.ConfigSheetForge.json" --dry-run
+```
+
+`seed-from-xlsx` 的 dry-run 会读取本地 xlsx 做便携子集预检和 semantic normalize，但不会写飞书、不会改本地 cache、不会改 ProjectSettings。apply 模式必须显式传 `--yes`；如果要更新 ExcelToSO settings，还必须传 `--confirm-excel-to-so`。
+
 ## Contract lifecycle
 
 项目 adapter 可以用 JSON contract 调通用生命周期入口：
@@ -39,7 +48,7 @@ dotnet run --project src/cli/ConfigSheetForge.Cli -- apply-contract --request co
 dotnet run --project src/cli/ConfigSheetForge.Cli -- registry-migrate --base "<base-token>" --locale zh-Hans --cleanup-default-rows --cleanup-default-fields --dry-run
 ```
 
-core 支持 `bootstrap-registry`、`new-table`、`sync-cache`、`compare-merge`、`pr-gate-report` 这些 operation。Base 和字段会保留 machine key 到中文显示名的映射，程序逻辑不依赖中文字段名。
+core 支持 `bootstrap-registry`、`new-table`、`seed-from-local-xlsx`、`bootstrap-from-local-xlsx`、`sync-cache`、`compare-merge`、`pr-gate-report` 这些 operation。Base 和字段会保留 machine key 到中文显示名的映射，程序逻辑不依赖中文字段名。
 
 ## Unity UPM 安装
 

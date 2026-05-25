@@ -37,6 +37,8 @@ namespace ConfigSheetForge.Unity.Editor
         private string _mergedPath = "merged.semantic.json";
         private bool _writeBackToMain;
         private bool _confirmWriteMain;
+        private bool _confirmSeedApply;
+        private bool _confirmSeedExcelToSo;
         private string _output = "";
         private string _lastCommand = "";
         private int _selectedTab;
@@ -59,6 +61,12 @@ namespace ConfigSheetForge.Unity.Editor
 
         [MenuItem("Tools/Config Sheet Forge/新建配表向导")]
         public static void OpenNewTableWizard()
+        {
+            OpenTab(TablesTab);
+        }
+
+        [MenuItem("Tools/Config Sheet Forge/本地 Excel Seed")]
+        public static void OpenSeedFromLocalXlsx()
         {
             OpenTab(TablesTab);
         }
@@ -236,6 +244,7 @@ namespace ConfigSheetForge.Unity.Editor
                     "new-table",
                     dryRun: true,
                     includeNewTableSteps: true);
+                DrawProjectSeedCard();
                 return;
             }
 
@@ -418,6 +427,39 @@ namespace ConfigSheetForge.Unity.Editor
                 EditorGUILayout.EndHorizontal();
             }
 
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawProjectSeedCard()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("本地 Excel 一次性 Seed", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("把已有 ExcelToSO xlsx 迁移成飞书在线 Sheet Source of Truth。dry-run 只做本地预检和计划展示；apply 会创建/复用在线 Sheet，并在三方一致后回填 cache、项目配置、Base 和 ExcelToSO settings。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.HelpBox("打开窗口不会自动 seed、不会下载、不会改文件。apply 需要下面两个确认勾选，并且还会弹出确认框。", MessageType.Warning);
+            _confirmSeedApply = EditorGUILayout.Toggle(new GUIContent("确认执行 seed apply", "允许创建/复用在线 Sheet，并回填本地/Base 状态。"), _confirmSeedApply);
+            _confirmSeedExcelToSo = EditorGUILayout.Toggle(new GUIContent("确认更新 ExcelToSO settings", "允许只追加/更新目标表的 ExcelToSO JSON/YAML settings。"), _confirmSeedExcelToSo);
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button(new GUIContent("生成 seed dry-run", "生成 seed-from-local-xlsx contract 并运行 dry-run，不写飞书、不改本地文件。"), GUILayout.Height(28)))
+            {
+                RunProjectLifecycle("seed-from-local-xlsx", dryRun: true);
+            }
+
+            GUI.enabled = _confirmSeedApply && _confirmSeedExcelToSo;
+            if (GUILayout.Button(new GUIContent("执行 seed apply", "危险操作：必须先 dry-run 通过，再显式确认。"), GUILayout.Height(28)))
+            {
+                if (EditorUtility.DisplayDialog("确认 seed apply", "将把本地 xlsx 迁移到在线 Sheet，并在三方一致后回填 cache、项目配置、Base 和 ExcelToSO settings。请确认 dry-run 已通过。", "确认执行", "取消"))
+                {
+                    RunProjectLifecycle("seed-from-local-xlsx", dryRun: false);
+                }
+            }
+            GUI.enabled = true;
+
+            if (GUILayout.Button(new GUIContent("复制 adapter 命令", "复制 seed-from-local-xlsx adapter 命令。"), GUILayout.Width(128), GUILayout.Height(28)))
+            {
+                CopyProjectLifecycleAdapterCommand("seed-from-local-xlsx", dryRun: true);
+            }
+            EditorGUILayout.EndHorizontal();
             EditorGUILayout.EndVertical();
         }
 
@@ -675,6 +717,19 @@ namespace ConfigSheetForge.Unity.Editor
                 args.Add("--report");
                 args.Add(finalGateReportPath);
             }
+            else if (string.Equals(operation, "seed-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                if (_confirmSeedApply)
+                {
+                    args.Add("--yes");
+                }
+
+                if (_confirmSeedExcelToSo)
+                {
+                    args.Add("--confirm-excel-to-so");
+                }
+            }
 
             return args.ToArray();
         }
@@ -705,6 +760,8 @@ namespace ConfigSheetForge.Unity.Editor
             AppendJsonProperty(builder, "mergedPath", _mergedPath, comma: true);
             AppendJsonProperty(builder, "writeBackToMain", _writeBackToMain, comma: true);
             AppendJsonProperty(builder, "confirmWriteMain", _writeBackToMain && _confirmWriteMain, comma: true);
+            AppendJsonProperty(builder, "confirmApply", _confirmSeedApply, comma: true);
+            AppendJsonProperty(builder, "confirmExcelToSoSettingsUpdate", _confirmSeedExcelToSo, comma: true);
             AppendJsonProperty(builder, "gateReportPath", finalGateReportPath, comma: true);
             builder.AppendLine("  \"fields\": [");
             var fields = ParseFieldsText();
@@ -968,6 +1025,11 @@ namespace ConfigSheetForge.Unity.Editor
         public static void OpenNewTableWizard()
         {
             ConfigSheetForgeWindow.OpenNewTableWizard();
+        }
+
+        public static void OpenSeedFromLocalXlsx()
+        {
+            ConfigSheetForgeWindow.OpenSeedFromLocalXlsx();
         }
 
         public static void OpenCompareMerge()

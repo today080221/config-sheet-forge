@@ -62,6 +62,34 @@ Config Sheet Forge 有两个本地文件：
 
 `fieldRow`、`typeRow`、`descriptionRow`、`dataStartRow` 都是从 0 开始的行号。`typeRow = -1` 表示没有显式类型行，此时会保守自动推断。
 
+## seed-from-xlsx manifest 字段
+
+`seed-from-xlsx --all --manifest <project-config-or-contract>` 可以读取项目配置或 lifecycle contract。项目配置里的表对象建议至少提供：
+
+```json
+{
+  "tables": [
+    {
+      "id": "ItemsData",
+      "displayName": "道具表",
+      "sourceXlsxPath": "Assets/ExcelToSO/ItemsData.xlsx",
+      "cacheXlsxPath": ".config-sheet-forge/excel-cache/ItemsData.xlsx",
+      "sheetName": "Items",
+      "fieldRow": 0,
+      "typeRow": 1,
+      "descriptionRow": 2,
+      "dataStartRow": 3
+    }
+  ],
+  "excelCacheDirectory": ".config-sheet-forge/excel-cache",
+  "semanticCacheDirectory": ".config-sheet-forge/cache",
+  "wikiRootToken": "",
+  "baseToken": ""
+}
+```
+
+已有 `spreadsheetToken`/`spreadsheetUrl`/`sheetId` 时，seed apply 会先验证并复用在线 Sheet，不会创建重复表。dry-run 输出和 apply result 都包含 `seedTables`，可作为 Unity 窗口展示和失败后 resume 的依据。
+
 ## lark-cli 路径
 
 默认使用环境中的 `lark-cli`。如果安装在非标准位置，可设置：

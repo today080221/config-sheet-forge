@@ -287,23 +287,32 @@ namespace ConfigSheetForge.Core
                 return result;
             }
 
-            using (var archive = ZipFile.OpenRead(path))
+            try
             {
-                var sharedStrings = ReadSharedStrings(archive, result.Report);
-                var workbook = ReadWorkbookSheets(archive);
-                if (workbook.Count == 0)
+                using (var archive = ZipFile.OpenRead(path))
                 {
-                    workbook.Add(new XlsxSheetInfo { Name = FirstNonEmpty(options.SheetName, options.SheetId, "Sheet1"), Path = "xl/worksheets/sheet1.xml" });
-                }
+                    var sharedStrings = ReadSharedStrings(archive, result.Report);
+                    var workbook = ReadWorkbookSheets(archive);
+                    if (workbook.Count == 0)
+                    {
+                        workbook.Add(new XlsxSheetInfo { Name = FirstNonEmpty(options.SheetName, options.SheetId, "Sheet1"), Path = "xl/worksheets/sheet1.xml" });
+                    }
 
-                var target = ResolveSheet(workbook, options);
-                var matrix = ReadWorksheetMatrix(archive, target, sharedStrings, result.Report);
-                var import = MatrixWorkbookImporter.Import(matrix.Cast<IList<string>>().ToList(), options);
-                result.Workbook = import.Workbook;
-                foreach (var finding in import.Report.Findings)
-                {
-                    result.Report.Findings.Add(finding);
+                    var target = ResolveSheet(workbook, options);
+                    var matrix = ReadWorksheetMatrix(archive, target, sharedStrings, result.Report);
+                    var import = MatrixWorkbookImporter.Import(matrix.Cast<IList<string>>().ToList(), options);
+                    result.Workbook = import.Workbook;
+                    foreach (var finding in import.Report.Findings)
+                    {
+                        result.Report.Findings.Add(finding);
+                    }
                 }
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is InvalidDataException)
+            {
+                result.Report.Add(FindingSeverity.Error, "xlsx.read_failed", "无法读取 xlsx 文件。它可能正被 Excel、Unity 或同步工具占用；请关闭占用后重试。", path)
+                    .Details["error"] = ex.Message;
+                result.Workbook = MatrixWorkbookImporter.Import(new List<IList<string>>(), options).Workbook;
             }
 
             return result;
@@ -318,20 +327,53 @@ namespace ConfigSheetForge.Core
                 return report;
             }
 
-            using (var archive = ZipFile.OpenRead(path))
+            try
             {
-                var sharedStrings = ReadSharedStrings(archive, report);
-                var workbook = ReadWorkbookSheets(archive);
-                foreach (var sheet in workbook)
+                using (var archive = ZipFile.OpenRead(path))
                 {
-                    InspectWorksheet(archive, sheet, sharedStrings, report, FirstNonEmpty(tableName, sheet.Name));
+                    InspectWorkbookLevelStructures(archive, report, tableName);
+                    var sharedStrings = ReadSharedStrings(archive, report);
+                    var dateStyleIndexes = ReadDateStyleIndexes(archive);
+                    var workbook = ReadWorkbookSheets(archive);
+                    foreach (var sheet in workbook)
+                    {
+                        InspectWorksheet(archive, sheet, sharedStrings, dateStyleIndexes, report, FirstNonEmpty(tableName, sheet.Name));
+                    }
                 }
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is InvalidDataException)
+            {
+                report.Add(FindingSeverity.Error, "xlsx.read_failed", "无法读取 xlsx 文件。它可能正被 Excel、Unity 或同步工具占用；请关闭占用后重试。", path)
+                    .Details["error"] = ex.Message;
             }
 
             return report;
         }
 
-        private static void InspectWorksheet(ZipArchive archive, XlsxSheetInfo sheet, IList<SharedStringInfo> sharedStrings, ValidationReport report, string tableName)
+        private static void InspectWorkbookLevelStructures(ZipArchive archive, ValidationReport report, string tableName)
+        {
+            foreach (var entry in archive.Entries)
+            {
+                var name = entry.FullName.Replace('\\', '/');
+                if (name.StartsWith("xl/externalLinks/", StringComparison.OrdinalIgnoreCase))
+                {
+                    PortableStructureValidator.AddFinding(report, "portable.cross_workbook_reference", tableName, name, "引用了其它工作簿。请把引用结果复制为纯文本或数字。", "workbook");
+                }
+                else if (name.StartsWith("xl/pivotTables/", StringComparison.OrdinalIgnoreCase) ||
+                         name.StartsWith("xl/queryTables/", StringComparison.OrdinalIgnoreCase) ||
+                         name.StartsWith("xl/connections", StringComparison.OrdinalIgnoreCase))
+                {
+                    PortableStructureValidator.AddFinding(report, "portable.unstable_structure", tableName, name, "包含无法稳定导出的结构。请删除数据透视表、查询连接等高级结构，只保留普通单元格数据。", "workbook");
+                }
+                else if (name.StartsWith("xl/threadedComments/", StringComparison.OrdinalIgnoreCase) ||
+                         name.StartsWith("xl/persons/", StringComparison.OrdinalIgnoreCase))
+                {
+                    PortableStructureValidator.AddFinding(report, "portable.mention_user", tableName, name, "包含 @人 或协作评论对象。请改成普通文本。", "workbook");
+                }
+            }
+        }
+
+        private static void InspectWorksheet(ZipArchive archive, XlsxSheetInfo sheet, IList<SharedStringInfo> sharedStrings, ISet<int> dateStyleIndexes, ValidationReport report, string tableName)
         {
             var entry = archive.GetEntry(sheet.Path);
             if (entry == null)
@@ -350,7 +392,17 @@ namespace ConfigSheetForge.Core
             {
                 var cell = formula.Parent;
                 var a1 = cell == null ? "" : (string)cell.Attribute("r") ?? "";
+                var formulaText = formula.Value ?? "";
                 PortableStructureValidator.AddFinding(report, "portable.formula", tableName, a1, "使用了公式。配表导出只支持普通值，请把公式结果复制为纯文本或数字。", "cell");
+                if (formulaText.IndexOf('!') >= 0)
+                {
+                    PortableStructureValidator.AddFinding(report, "portable.cross_sheet_reference", tableName, a1, "公式引用了其它工作表。请把引用结果复制为纯文本或数字。", "cell");
+                }
+
+                if (formulaText.IndexOf('[') >= 0 || formulaText.IndexOf(".xlsx", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    PortableStructureValidator.AddFinding(report, "portable.cross_workbook_reference", tableName, a1, "公式引用了其它工作簿。请把引用结果复制为纯文本或数字。", "cell");
+                }
             }
 
             foreach (var merge in root.Descendants(SpreadsheetNs + "mergeCell"))
@@ -380,6 +432,12 @@ namespace ConfigSheetForge.Core
                     PortableStructureValidator.AddFinding(report, "portable.unsupported_cell_type", tableName, a1, "单元格是错误值。请修正为普通文本、数字或布尔值。", "cell");
                 }
 
+                var styleText = (string)cell.Attribute("s") ?? "";
+                if (int.TryParse(styleText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var styleIndex) && dateStyleIndexes.Contains(styleIndex))
+                {
+                    PortableStructureValidator.AddFinding(report, "portable.date_object", tableName, a1, "使用了日期对象。请改成固定格式文本，例如 2026-05-24。", "cell");
+                }
+
                 var inlineRich = cell.Descendants(SpreadsheetNs + "r").Any();
                 if (inlineRich)
                 {
@@ -396,6 +454,61 @@ namespace ConfigSheetForge.Core
                     }
                 }
             }
+        }
+
+        private static ISet<int> ReadDateStyleIndexes(ZipArchive archive)
+        {
+            var result = new HashSet<int>();
+            var entry = archive.GetEntry("xl/styles.xml");
+            if (entry == null)
+            {
+                return result;
+            }
+
+            var customFormats = new Dictionary<int, string>();
+            var document = ReadXml(entry);
+            foreach (var format in document.Descendants(SpreadsheetNs + "numFmt"))
+            {
+                var idText = (string)format.Attribute("numFmtId") ?? "";
+                var code = (string)format.Attribute("formatCode") ?? "";
+                if (int.TryParse(idText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id))
+                {
+                    customFormats[id] = code;
+                }
+            }
+
+            var index = 0;
+            foreach (var xf in document.Descendants(SpreadsheetNs + "cellXfs").Descendants(SpreadsheetNs + "xf"))
+            {
+                var idText = (string)xf.Attribute("numFmtId") ?? "";
+                if (int.TryParse(idText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) && IsDateNumberFormat(id, customFormats))
+                {
+                    result.Add(index);
+                }
+
+                index++;
+            }
+
+            return result;
+        }
+
+        private static bool IsDateNumberFormat(int id, IDictionary<int, string> customFormats)
+        {
+            if ((id >= 14 && id <= 22) || (id >= 45 && id <= 47))
+            {
+                return true;
+            }
+
+            if (!customFormats.TryGetValue(id, out var code))
+            {
+                return false;
+            }
+
+            var normalized = new string((code ?? "").ToLowerInvariant().Where(c => c != '\\' && c != '"' && c != '[' && c != ']').ToArray());
+            return normalized.IndexOf('y') >= 0 ||
+                   normalized.IndexOf("年", StringComparison.Ordinal) >= 0 ||
+                   normalized.IndexOf('d') >= 0 && normalized.IndexOf('m') >= 0 ||
+                   normalized.IndexOf('h') >= 0 && normalized.IndexOf('s') >= 0;
         }
 
         private static IList<SharedStringInfo> ReadSharedStrings(ZipArchive archive, ValidationReport report)
