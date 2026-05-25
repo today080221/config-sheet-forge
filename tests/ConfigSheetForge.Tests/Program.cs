@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text;
 using System.IO.Compression;
 using ConfigSheetForge.Core;
 using ConfigSheetForge.Cli;
@@ -10,7 +12,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("portable validator catches duplicate row ids", () => RunSync(ValidatorCatchesDuplicateRowIds)),
     ("three-way merge detects real conflicts", () => RunSync(MergeDetectsConflicts)),
     ("core model round-trips through json", () => RunSync(CoreModelRoundTripsThroughJson)),
-    ("lark cli discovery resolves windows npm shim", () => RunSync(LarkCliDiscoveryResolvesWindowsNpmShim)),
+    ("lark cli discovery prefers windows ps1 shim", () => RunSync(LarkCliDiscoveryPrefersWindowsPs1Shim)),
     ("type row import normalizes semantic values", () => RunSync(TypeRowImportNormalizesSemanticValues)),
     ("enum option drift is reported", () => RunSync(EnumOptionDriftIsReported)),
     ("lark read parser accepts wrapped values", () => RunSync(LarkReadParserAcceptsWrappedValues)),
@@ -25,11 +27,14 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
     ("excel to so updater appends json settings", () => RunSync(ExcelToSoUpdaterAppendsJsonSettings)),
     ("excel to so updater updates existing json settings", () => RunSync(ExcelToSoUpdaterUpdatesExistingJsonSettings)),
+    ("excel to so updater preserves json schema and encoding", () => RunSync(ExcelToSoUpdaterPreservesJsonSchemaAndEncoding)),
+    ("project config upsert writes nested feishu node", () => RunSync(ProjectConfigUpsertWritesNestedFeishuNode)),
     ("project config probe reads lifecycle summary", () => RunSync(ProjectConfigProbeReadsLifecycleSummary)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
     ("seed dry-run plans xlsx migration without writes", SeedDryRunPlansXlsxMigrationWithoutWrites),
     ("seed manifest does not treat cache excelPath as source", SeedManifestDoesNotTreatCacheExcelPathAsSource),
     ("seed dry-run blocks merged xlsx cells", SeedDryRunBlocksMergedCells),
+    ("sheet write ranges support columns past z", () => RunSync(SheetWriteRangeSupportsColumnsPastZ)),
     ("portable subset blocks unsupported structures", () => RunSync(PortableSubsetBlocksUnsupportedStructures)),
     ("triangulation passes and fails with readable diffs", () => RunSync(TriangulationPassesAndFailsWithReadableDiffs)),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
@@ -112,7 +117,7 @@ static void CoreModelRoundTripsThroughJson()
     AssertEqual("Items", roundTrip!.Sheets[0].Name, "Sheet name should survive JSON round-trip.");
 }
 
-static void LarkCliDiscoveryResolvesWindowsNpmShim()
+static void LarkCliDiscoveryPrefersWindowsPs1Shim()
 {
     if (!OperatingSystem.IsWindows())
     {
@@ -121,8 +126,10 @@ static void LarkCliDiscoveryResolvesWindowsNpmShim()
 
     var temp = Path.Combine(Path.GetTempPath(), "csforge-lark-discovery-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(temp);
-    var shim = Path.Combine(temp, "lark-cli.cmd");
-    File.WriteAllText(shim, "@echo off\r\nexit /b 0\r\n");
+    var cmdShim = Path.Combine(temp, "lark-cli.cmd");
+    var ps1Shim = Path.Combine(temp, "lark-cli.ps1");
+    File.WriteAllText(cmdShim, "@echo off\r\nexit /b 0\r\n");
+    File.WriteAllText(ps1Shim, "exit 0\r\n");
 
     var oldPath = Environment.GetEnvironmentVariable("PATH");
     var oldEnv = Environment.GetEnvironmentVariable("LARK_CLI_PATH");
@@ -131,8 +138,8 @@ static void LarkCliDiscoveryResolvesWindowsNpmShim()
         Environment.SetEnvironmentVariable("LARK_CLI_PATH", null);
         Environment.SetEnvironmentVariable("PATH", temp + Path.PathSeparator + oldPath);
         var resolved = LarkCliDiscovery.Resolve("lark-cli");
-        AssertEqual(Path.GetFullPath(shim), Path.GetFullPath(resolved.FileName), "Discovery should resolve the .cmd shim on Windows.");
-        AssertEqual("PATH", resolved.Source, "Discovery should report PATH as the source.");
+        AssertEqual(Path.GetFullPath(ps1Shim), Path.GetFullPath(resolved.DisplayPath), "Discovery should prefer the .ps1 shim on Windows.");
+        AssertTrue(resolved.Source.Contains(":ps1"), "Discovery should report the ps1 launcher source.");
     }
     finally
     {
@@ -394,6 +401,77 @@ static void ExcelToSoUpdaterUpdatesExistingJsonSettings()
     AssertTrue(updated.IndexOf("SkillsData", StringComparison.Ordinal) < updated.IndexOf("RoomData", StringComparison.Ordinal), "Updater should not reorder unrelated entries.");
 }
 
+static void ExcelToSoUpdaterPreservesJsonSchemaAndEncoding()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-excel-to-so-json-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    var path = Path.Combine(temp, "ExcelToScriptableObjectSettings.asset");
+    try
+    {
+        var original = "{\r\n  \"configs\": [\r\n    { \"name\": \"SkillsData\", \"ExcelPath\": \"Assets\\\\Excel\\\\SkillsData.xlsx\", \"keep\": \"yes\" },\r\n    { \"name\": \"RoomData\", \"ExcelPath\": \"Assets\\\\Excel\\\\RoomData.xlsx\" }\r\n  ]\r\n}\r\n";
+        File.WriteAllBytes(path, new byte[] { 0xEF, 0xBB, 0xBF }.Concat(Encoding.UTF8.GetBytes(original)).ToArray());
+        var update = UnityExcelToSoSettingsUpdater.UpsertFile(path, new UnityExcelToSoEntry
+        {
+            TableId = "SkillsData",
+            ExcelPath = ".config-sheet-forge/excel-cache/SkillsData.xlsx",
+            ScriptableObjectType = "SkillConfig"
+        });
+
+        var bytes = File.ReadAllBytes(path);
+        var text = Encoding.UTF8.GetString(bytes.Skip(3).ToArray());
+        AssertTrue(update.Changed, "Existing schema-specific JSON entry should be updated.");
+        AssertTrue(bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF, "UTF-8 BOM should be preserved.");
+        AssertTrue(text.Contains("\r\n"), "CRLF newline style should be preserved.");
+        AssertTrue(text.Contains("\"ExcelPath\": \".config-sheet-forge/excel-cache/SkillsData.xlsx\""), "Existing path field naming should be preserved.");
+        AssertTrue(!text.Contains("\"tableId\""), "Updater should not add a minimal tableId field to a schema that did not have one.");
+        AssertTrue(text.IndexOf("SkillsData", StringComparison.Ordinal) < text.IndexOf("RoomData", StringComparison.Ordinal), "Updater should not reorder entries.");
+        AssertTrue(text.Contains("\"keep\": \"yes\""), "Unrelated fields should stay untouched.");
+    }
+    finally
+    {
+        Directory.Delete(temp, recursive: true);
+    }
+}
+
+static void ProjectConfigUpsertWritesNestedFeishuNode()
+{
+    var json = JsonNode.Parse("""
+    {
+      "tables": [
+        {
+          "id": "SkillsData",
+          "displayName": "Skills",
+          "feishu": {
+            "spreadsheetToken": "",
+            "sheetId": "",
+            "url": "",
+            "branch": "",
+            "profile": "",
+            "wikiNodeToken": ""
+          }
+        }
+      ]
+    }
+    """);
+    var nested = typeof(ConfigSheetForge.Cli.Program).GetNestedType("CliLifecyclePlatform", System.Reflection.BindingFlags.NonPublic);
+    var method = nested!.GetMethod("UpsertProjectConfigSheet", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+    AssertTrue(method != null, "Expected project config upsert helper.");
+    var changed = (bool)method!.Invoke(null, new object[]
+    {
+        json!,
+        new SeedTableContract { TableId = "SkillsData", Branch = "feature/config", Profile = "feature/config" },
+        new SeedOnlineSheetResult { SpreadsheetToken = "sht_123", SheetId = "sheet_1", SpreadsheetUrl = "https://example.feishu.cn/sheets/sht_123", WikiNodeToken = "wik_sheet" },
+        new BranchWorkspaceContract { FeishuBranch = "feature/config", Profile = "feature/config", ExistingWikiNodeToken = "wik_branch" }
+    })!;
+
+    var text = json!.ToJsonString(new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+    AssertTrue(changed, "Nested feishu config should be updated.");
+    AssertTrue(text.Contains("\"feishu\""), "Nested feishu object should remain.");
+    AssertTrue(text.Contains("\"spreadsheetToken\":\"sht_123\""), "Spreadsheet token should be written inside feishu.");
+    var tableObject = (JsonObject)((JsonArray)json!["tables"]!)[0]!;
+    AssertTrue(!tableObject.Any(p => p.Key == "spreadsheetToken" || p.Key == "onlineSheetUrl"), "Updater should not add parallel top-level fields when feishu exists.");
+}
+
 static void ProjectConfigProbeReadsLifecycleSummary()
 {
     var json = """
@@ -577,6 +655,16 @@ static async Task SeedDryRunBlocksMergedCells()
     }
 }
 
+static void SheetWriteRangeSupportsColumnsPastZ()
+{
+    var nested = typeof(ConfigSheetForge.Cli.Program).GetNestedType("CliLifecyclePlatform", System.Reflection.BindingFlags.NonPublic);
+    AssertTrue(nested != null, "Expected CLI lifecycle platform type.");
+    var method = nested!.GetMethod("BuildA1Range", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+    AssertTrue(method != null, "Expected A1 range helper.");
+    var range = (string)method!.Invoke(null, new object[] { "sheet123", 1, 1, 20, 29 })!;
+    AssertEqual("sheet123!A1:AC20", range, "Range should be explicit rectangular A1 and support columns beyond Z.");
+}
+
 static void PortableSubsetBlocksUnsupportedStructures()
 {
     var blocked = new[] { "formula", "floatingImage", "cellImage", "image", "mergedRange", "richText", "crossSheetReference", "mentionUser", "mentionDoc", "dateObject", "unsupportedCellType" };
@@ -598,9 +686,12 @@ static void TriangulationPassesAndFailsWithReadableDiffs()
     var exported = SampleWorkbook();
     exported.ProviderId = "xlsx";
     exported.SourceId = "temp.xlsx";
+    exported.Sheets[0].Id = "different-sheet-id";
+    exported.Sheets[0].Name = "导出表";
+    exported.Sheets[0].Columns[0].DisplayName = "id";
     var normalized = SemanticTriangulator.Normalize(online);
     var pass = SemanticTriangulator.Compare(online, exported, normalized);
-    AssertTrue(pass.Passed, "Identical semantic content should pass triangulation even when provider/source identities differ.");
+    AssertTrue(pass.Passed, "Identical semantic content should pass triangulation even when provider/source/sheet/display identities differ.");
 
     exported.Sheets[0].Rows[0].Cells["power"].NormalizedText = "999";
     var fail = SemanticTriangulator.Compare(online, exported, normalized);

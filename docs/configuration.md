@@ -84,9 +84,18 @@ Config Sheet Forge 有两个本地文件：
   "excelCacheDirectory": ".config-sheet-forge/excel-cache",
   "semanticCacheDirectory": ".config-sheet-forge/cache",
   "wikiRootToken": "",
+  "branchWorkspaceRootWikiUrl": "https://example.feishu.cn/wiki/...",
   "baseToken": "",
+  "registry": {
+    "tableIds": {
+      "ConfigSheets": "tbl...",
+      "BranchBindings": "tbl...",
+      "SchemaReviews": "tbl..."
+    }
+  },
   "branchWorkspace": {
     "rootWikiToken": "",
+    "rootWikiUrl": "https://example.feishu.cn/wiki/...",
     "rootWikiTitle": "项目配置表",
     "gitBranch": "codex/config-sheet-seed-feishu-main",
     "profileNameTemplate": "{gitBranch}",
@@ -100,7 +109,7 @@ Config Sheet Forge 有两个本地文件：
 }
 ```
 
-已有 `spreadsheetToken`/`spreadsheetUrl`/`sheetId` 时，seed apply 会先验证并复用在线 Sheet，不会创建重复表。dry-run 输出和 apply result 都包含 `seedTables`，可作为 Unity 窗口展示和失败后 resume 的依据。
+已有 `spreadsheetToken`/`spreadsheetUrl`/`sheetId` 时，seed apply 会先验证并复用在线 Sheet，不会创建重复表。dry-run 输出和 apply result 都包含 `seedTables`，可作为 Unity 窗口展示和失败后 resume 的依据。直接读取项目配置时，Base 表 ID 必须来自 `registry.tableIds` 或 `feishu.registryBase.tables` 的 machine key 映射；不要把中文显示名当成 `table_id`。
 
 `excelPath` 在项目配置里通常表示本地 cache 或 ExcelToSO 使用路径，`seed-from-xlsx --all --manifest` 不会把它当成旧源 xlsx。旧 Excel 源必须显式写在 `sourceXlsxPath`、`sourceXlsx`、`oldExcelPath` 或 `localSourcePath`。
 
@@ -113,6 +122,7 @@ branch/profile 工作区用于避免不同 git 分支把在线 Sheet 都挂到 W
   "branchWorkspace": {
     "mode": "git-branch-to-feishu-branch-profile",
     "rootWikiToken": "<项目配置表 wiki token>",
+    "rootWikiUrl": "https://example.feishu.cn/wiki/...",
     "rootWikiTitle": "项目配置表",
     "gitBranch": "feature/config-balance",
     "feishuBranch": "",
@@ -154,7 +164,7 @@ Base 注册中心建议包含这些字段：
 - `providerSettings.larkCliPath`
 - `LARK_CLI_PATH`
 
-Windows 下会显式解析 `lark-cli.cmd` 等 npm shim，避免依赖 shell 行为。
+Windows 下优先解析 `lark-cli.ps1`，其次才使用 `.exe` / `.cmd` 等 shim；包含 JSON、中文、换行、方括号或反斜杠的 `--json` / `--values` 参数会以 compact JSON 传递，避免 cmd 层破坏参数。
 
 ## secret
 

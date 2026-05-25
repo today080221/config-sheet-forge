@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2
+
+- 修复 Windows + `lark-cli` strict bot seed apply：优先使用 `lark-cli.ps1`，飞书 `--json`/`--values` 参数改为 compact JSON，并保留 action/category/stderr 诊断。
+- `sheets +write` fallback 改为分块写入，自动计算明确矩形 A1 range（支持超过 Z 的列），避免命令行过长和多行 range 错误。
+- seed/sync 导出临时目录改到 workspace 内的 `Temp/ConfigSheetForge/...`，满足 lark-cli 安全输出路径；seed 在线回读使用本地矩阵推导的精确 used range。
+- 三方 semantic triangulation 忽略 provider/source/sheet identity 和由 key 派生的 display name 差异，并保留可定位的行列 diff。
+- ProjectSettings 回填优先写既有 `table.feishu.*` 节点；ExcelToSO JSON upsert 更新既有条目并保留顺序、字段命名、BOM 和换行。
+- manifest 模式解析 `registry.tableIds` / `feishu.registryBase.tables`，缺失 machine-key table id 时阻断并提示改走 adapter contract。
+
 ## 0.4.1
 
 - 新增 branch/profile workspace resolver，seed dry-run/apply 会先定位或创建 `项目配置表/<branch node>`，不再直接挂到 Wiki 根节点。

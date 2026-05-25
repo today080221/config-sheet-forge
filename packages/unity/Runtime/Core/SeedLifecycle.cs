@@ -99,6 +99,8 @@ namespace ConfigSheetForge.Core
         public string WikiNodeToken { get; set; } = "";
         public bool Created { get; set; }
         public bool Reused { get; set; }
+        public int UsedRowCount { get; set; }
+        public int UsedColumnCount { get; set; }
         public string ImportMode { get; set; } = "";
         public string CapabilityDifference { get; set; } = "";
         public List<ValidationFinding> Findings { get; set; } = new List<ValidationFinding>();
