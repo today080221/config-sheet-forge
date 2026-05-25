@@ -2,7 +2,9 @@ using System.Security.Cryptography;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ConfigSheetForge.Core;
 using ConfigSheetForge.Providers.Lark;
 
@@ -13,6 +15,7 @@ public static class Program
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true
     };
@@ -37,6 +40,7 @@ public static class Program
                 "discover-root" => await DiscoverRootAsync(parsed),
                 "new-table" => await NewTableAsync(parsed),
                 "sync" => await SyncAsync(parsed),
+                "seed-from-xlsx" => await SeedFromXlsxAsync(parsed),
                 "merge" => await MergeAsync(parsed),
                 "gate" => await GateAsync(parsed),
                 "apply-contract" => await ApplyContractAsync(parsed),
@@ -372,6 +376,233 @@ public static class Program
         return report.HasErrors || !triangulation.Passed ? 1 : 0;
     }
 
+    private static async Task<int> SeedFromXlsxAsync(ParsedArgs args)
+    {
+        if (args.HasFlag("allow-user-fallback"))
+        {
+            throw new CliException("seed-from-xlsx 默认且固定使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+        }
+
+        var workspace = await LoadWorkspaceAsync(requireConfig: false);
+        var request = await BuildSeedRequestAsync(workspace, args);
+        request.Operation = "seed-from-local-xlsx";
+        request.DryRun = args.HasFlag("dry-run") || request.DryRun;
+        request.SeedFromLocalXlsx.ConfirmApply = request.SeedFromLocalXlsx.ConfirmApply || args.HasFlag("yes") || args.HasFlag("confirm");
+        request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate = request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate || args.HasFlag("confirm-excel-to-so");
+        request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate = request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate || args.HasFlag("confirm-project-config");
+
+        var result = await LifecycleExecutor.ExecuteAsync(request, new CliLifecyclePlatform(args, request), CancellationToken.None);
+        await EmitLifecycleResultAsync(args, result);
+
+        foreach (var failure in result.HumanReadableFailures)
+        {
+            Console.Error.WriteLine("[error] " + failure);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<LifecycleContractRequest> BuildSeedRequestAsync(Workspace workspace, ParsedArgs args)
+    {
+        if (args.TryGet("manifest", out var manifestPath))
+        {
+            return await ReadSeedManifestAsync(workspace, manifestPath, args);
+        }
+
+        var tableId = args.Get("table", "");
+        var sourceXlsx = args.Get("source-xlsx", args.Get("xlsx", ""));
+        if (string.IsNullOrWhiteSpace(tableId))
+        {
+            throw new CliException("seed-from-xlsx needs --table <id>, or use --all --manifest <project-config-or-contract>.", 2);
+        }
+
+        if (string.IsNullOrWhiteSpace(sourceXlsx))
+        {
+            throw new CliException("seed-from-xlsx needs --source-xlsx <path> for single-table mode.", 2);
+        }
+
+        var registered = workspace.Registry.Tables.FirstOrDefault(t => string.Equals(t.Id, tableId, StringComparison.OrdinalIgnoreCase));
+        var request = NewSeedRequestFromWorkspace(workspace, args);
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract
+        {
+            TableId = tableId,
+            DisplayName = args.Get("name", registered?.Name ?? tableId),
+            SourceXlsxPath = sourceXlsx,
+            CacheXlsxPath = args.Get("cache-xlsx", Path.Combine(request.SeedFromLocalXlsx.ExcelCacheDirectory, tableId + ".xlsx")),
+            SemanticCachePath = args.Get("semantic-cache", Path.Combine(request.SeedFromLocalXlsx.CacheDirectory, tableId + ".semantic.json")),
+            HashCachePath = args.Get("hash-cache", Path.Combine(request.SeedFromLocalXlsx.CacheDirectory, tableId + ".sha256")),
+            ProjectConfigPath = args.Get("project-config", request.SeedFromLocalXlsx.ProjectConfigPath),
+            SpreadsheetToken = args.Get("spreadsheet", registered?.Spreadsheet ?? ""),
+            SpreadsheetUrl = args.Get("url", ""),
+            SheetId = args.Get("sheet-id", registered?.SheetId ?? ""),
+            SheetName = args.Get("sheet-name", args.Get("sheet", tableId)),
+            WikiRootToken = args.Get("wiki-root", request.SeedFromLocalXlsx.WikiRootToken),
+            OwnerRole = args.Get("owner-role", ""),
+            FieldRow = args.GetInt("field-row", registered?.FieldRow ?? 0),
+            TypeRow = args.GetInt("type-row", registered?.TypeRow ?? -1),
+            DescriptionRow = args.GetInt("description-row", registered?.DescriptionRow ?? -1),
+            DataStartRow = args.GetInt("data-start-row", registered?.DataStartRow ?? -1),
+            TreatUnknownTypesAsEnum = args.GetBool("treat-unknown-types-as-enum", registered?.TreatUnknownTypesAsEnum ?? false),
+            UnityExcelToSo = new UnityExcelToSoContract
+            {
+                SettingsPath = args.Get("excel-to-so-settings", ""),
+                TableId = tableId,
+                ExcelPath = args.Get("excel-to-so-cache-path", Path.Combine(request.SeedFromLocalXlsx.ExcelCacheDirectory, tableId + ".xlsx")),
+                ScriptableObjectType = args.Get("scriptable-object-type", ""),
+                AssetPath = args.Get("asset-path", "")
+            }
+        });
+
+        return request;
+    }
+
+    private static LifecycleContractRequest NewSeedRequestFromWorkspace(Workspace workspace, ParsedArgs args)
+    {
+        var cacheDirectory = args.Get("cache-dir", workspace.Paths.CacheDirectory);
+        var excelCacheDirectory = args.Get("excel-cache-dir", Path.Combine(workspace.Paths.StateDirectory, "excel-cache"));
+        return new LifecycleContractRequest
+        {
+            Operation = "seed-from-local-xlsx",
+            Locale = args.Get("locale", "zh-Hans"),
+            Registry = new RegistryContract
+            {
+                BaseToken = args.Get("base", ""),
+                BaseUrl = args.Get("base-url", "")
+            },
+            Git = new ContractGitSpec
+            {
+                Branch = FirstNonEmpty(args.Get("branch", ""), TryRunGitAsync("branch", "--show-current").GetAwaiter().GetResult()),
+                Head = FirstNonEmpty(args.Get("git-head", ""), TryRunGitAsync("rev-parse", "HEAD").GetAwaiter().GetResult()),
+                FeishuBranch = args.Get("feishu-branch", ""),
+                Profile = args.Get("profile", "")
+            },
+            SeedFromLocalXlsx = new SeedFromLocalXlsxContract
+            {
+                CacheDirectory = cacheDirectory,
+                ExcelCacheDirectory = excelCacheDirectory,
+                ProjectConfigPath = args.Get("project-config", ""),
+                WikiRootToken = FirstNonEmpty(args.Get("wiki-root", ""), workspace.Config.RootToken, workspace.Config.RootUrl),
+                WikiParentTitle = args.Get("wiki-parent-title", "项目配置表"),
+                BaselineStrategy = args.Get("baseline-strategy", "pending"),
+                PreferDriveImport = !args.HasFlag("no-drive-import"),
+                CleanupDefaultRows = args.HasFlag("cleanup-default-rows")
+            }
+        };
+    }
+
+    private static async Task<LifecycleContractRequest> ReadSeedManifestAsync(Workspace workspace, string manifestPath, ParsedArgs args)
+    {
+        if (string.IsNullOrWhiteSpace(manifestPath) || !File.Exists(manifestPath))
+        {
+            throw new CliException("The seed manifest does not exist.", 2, manifestPath);
+        }
+
+        var json = await File.ReadAllTextAsync(manifestPath, Encoding.UTF8);
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        var operation = GetJsonString(root, "operation");
+        if ((SeedOperationRequested(operation) || root.TryGetProperty("seedFromLocalXlsx", out _)) &&
+            !root.TryGetProperty("seedTables", out _))
+        {
+            var request = JsonSerializer.Deserialize<LifecycleContractRequest>(json, JsonOptions);
+            if (request == null)
+            {
+                throw new CliException("Could not read seed lifecycle contract.", 2, manifestPath);
+            }
+
+            return request;
+        }
+
+        var seedRequest = NewSeedRequestFromWorkspace(workspace, args);
+        seedRequest.SeedFromLocalXlsx.ProjectConfigPath = Path.GetFullPath(manifestPath);
+        seedRequest.Registry.BaseToken = FirstNonEmpty(seedRequest.Registry.BaseToken, FindStringDeep(root, "baseToken", "registryBaseToken"));
+        seedRequest.Registry.BaseUrl = FirstNonEmpty(seedRequest.Registry.BaseUrl, FindStringDeep(root, "baseUrl", "registryBaseUrl"));
+        seedRequest.SeedFromLocalXlsx.WikiRootToken = FirstNonEmpty(seedRequest.SeedFromLocalXlsx.WikiRootToken, FindStringDeep(root, "wikiRootToken", "feishuRootToken", "rootToken"));
+        seedRequest.SeedFromLocalXlsx.CacheDirectory = FirstNonEmpty(FindStringDeep(root, "semanticCacheDirectory", "cacheDirectory"), seedRequest.SeedFromLocalXlsx.CacheDirectory);
+        seedRequest.SeedFromLocalXlsx.ExcelCacheDirectory = FirstNonEmpty(FindStringDeep(root, "excelCacheDirectory", "xlsxCacheDirectory"), seedRequest.SeedFromLocalXlsx.ExcelCacheDirectory);
+        seedRequest.SeedFromLocalXlsx.BaselineStrategy = FirstNonEmpty(FindStringDeep(root, "baselineStrategy", "schemaReviewBaselineStrategy"), seedRequest.SeedFromLocalXlsx.BaselineStrategy);
+        var defaultExcelToSoSettings = FindStringDeep(root, "excelToSoSettingsPath", "excelToScriptableObjectSettingsPath");
+
+        foreach (var tableElement in FindTableArray(root))
+        {
+            if (tableElement.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var tableId = FirstNonEmpty(GetJsonString(tableElement, "tableId", "id", "key"), "");
+            if (string.IsNullOrWhiteSpace(tableId))
+            {
+                continue;
+            }
+
+            if (!args.HasFlag("all") && args.TryGet("table", out var selected) && !string.Equals(selected, tableId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var cacheXlsx = FirstNonEmpty(GetJsonString(tableElement, "cacheXlsxPath", "excelCachePath", "localCachePath", "cachePath"), Path.Combine(seedRequest.SeedFromLocalXlsx.ExcelCacheDirectory, tableId + ".xlsx"));
+            var table = new SeedTableContract
+            {
+                TableId = tableId,
+                DisplayName = FirstNonEmpty(GetJsonString(tableElement, "displayName", "name", "title"), tableId),
+                SourceXlsxPath = FirstNonEmpty(GetJsonString(tableElement, "sourceXlsxPath", "sourceXlsx", "oldExcelPath", "localSourcePath", "excelPath"), ""),
+                CacheXlsxPath = cacheXlsx,
+                SemanticCachePath = FirstNonEmpty(GetJsonString(tableElement, "semanticCachePath"), Path.Combine(seedRequest.SeedFromLocalXlsx.CacheDirectory, tableId + ".semantic.json")),
+                HashCachePath = FirstNonEmpty(GetJsonString(tableElement, "hashCachePath", "sha256Path"), Path.Combine(seedRequest.SeedFromLocalXlsx.CacheDirectory, tableId + ".sha256")),
+                ProjectConfigPath = Path.GetFullPath(manifestPath),
+                SpreadsheetToken = GetJsonString(tableElement, "spreadsheetToken", "spreadsheet"),
+                SpreadsheetUrl = GetJsonString(tableElement, "spreadsheetUrl", "url", "onlineSheetUrl"),
+                SheetId = GetJsonString(tableElement, "sheetId"),
+                SheetName = FirstNonEmpty(GetJsonString(tableElement, "sheetName"), tableId),
+                WikiRootToken = FirstNonEmpty(GetJsonString(tableElement, "wikiRootToken"), seedRequest.SeedFromLocalXlsx.WikiRootToken),
+                OwnerRole = GetJsonString(tableElement, "ownerRole"),
+                RegistryRecordId = GetJsonString(tableElement, "registryRecordId"),
+                SchemaReviewRequired = GetJsonBool(tableElement, true, "schemaReviewRequired"),
+                FieldRow = GetJsonInt(tableElement, 0, "fieldRow"),
+                TypeRow = GetJsonInt(tableElement, -1, "typeRow"),
+                DescriptionRow = GetJsonInt(tableElement, -1, "descriptionRow"),
+                DataStartRow = GetJsonInt(tableElement, -1, "dataStartRow"),
+                TreatUnknownTypesAsEnum = GetJsonBool(tableElement, false, "treatUnknownTypesAsEnum"),
+                UnityExcelToSo = new UnityExcelToSoContract
+                {
+                    SettingsPath = FirstNonEmpty(GetJsonString(tableElement, "excelToSoSettingsPath", "excelToScriptableObjectSettingsPath"), defaultExcelToSoSettings),
+                    TableId = tableId,
+                    ExcelPath = FirstNonEmpty(GetJsonString(tableElement, "excelToSoCachePath"), cacheXlsx),
+                    ScriptableObjectType = GetJsonString(tableElement, "scriptableObjectType"),
+                    AssetPath = GetJsonString(tableElement, "assetPath")
+                }
+            };
+
+            foreach (var field in ParseFieldSpecs(tableElement))
+            {
+                table.Fields.Add(field);
+            }
+
+            seedRequest.SeedFromLocalXlsx.Tables.Add(table);
+        }
+
+        if (seedRequest.SeedFromLocalXlsx.Tables.Count == 0)
+        {
+            throw new CliException("The seed manifest did not contain any matching tables.", 2, manifestPath);
+        }
+
+        return seedRequest;
+    }
+
+    private static async Task EmitLifecycleResultAsync(ParsedArgs args, LifecycleContractResult result)
+    {
+        var outPath = args.Get("out", "");
+        if (!string.IsNullOrWhiteSpace(outPath))
+        {
+            await WriteJsonAsync(outPath, result);
+        }
+        else
+        {
+            Console.WriteLine(JsonSerializer.Serialize(result, JsonOptions));
+        }
+    }
+
     private static async Task<int> MergeAsync(ParsedArgs args)
     {
         var basePath = args.Get("base", "");
@@ -472,7 +703,19 @@ public static class Program
             request.DryRun = true;
         }
 
-        ILifecyclePlatform platform = request.DryRun
+        if (SeedOperationRequested(request.Operation))
+        {
+            if (args.HasFlag("allow-user-fallback"))
+            {
+                throw new CliException("seed-from-local-xlsx 默认且固定使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+            }
+
+            request.SeedFromLocalXlsx.ConfirmApply = request.SeedFromLocalXlsx.ConfirmApply || args.HasFlag("yes") || args.HasFlag("confirm");
+            request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate = request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate || args.HasFlag("confirm-excel-to-so");
+            request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate = request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate || args.HasFlag("confirm-project-config");
+        }
+
+        ILifecyclePlatform platform = request.DryRun && !SeedOperationRequested(request.Operation)
             ? new PreviewLifecyclePlatform()
             : new CliLifecyclePlatform(args, request);
         var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
@@ -498,15 +741,7 @@ public static class Program
             }
         }
 
-        var outPath = args.Get("out", "");
-        if (!string.IsNullOrWhiteSpace(outPath))
-        {
-            await WriteJsonAsync(outPath, result);
-        }
-        else
-        {
-            Console.WriteLine(JsonSerializer.Serialize(result, JsonOptions));
-        }
+        await EmitLifecycleResultAsync(args, result);
 
         foreach (var failure in result.HumanReadableFailures)
         {
@@ -801,6 +1036,11 @@ public static class Program
 
     private static string GetJsonString(JsonElement element, params string[] names)
     {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return "";
+        }
+
         foreach (var name in names)
         {
             if (element.TryGetProperty(name, out var property))
@@ -818,6 +1058,164 @@ public static class Program
         }
 
         return "";
+    }
+
+    private static bool SeedOperationRequested(string operation)
+    {
+        return string.Equals(operation, "seed-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool GetJsonBool(JsonElement element, bool fallback, params string[] names)
+    {
+        var value = GetJsonProperty(element, names);
+        if (value.ValueKind == JsonValueKind.True)
+        {
+            return true;
+        }
+
+        if (value.ValueKind == JsonValueKind.False)
+        {
+            return false;
+        }
+
+        if (value.ValueKind == JsonValueKind.String)
+        {
+            var text = value.GetString() ?? "";
+            return text.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                   text.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+                   text.Equals("yes", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return fallback;
+    }
+
+    private static int GetJsonInt(JsonElement element, int fallback, params string[] names)
+    {
+        var value = GetJsonProperty(element, names);
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var parsed))
+        {
+            return parsed;
+        }
+
+        if (value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
+    }
+
+    private static JsonElement GetJsonProperty(JsonElement element, params string[] names)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return default;
+        }
+
+        foreach (var name in names)
+        {
+            if (element.TryGetProperty(name, out var property))
+            {
+                return property;
+            }
+
+            foreach (var pair in element.EnumerateObject())
+            {
+                if (string.Equals(pair.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return pair.Value;
+                }
+            }
+        }
+
+        return default;
+    }
+
+    private static string FindStringDeep(JsonElement element, params string[] names)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var direct = GetJsonString(element, names);
+            if (!string.IsNullOrWhiteSpace(direct))
+            {
+                return direct;
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                var nested = FindStringDeep(property.Value, names);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindStringDeep(item, names);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+
+        return "";
+    }
+
+    private static IEnumerable<JsonElement> FindTableArray(JsonElement root)
+    {
+        foreach (var name in new[] { "tables", "configSheets", "tableMappings", "excelTables", "excelToSoTables", "seedTables" })
+        {
+            var property = GetJsonProperty(root, name);
+            if (property.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in property.EnumerateArray())
+                {
+                    yield return item;
+                }
+
+                yield break;
+            }
+        }
+    }
+
+    private static IEnumerable<ContractFieldSpec> ParseFieldSpecs(JsonElement tableElement)
+    {
+        var property = GetJsonProperty(tableElement, "fields", "columns", "schema");
+        if (property.ValueKind != JsonValueKind.Array)
+        {
+            yield break;
+        }
+
+        foreach (var item in property.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                var key = item.GetString() ?? "";
+                if (!string.IsNullOrWhiteSpace(key))
+                {
+                    yield return new ContractFieldSpec { Key = key, DisplayName = key, ValueKind = "string" };
+                }
+            }
+            else if (item.ValueKind == JsonValueKind.Object)
+            {
+                var key = FirstNonEmpty(GetJsonString(item, "key", "id", "name"), GetJsonString(item, "displayName", "title"));
+                if (!string.IsNullOrWhiteSpace(key))
+                {
+                    yield return new ContractFieldSpec
+                    {
+                        Key = key,
+                        DisplayName = FirstNonEmpty(GetJsonString(item, "displayName", "title"), key),
+                        ValueKind = FirstNonEmpty(GetJsonString(item, "valueKind", "type", "kind"), "string"),
+                        Description = GetJsonString(item, "description", "desc")
+                    };
+                }
+            }
+        }
     }
 
     private static string ResolveMachineKey(string displayName, IDictionary<string, string> mapping)
@@ -918,6 +1316,8 @@ public static class Program
         Console.WriteLine("  config-sheet-forge discover-root --query <name>");
         Console.WriteLine("  config-sheet-forge new-table --id <id> --name <name> [--spreadsheet <url-or-token>] [--sheet-id <id>] [--range <A1>] [--field-row <0>] [--type-row <1>] [--description-row <2>] [--data-start-row <3>]");
         Console.WriteLine("  config-sheet-forge sync [--table <id>] [--input <semantic.json>]");
+        Console.WriteLine("  config-sheet-forge seed-from-xlsx --table <id> --source-xlsx <path> --dry-run");
+        Console.WriteLine("  config-sheet-forge seed-from-xlsx --all --manifest <project-config-or-contract> --dry-run");
         Console.WriteLine("  config-sheet-forge merge --base <file> --ours <file> --theirs <file> [--out <report.md>]");
         Console.WriteLine("  config-sheet-forge gate [--cache <dir>] [--details] [--annotations github]");
         Console.WriteLine("  config-sheet-forge apply-contract --request <contract.json> [--out <result.json>] [--dry-run]");
@@ -1162,7 +1562,7 @@ public static class Program
         return value.Length <= 8 ? "********" : value.Substring(0, 4) + "..." + value.Substring(value.Length - 4);
     }
 
-    private sealed class CliLifecyclePlatform : ILifecyclePlatform
+    private sealed class CliLifecyclePlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform
     {
         private readonly ParsedArgs _args;
         private readonly LifecycleContractRequest _request;
@@ -1304,6 +1704,659 @@ public static class Program
                 Status = result.Success ? "done" : "failed",
                 Message = result.Success ? "已应用注册中心迁移。" : string.Join(" ", result.HumanReadableFailures)
             };
+        }
+
+        public Task<SeedLocalWorkbookResult> ReadLocalXlsxAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, CancellationToken cancellationToken)
+        {
+            var result = new SeedLocalWorkbookResult();
+            var source = ResolveWorkspacePath(FirstNonEmpty(table.SourceXlsxPath, seed.SourceXlsxPath));
+            result.SourceXlsxPath = source;
+
+            if (string.IsNullOrWhiteSpace(source) || !File.Exists(source))
+            {
+                result.Findings.Add(new ValidationFinding
+                {
+                    Severity = FindingSeverity.Error,
+                    Code = "xlsx.missing",
+                    Message = "配表 " + table.TableId + " 找不到本地 xlsx 源文件。请检查 sourceXlsxPath 是否正确。",
+                    Location = source
+                });
+                return Task.FromResult(result);
+            }
+
+            var structure = XlsxWorkbookReader.InspectPortableStructures(source, FirstNonEmpty(table.TableId, table.SheetName));
+            foreach (var finding in structure.Findings)
+            {
+                result.Findings.Add(finding);
+            }
+
+            var import = XlsxWorkbookReader.Import(source, BuildMatrixOptions(table, "xlsx", source));
+            result.Workbook = import.Workbook;
+            foreach (var finding in import.Report.Findings)
+            {
+                result.Findings.Add(finding);
+            }
+
+            if (result.Workbook != null)
+            {
+                result.Workbook.Metadata["tableId"] = table.TableId;
+                result.Workbook.Metadata["sourceXlsxPath"] = source;
+                result.SemanticHash = SemanticHasher.ComputeHash(result.Workbook);
+            }
+
+            return Task.FromResult(result);
+        }
+
+        public async Task<SeedOnlineSheetResult> EnsureOnlineSheetAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, WorkbookDocument localWorkbook, string semanticHash, CancellationToken cancellationToken)
+        {
+            var result = new SeedOnlineSheetResult();
+            var existingFromConfig = FindExistingSheetInProjectConfig(seed, table);
+            var existingToken = FirstNonEmpty(table.SpreadsheetToken, table.SpreadsheetUrl, existingFromConfig.SpreadsheetToken, existingFromConfig.SpreadsheetUrl);
+            if (!string.IsNullOrWhiteSpace(existingToken))
+            {
+                try
+                {
+                    var info = await RunLarkCliStrictAsync(_gateway, _args, BuildSheetInfoCommand(existingToken));
+                    var parsed = ParseSheetCreationResult(CombinedJsonOutput(info));
+                    result.SpreadsheetToken = FirstNonEmpty(parsed.SpreadsheetToken, table.SpreadsheetToken, existingFromConfig.SpreadsheetToken, existingToken);
+                    result.SpreadsheetUrl = FirstNonEmpty(parsed.SpreadsheetUrl, table.SpreadsheetUrl, existingFromConfig.SpreadsheetUrl);
+                    result.SheetId = FirstNonEmpty(table.SheetId, existingFromConfig.SheetId, parsed.SheetId);
+                    result.WikiNodeToken = FirstNonEmpty(table.WikiNodeToken, existingFromConfig.WikiNodeToken, parsed.WikiNodeToken);
+                    result.Reused = true;
+                    result.ImportMode = "existing";
+                    return result;
+                }
+                catch (CliException ex)
+                {
+                    result.Findings.Add(new ValidationFinding
+                    {
+                        Severity = FindingSeverity.Error,
+                        Code = "seed.existing_sheet_unavailable",
+                        Message = "已有 registry/config token 指向的在线 Sheet 无法读取。不会创建重复表；请确认权限或修正 token 后重试。",
+                        Location = table.TableId,
+                        Details = { ["error"] = ex.Message }
+                    });
+                    return result;
+                }
+            }
+
+            var importFailure = "";
+            if (seed.PreferDriveImport)
+            {
+                var imported = await TryDriveImportXlsxAsync(seed, table, cancellationToken);
+                if (imported.Success)
+                {
+                    var parsed = ParseSheetCreationResult(CombinedJsonOutput(imported));
+                    result.SpreadsheetToken = parsed.SpreadsheetToken;
+                    result.SpreadsheetUrl = parsed.SpreadsheetUrl;
+                    result.SheetId = FirstNonEmpty(parsed.SheetId, table.SheetId, table.SheetName);
+                    result.WikiNodeToken = parsed.WikiNodeToken;
+                    result.Created = true;
+                    result.ImportMode = "drive-import-xlsx";
+                    if (!string.IsNullOrWhiteSpace(result.SpreadsheetToken))
+                    {
+                        return result;
+                    }
+                }
+
+                importFailure = Trim(imported.Stderr + "\n" + imported.Stdout);
+            }
+
+            var sheet = await CreateOnlineSheetAsync(ToContractTable(table, seed), cancellationToken);
+            result.SpreadsheetToken = sheet.SpreadsheetToken;
+            result.SpreadsheetUrl = sheet.SpreadsheetUrl;
+            result.SheetId = FirstNonEmpty(sheet.SheetId, table.SheetId, table.SheetName, "Sheet1");
+            result.WikiNodeToken = sheet.WikiNodeToken;
+            result.Created = true;
+            result.ImportMode = "sheets-create-values-write";
+            result.CapabilityDifference = "drive import xlsx 未使用或失败，fallback 只写入 semantic 普通值；不会保留 Excel 格式、隐藏信息、图片或公式。";
+            if (!string.IsNullOrWhiteSpace(importFailure))
+            {
+                result.CapabilityDifference += " drive import 失败摘要：" + importFailure;
+            }
+
+            var matrix = BuildMatrixFromWorkbook(localWorkbook);
+            var values = JsonSerializer.Serialize(matrix, JsonOptions);
+            await RunLarkCliStrictAsync(_gateway, _args, new[] { "sheets", "+write", "--spreadsheet-token", result.SpreadsheetToken, "--sheet-id", result.SheetId, "--range", result.SheetId + "!A1", "--values", values });
+            return result;
+        }
+
+        public async Task<SeedOnlineRoundTripResult> ReadAndExportOnlineSheetAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, SeedOnlineSheetResult sheet, CancellationToken cancellationToken)
+        {
+            var result = new SeedOnlineRoundTripResult();
+            var temp = Path.Combine(Path.GetTempPath(), "csforge-seed-" + Guid.NewGuid().ToString("N"), MakeSafeFileName(table.TableId));
+            Directory.CreateDirectory(temp);
+            var provider = new LarkCliWorkbookProvider();
+            var export = await provider.ExportAsync(BuildProviderContext(), new ProviderExportRequest
+            {
+                RootTokenOrUrl = FirstNonEmpty(sheet.SpreadsheetToken, sheet.SpreadsheetUrl),
+                SpreadsheetTokenOrUrl = FirstNonEmpty(sheet.SpreadsheetToken, sheet.SpreadsheetUrl),
+                TableId = table.TableId,
+                SheetId = FirstNonEmpty(sheet.SheetId, table.SheetId),
+                Range = "",
+                CacheDirectory = temp,
+                FieldRow = table.FieldRow,
+                TypeRow = table.TypeRow,
+                DescriptionRow = table.DescriptionRow,
+                DataStartRow = table.DataStartRow,
+                TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
+            }, cancellationToken);
+
+            foreach (var finding in export.Findings)
+            {
+                result.Findings.Add(ToValidationFinding(finding, table.TableId));
+            }
+
+            result.OnlineWorkbook = export.Workbook;
+            result.ExportedXlsxPath = FindExportedXlsx(temp, table.TableId);
+            if (string.IsNullOrWhiteSpace(result.ExportedXlsxPath))
+            {
+                result.Findings.Add(new ValidationFinding
+                {
+                    Severity = FindingSeverity.Error,
+                    Code = "seed.export_xlsx_missing",
+                    Message = "在线 Sheet 没有成功导出 xlsx。请确认应用有文件导出权限后重试。",
+                    Location = table.TableId
+                });
+                return result;
+            }
+
+            var structure = XlsxWorkbookReader.InspectPortableStructures(result.ExportedXlsxPath, table.TableId);
+            foreach (var finding in structure.Findings)
+            {
+                result.Findings.Add(finding);
+            }
+
+            var imported = XlsxWorkbookReader.Import(result.ExportedXlsxPath, BuildMatrixOptions(table, "xlsx", result.ExportedXlsxPath));
+            result.ExportedXlsxWorkbook = imported.Workbook;
+            foreach (var finding in imported.Report.Findings)
+            {
+                result.Findings.Add(finding);
+            }
+
+            return result;
+        }
+
+        public async Task<LifecycleActionResult> WriteSeedCacheAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, WorkbookDocument localWorkbook, string semanticHash, string exportedXlsxPath, CancellationToken cancellationToken)
+        {
+            var xlsxPath = ResolveWorkspacePath(FirstNonEmpty(table.CacheXlsxPath, Path.Combine(seed.ExcelCacheDirectory, table.TableId + ".xlsx")));
+            var semanticPath = ResolveWorkspacePath(FirstNonEmpty(table.SemanticCachePath, Path.Combine(seed.CacheDirectory, table.TableId + ".semantic.json")));
+            var shaPath = ResolveWorkspacePath(FirstNonEmpty(table.HashCachePath, Path.Combine(seed.CacheDirectory, table.TableId + ".sha256")));
+            var existingHash = await ReadExistingHashAsync(shaPath);
+            var unchanged = string.Equals(existingHash, semanticHash, StringComparison.Ordinal) &&
+                            File.Exists(xlsxPath) &&
+                            File.Exists(semanticPath) &&
+                            File.Exists(shaPath);
+            if (!unchanged)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(xlsxPath) ?? ".");
+                Directory.CreateDirectory(Path.GetDirectoryName(semanticPath) ?? ".");
+                Directory.CreateDirectory(Path.GetDirectoryName(shaPath) ?? ".");
+                if (!string.IsNullOrWhiteSpace(exportedXlsxPath) && File.Exists(exportedXlsxPath))
+                {
+                    File.Copy(exportedXlsxPath, xlsxPath, overwrite: true);
+                }
+
+                await WriteJsonAsync(semanticPath, localWorkbook);
+                await File.WriteAllTextAsync(shaPath, semanticHash + Environment.NewLine, Encoding.UTF8, cancellationToken);
+            }
+
+            var action = new LifecycleActionResult
+            {
+                Action = "seed.cache.write",
+                Status = unchanged ? "unchanged" : "done",
+                Message = unchanged ? "semantic hash 未变化，cache 文件未重写，mtime 保持不变。" : "已写入 seed cache。"
+            };
+            action.Details["tableId"] = table.TableId;
+            action.Details["xlsxPath"] = xlsxPath;
+            action.Details["semanticPath"] = semanticPath;
+            action.Details["shaPath"] = shaPath;
+            action.Details["semanticHash"] = semanticHash;
+            return action;
+        }
+
+        public async Task<LifecycleActionResult> UpdateProjectConfigAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, SeedOnlineSheetResult sheet, CancellationToken cancellationToken)
+        {
+            var path = ResolveWorkspacePath(FirstNonEmpty(table.ProjectConfigPath, seed.ProjectConfigPath));
+            var action = new LifecycleActionResult { Action = "seed.project_config.update", Status = "skipped", Message = "未配置 ProjectSettings/*ConfigSheetForge*.json，跳过项目配置回填。" };
+            action.Details["tableId"] = table.TableId;
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return action;
+            }
+
+            action.Details["path"] = path;
+            if (!File.Exists(path))
+            {
+                action.Status = "failed";
+                action.Message = "项目配置文件不存在，无法回填 spreadsheetToken/sheetId/url。";
+                return action;
+            }
+
+            var json = await File.ReadAllTextAsync(path, Encoding.UTF8, cancellationToken);
+            var node = JsonNode.Parse(json);
+            if (node == null)
+            {
+                action.Status = "failed";
+                action.Message = "项目配置 JSON 无法解析。";
+                return action;
+            }
+
+            var changed = UpsertProjectConfigSheet(node, table.TableId, sheet);
+            if (changed)
+            {
+                await File.WriteAllTextAsync(path, node.ToJsonString(JsonOptions) + Environment.NewLine, Encoding.UTF8, cancellationToken);
+            }
+
+            action.Status = changed ? "done" : "unchanged";
+            action.Message = changed ? "已回填项目配置中的在线 Sheet 信息。" : "项目配置已包含相同在线 Sheet 信息，未改动。";
+            action.Details["spreadsheetToken"] = sheet.SpreadsheetToken;
+            action.Details["sheetId"] = sheet.SheetId;
+            action.Details["url"] = sheet.SpreadsheetUrl;
+            return action;
+        }
+
+        public async Task<LifecycleActionResult> UpsertSeedRegistryRecordAsync(RegistryContract registry, SeedFromLocalXlsxContract seed, SeedTableContract table, SeedOnlineSheetResult sheet, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(registry.BaseToken))
+            {
+                return new LifecycleActionResult
+                {
+                    Action = "seed.registry.config_sheets.upsert",
+                    Status = "skipped",
+                    Message = "未配置 Base token，跳过 ConfigSheets 注册中心回填。",
+                    Details = { ["tableId"] = table.TableId }
+                };
+            }
+
+            return await UpsertRegistryRecordAsync(registry, ToContractTable(table, seed, sheet), ToSheetCreationResult(sheet), cancellationToken);
+        }
+
+        public async Task<LifecycleActionResult> UpsertSeedSchemaReviewAsync(RegistryContract registry, SeedFromLocalXlsxContract seed, SeedTableContract table, ContractGitSpec git, bool schemaChangeDetected, string reason, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(registry.BaseToken) || !table.SchemaReviewRequired)
+            {
+                return new LifecycleActionResult
+                {
+                    Action = "seed.registry.schema_reviews.upsert",
+                    Status = "skipped",
+                    Message = table.SchemaReviewRequired ? "未配置 Base token，跳过 SchemaReviews 回填。" : "该表配置为不需要 SchemaReviews。",
+                    Details = { ["tableId"] = table.TableId, ["schemaChangeDetected"] = schemaChangeDetected.ToString().ToLowerInvariant() }
+                };
+            }
+
+            var action = await UpsertSchemaReviewAsync(registry, ToContractTable(table, seed), git, reason, cancellationToken);
+            action.Action = "seed.registry.schema_reviews.upsert";
+            action.Details["schemaChangeDetected"] = schemaChangeDetected.ToString().ToLowerInvariant();
+            action.Details["baselineStrategy"] = seed.BaselineStrategy;
+            return action;
+        }
+
+        public Task<LifecycleActionResult> UpdateExcelToSoSettingsAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, CancellationToken cancellationToken)
+        {
+            var unity = table.UnityExcelToSo ?? new UnityExcelToSoContract();
+            var update = UnityExcelToSoSettingsUpdater.UpsertFile(ResolveWorkspacePath(unity.SettingsPath), new UnityExcelToSoEntry
+            {
+                TableId = FirstNonEmpty(unity.TableId, table.TableId),
+                ExcelPath = FirstNonEmpty(unity.ExcelPath, table.CacheXlsxPath, Path.Combine(seed.ExcelCacheDirectory, table.TableId + ".xlsx")),
+                ScriptableObjectType = unity.ScriptableObjectType,
+                AssetPath = unity.AssetPath,
+                ExtraFields = unity.ExtraFields
+            });
+            var action = new LifecycleActionResult
+            {
+                Action = "seed.unity.excel_to_so.upsert",
+                Status = update.Changed ? "done" : "unchanged",
+                Message = update.Message
+            };
+            action.Details["tableId"] = table.TableId;
+            action.Details["settingsPath"] = ResolveWorkspacePath(unity.SettingsPath);
+            return Task.FromResult(action);
+        }
+
+        private MatrixWorkbookImportOptions BuildMatrixOptions(SeedTableContract table, string providerId, string sourceId)
+        {
+            return new MatrixWorkbookImportOptions
+            {
+                ProviderId = providerId,
+                SourceId = sourceId,
+                SourceTitle = FirstNonEmpty(table.DisplayName, table.TableId, table.SheetName),
+                SheetId = table.SheetId,
+                SheetName = FirstNonEmpty(table.SheetName, table.TableId),
+                FieldRow = table.FieldRow,
+                TypeRow = table.TypeRow,
+                DescriptionRow = table.DescriptionRow,
+                DataStartRow = table.DataStartRow,
+                TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
+            };
+        }
+
+        private string ResolveWorkspacePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || Path.IsPathRooted(path))
+            {
+                return path ?? "";
+            }
+
+            return Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), path.Replace('/', Path.DirectorySeparatorChar)));
+        }
+
+        private IEnumerable<string> BuildSheetInfoCommand(string tokenOrUrl)
+        {
+            if (tokenOrUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                tokenOrUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "sheets", "+info", "--url", tokenOrUrl };
+            }
+
+            return new[] { "sheets", "+info", "--spreadsheet-token", tokenOrUrl };
+        }
+
+        private async Task<LarkCliResult> TryDriveImportXlsxAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, CancellationToken cancellationToken)
+        {
+            var doctor = await _gateway.RunAsync(new[] { "doctor" }, Directory.GetCurrentDirectory(), cancellationToken);
+            if (!doctor.Success)
+            {
+                return doctor;
+            }
+
+            var args = new List<string>
+            {
+                "drive",
+                "+import",
+                "--file",
+                ResolveWorkspacePath(table.SourceXlsxPath),
+                "--target-type",
+                "sheet",
+                "--title",
+                FirstNonEmpty(table.DisplayName, table.TableId)
+            };
+            var parent = FirstNonEmpty(table.WikiRootToken, seed.WikiRootToken);
+            if (!string.IsNullOrWhiteSpace(parent))
+            {
+                args.Add("--parent-token");
+                args.Add(parent);
+            }
+
+            var identity = _args.Get("lark-identity", "bot");
+            return await _gateway.RunAsync(WithLarkIdentity(args, identity), Directory.GetCurrentDirectory(), cancellationToken);
+        }
+
+        private ProviderContext BuildProviderContext()
+        {
+            var context = new ProviderContext { WorkspaceRoot = Directory.GetCurrentDirectory() };
+            context.Settings["larkCliPath"] = _args.Get("lark-cli", "lark-cli");
+            context.Settings["larkCliIdentity"] = _args.Get("lark-identity", "bot");
+            context.Settings["larkAllowUserFallback"] = _args.HasFlag("allow-user-fallback") ? "true" : "false";
+            return context;
+        }
+
+        private static ContractTableSpec ToContractTable(SeedTableContract table, SeedFromLocalXlsxContract seed)
+        {
+            return ToContractTable(table, seed, null);
+        }
+
+        private static ContractTableSpec ToContractTable(SeedTableContract table, SeedFromLocalXlsxContract seed, SeedOnlineSheetResult? sheet)
+        {
+            var contract = new ContractTableSpec
+            {
+                TableId = table.TableId,
+                DisplayName = table.DisplayName,
+                ExcelPath = FirstNonEmpty(table.CacheXlsxPath, Path.Combine(seed.ExcelCacheDirectory, table.TableId + ".xlsx")),
+                LocalCachePath = FirstNonEmpty(table.CacheXlsxPath, Path.Combine(seed.ExcelCacheDirectory, table.TableId + ".xlsx")),
+                SourceXlsxPath = table.SourceXlsxPath,
+                CacheXlsxPath = table.CacheXlsxPath,
+                SemanticCachePath = table.SemanticCachePath,
+                HashCachePath = table.HashCachePath,
+                ProjectConfigPath = table.ProjectConfigPath,
+                SpreadsheetToken = FirstNonEmpty(sheet?.SpreadsheetToken ?? "", table.SpreadsheetToken),
+                SpreadsheetUrl = FirstNonEmpty(sheet?.SpreadsheetUrl ?? "", table.SpreadsheetUrl),
+                SheetId = FirstNonEmpty(sheet?.SheetId ?? "", table.SheetId),
+                SheetName = table.SheetName,
+                WikiRootToken = FirstNonEmpty(table.WikiRootToken, seed.WikiRootToken),
+                WikiNodeToken = FirstNonEmpty(sheet?.WikiNodeToken ?? "", table.WikiNodeToken),
+                OwnerRole = table.OwnerRole,
+                RegistryRecordId = table.RegistryRecordId,
+                SchemaReviewRequired = table.SchemaReviewRequired,
+                Status = "active",
+                FieldRow = table.FieldRow,
+                TypeRow = table.TypeRow,
+                DescriptionRow = table.DescriptionRow,
+                DataStartRow = table.DataStartRow,
+                TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
+            };
+            foreach (var field in table.Fields)
+            {
+                contract.Fields.Add(field);
+            }
+
+            return contract;
+        }
+
+        private static SheetCreationResult ToSheetCreationResult(SeedOnlineSheetResult sheet)
+        {
+            return new SheetCreationResult
+            {
+                SpreadsheetToken = sheet.SpreadsheetToken,
+                SpreadsheetUrl = sheet.SpreadsheetUrl,
+                SheetId = sheet.SheetId,
+                WikiNodeToken = sheet.WikiNodeToken
+            };
+        }
+
+        private static ValidationFinding ToValidationFinding(ProviderDoctorFinding finding, string tableId)
+        {
+            var validation = new ValidationFinding
+            {
+                Severity = finding.Severity,
+                Code = finding.Code,
+                Message = finding.Message,
+                Location = tableId
+            };
+            foreach (var pair in finding.Details)
+            {
+                validation.Details[pair.Key] = pair.Value;
+            }
+
+            validation.Details["tableId"] = tableId;
+            return validation;
+        }
+
+        private static IList<IList<string>> BuildMatrixFromWorkbook(WorkbookDocument workbook)
+        {
+            var sheet = workbook.Sheets.FirstOrDefault();
+            if (sheet == null)
+            {
+                return new List<IList<string>>();
+            }
+
+            var columns = sheet.Columns.ToList();
+            var matrix = new List<IList<string>>
+            {
+                columns.Select(c => FirstNonEmpty(c.Key, c.DisplayName)).ToList(),
+                columns.Select(c => FirstNonEmpty(c.ValueKind, "string")).ToList(),
+                columns.Select(c => c.Details.TryGetValue("description", out var description) ? description : "").ToList()
+            };
+            foreach (var row in sheet.Rows.OrderBy(r => r.SourceIndex))
+            {
+                var values = new List<string>();
+                foreach (var column in columns)
+                {
+                    values.Add(row.Cells.TryGetValue(column.Key, out var cell) ? cell.SemanticText : "");
+                }
+
+                matrix.Add(values);
+            }
+
+            return matrix;
+        }
+
+        private static bool UpsertProjectConfigSheet(JsonNode node, string tableId, SeedOnlineSheetResult sheet)
+        {
+            var target = FindProjectConfigTableNode(node, tableId);
+            if (target == null)
+            {
+                var tables = FindProjectConfigTablesArray(node);
+                if (tables == null)
+                {
+                    return false;
+                }
+
+                target = new JsonObject
+                {
+                    ["id"] = tableId
+                };
+                tables.Add(target);
+            }
+
+            var changed = false;
+            changed |= SetJsonString(target, "spreadsheetToken", sheet.SpreadsheetToken);
+            changed |= SetJsonString(target, "sheetId", sheet.SheetId);
+            changed |= SetJsonString(target, "url", sheet.SpreadsheetUrl);
+            changed |= SetJsonString(target, "onlineSheetUrl", sheet.SpreadsheetUrl);
+            return changed;
+        }
+
+        private SeedOnlineSheetResult FindExistingSheetInProjectConfig(SeedFromLocalXlsxContract seed, SeedTableContract table)
+        {
+            var path = ResolveWorkspacePath(FirstNonEmpty(table.ProjectConfigPath, seed.ProjectConfigPath));
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return new SeedOnlineSheetResult();
+            }
+
+            try
+            {
+                var node = JsonNode.Parse(File.ReadAllText(path, Encoding.UTF8));
+                var target = FindProjectConfigTableNode(node, table.TableId);
+                if (target == null)
+                {
+                    return new SeedOnlineSheetResult();
+                }
+
+                return new SeedOnlineSheetResult
+                {
+                    SpreadsheetToken = GetJsonNodeString(target, "spreadsheetToken", "spreadsheet"),
+                    SpreadsheetUrl = GetJsonNodeString(target, "spreadsheetUrl", "onlineSheetUrl", "url"),
+                    SheetId = GetJsonNodeString(target, "sheetId"),
+                    WikiNodeToken = GetJsonNodeString(target, "wikiNodeToken")
+                };
+            }
+            catch
+            {
+                return new SeedOnlineSheetResult();
+            }
+        }
+
+        private static JsonObject? FindProjectConfigTableNode(JsonNode? node, string tableId)
+        {
+            if (node is JsonObject obj)
+            {
+                var id = GetJsonNodeString(obj, "tableId", "id", "key");
+                if (string.Equals(id, tableId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return obj;
+                }
+
+                foreach (var pair in obj)
+                {
+                    var match = FindProjectConfigTableNode(pair.Value, tableId);
+                    if (match != null)
+                    {
+                        return match;
+                    }
+                }
+            }
+            else if (node is JsonArray array)
+            {
+                foreach (var item in array)
+                {
+                    var match = FindProjectConfigTableNode(item, tableId);
+                    if (match != null)
+                    {
+                        return match;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static JsonArray? FindProjectConfigTablesArray(JsonNode? node)
+        {
+            if (node is JsonObject obj)
+            {
+                foreach (var name in new[] { "tables", "configSheets", "tableMappings", "excelTables", "excelToSoTables" })
+                {
+                    if (obj.TryGetPropertyValue(name, out var value) && value is JsonArray array)
+                    {
+                        return array;
+                    }
+                }
+
+                foreach (var pair in obj)
+                {
+                    var match = FindProjectConfigTablesArray(pair.Value);
+                    if (match != null)
+                    {
+                        return match;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static string GetJsonNodeString(JsonObject obj, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                foreach (var pair in obj)
+                {
+                    if (string.Equals(pair.Key, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return pair.Value == null ? "" : pair.Value.ToString();
+                    }
+                }
+            }
+
+            return "";
+        }
+
+        private static bool SetJsonString(JsonObject obj, string name, string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            foreach (var pair in obj.ToList())
+            {
+                if (string.Equals(pair.Key, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.Equals(pair.Value == null ? "" : pair.Value.ToString(), value, StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+
+                    obj[pair.Key] = value;
+                    return true;
+                }
+            }
+
+            obj[name] = value;
+            return true;
+        }
+
+        private static string Trim(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return "";
+            }
+
+            text = text.Trim();
+            return text.Length <= 1000 ? text : text.Substring(0, 1000);
         }
 
         private string ResolveRegistryTableId(RegistryContract registry, string machineKey)

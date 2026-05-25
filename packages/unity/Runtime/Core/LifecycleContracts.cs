@@ -19,6 +19,7 @@ namespace ConfigSheetForge.Core
         public UnityExcelToSoContract UnityExcelToSo { get; set; } = new UnityExcelToSoContract();
         public MergePolicyContract MergePolicy { get; set; } = new MergePolicyContract();
         public PrGateReport GateReport { get; set; } = new PrGateReport();
+        public SeedFromLocalXlsxContract SeedFromLocalXlsx { get; set; } = new SeedFromLocalXlsxContract();
         public string GateReportPath { get; set; } = "";
         public string ReportPath { get; set; } = "";
         public List<BranchBindingContract> BranchBindings { get; set; } = new List<BranchBindingContract>();
@@ -40,6 +41,12 @@ namespace ConfigSheetForge.Core
         public string TableId { get; set; } = "";
         public string DisplayName { get; set; } = "";
         public string ExcelPath { get; set; } = "";
+        public string SourceXlsxPath { get; set; } = "";
+        public string CacheXlsxPath { get; set; } = "";
+        public string SemanticCachePath { get; set; } = "";
+        public string HashCachePath { get; set; } = "";
+        public string ProjectConfigPath { get; set; } = "";
+        public string RegistryRecordId { get; set; } = "";
         public string LocalCachePath { get; set; } = "";
         public string SpreadsheetToken { get; set; } = "";
         public string SpreadsheetUrl { get; set; } = "";
@@ -51,6 +58,11 @@ namespace ConfigSheetForge.Core
         public bool SchemaReviewRequired { get; set; } = true;
         public string OnlineSheetUrl { get; set; } = "";
         public string Status { get; set; } = "";
+        public int FieldRow { get; set; } = 0;
+        public int TypeRow { get; set; } = -1;
+        public int DescriptionRow { get; set; } = -1;
+        public int DataStartRow { get; set; } = -1;
+        public bool TreatUnknownTypesAsEnum { get; set; }
         public List<ContractFieldSpec> Fields { get; set; } = new List<ContractFieldSpec>();
     }
 
@@ -118,6 +130,7 @@ namespace ConfigSheetForge.Core
         public Dictionary<string, string> DocumentationTargets { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public PrGateReport PrGateReport { get; set; } = new PrGateReport();
         public string GateReportPath { get; set; } = "";
+        public List<SeedTableLifecycleResult> SeedTables { get; set; } = new List<SeedTableLifecycleResult>();
 
         public void AddFailure(string message)
         {
@@ -500,6 +513,10 @@ namespace ConfigSheetForge.Core
                 case "new-table":
                     await NewTableAsync(request, platform, result, cancellationToken).ConfigureAwait(false);
                     break;
+                case "seed-from-local-xlsx":
+                case "bootstrap-from-local-xlsx":
+                    await SeedFromLocalXlsxLifecycle.ExecuteAsync(request, platform, result, cancellationToken).ConfigureAwait(false);
+                    break;
                 case "sync-cache":
                     result.AddAction("sync-cache", request.DryRun ? "planned" : "ready", "sync-cache contract 已解析；实际同步由 provider 执行，并受三方一致性和 hash-gated cache 保护。");
                     break;
@@ -793,7 +810,7 @@ namespace ConfigSheetForge.Core
                 (json.IndexOf("\"tableId\": \"" + tableId + "\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
                  json.IndexOf("\"id\": \"" + tableId + "\"", StringComparison.OrdinalIgnoreCase) >= 0))
             {
-                return json;
+                return UpdateExistingJsonEntry(json, entry, tableId, excelPath);
             }
 
             var objectText = BuildJsonEntry(entry, tableId, excelPath, "    ");
@@ -843,6 +860,185 @@ namespace ConfigSheetForge.Core
             }
 
             return json;
+        }
+
+        private static string UpdateExistingJsonEntry(string json, UnityExcelToSoEntry entry, string tableId, string excelPath)
+        {
+            var keyIndex = FindJsonEntryKey(json, "tableId", tableId);
+            if (keyIndex < 0)
+            {
+                keyIndex = FindJsonEntryKey(json, "id", tableId);
+            }
+
+            if (keyIndex < 0)
+            {
+                return json;
+            }
+
+            var objectStart = FindObjectStart(json, keyIndex);
+            var objectEnd = objectStart < 0 ? -1 : FindMatchingBracket(json, objectStart, '{', '}');
+            if (objectStart < 0 || objectEnd < 0)
+            {
+                return json;
+            }
+
+            var before = json.Substring(0, objectStart);
+            var body = json.Substring(objectStart, objectEnd - objectStart + 1);
+            var after = json.Substring(objectEnd + 1);
+            body = UpsertJsonStringProperty(body, "excelPath", excelPath);
+            if (!string.IsNullOrWhiteSpace(entry.ScriptableObjectType))
+            {
+                body = UpsertJsonStringProperty(body, "scriptableObjectType", entry.ScriptableObjectType);
+            }
+
+            if (!string.IsNullOrWhiteSpace(entry.AssetPath))
+            {
+                body = UpsertJsonStringProperty(body, "assetPath", NormalizePath(entry.AssetPath));
+            }
+
+            foreach (var pair in entry.ExtraFields.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!string.Equals(pair.Key, "jsonArrayProperty", StringComparison.OrdinalIgnoreCase))
+                {
+                    body = UpsertJsonStringProperty(body, pair.Key, pair.Value);
+                }
+            }
+
+            return before + body + after;
+        }
+
+        private static int FindJsonEntryKey(string json, string key, string value)
+        {
+            var needle = "\"" + key + "\"";
+            var searchFrom = 0;
+            while (searchFrom < json.Length)
+            {
+                var keyIndex = json.IndexOf(needle, searchFrom, StringComparison.OrdinalIgnoreCase);
+                if (keyIndex < 0)
+                {
+                    return -1;
+                }
+
+                var colon = json.IndexOf(':', keyIndex + needle.Length);
+                if (colon < 0)
+                {
+                    return -1;
+                }
+
+                var valueStart = SkipWhitespace(json, colon + 1);
+                if (valueStart < json.Length && json[valueStart] == '"')
+                {
+                    int valueEnd;
+                    var parsed = ParseJsonString(json, valueStart, out valueEnd);
+                    if (string.Equals(parsed, value, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return keyIndex;
+                    }
+
+                    searchFrom = valueEnd + 1;
+                    continue;
+                }
+
+                searchFrom = colon + 1;
+            }
+
+            return -1;
+        }
+
+        private static string UpsertJsonStringProperty(string objectText, string key, string value)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                return objectText;
+            }
+
+            var propertyIndex = FindJsonProperty(objectText, key);
+            if (propertyIndex >= 0)
+            {
+                var colon = objectText.IndexOf(':', propertyIndex);
+                var valueStart = colon < 0 ? -1 : SkipWhitespace(objectText, colon + 1);
+                if (valueStart >= 0 && valueStart < objectText.Length && objectText[valueStart] == '"')
+                {
+                    int valueEnd;
+                    ParseJsonString(objectText, valueStart, out valueEnd);
+                    return objectText.Substring(0, valueStart) + "\"" + EscapeJson(value) + "\"" + objectText.Substring(valueEnd + 1);
+                }
+            }
+
+            var insertAt = objectText.LastIndexOf('}');
+            if (insertAt < 0)
+            {
+                return objectText;
+            }
+
+            var before = objectText.Substring(0, insertAt).TrimEnd();
+            var after = objectText.Substring(insertAt);
+            var needsComma = !before.EndsWith("{", StringComparison.Ordinal);
+            return before + (needsComma ? "," : "") + Environment.NewLine +
+                   "    \"" + EscapeJson(key) + "\": \"" + EscapeJson(value) + "\"" + Environment.NewLine +
+                   after;
+        }
+
+        private static int FindJsonProperty(string json, string key)
+        {
+            var needle = "\"" + key + "\"";
+            return json.IndexOf(needle, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int FindObjectStart(string json, int from)
+        {
+            for (var i = from; i >= 0; i--)
+            {
+                if (json[i] == '{')
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private static int SkipWhitespace(string text, int start)
+        {
+            while (start < text.Length && char.IsWhiteSpace(text[start]))
+            {
+                start++;
+            }
+
+            return start;
+        }
+
+        private static string ParseJsonString(string json, int start, out int end)
+        {
+            var builder = new System.Text.StringBuilder();
+            var escaped = false;
+            for (var i = start + 1; i < json.Length; i++)
+            {
+                var c = json[i];
+                if (escaped)
+                {
+                    builder.Append(c);
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    end = i;
+                    return builder.ToString();
+                }
+
+                builder.Append(c);
+            }
+
+            end = json.Length - 1;
+            return builder.ToString();
         }
 
         private static string BuildJsonEntry(UnityExcelToSoEntry entry, string tableId, string excelPath, string indent)
