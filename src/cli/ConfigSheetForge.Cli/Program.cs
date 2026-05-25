@@ -1249,40 +1249,15 @@ public static class Program
     private static async Task<RegistrySnapshot> LoadRegistrySnapshotFromLarkAsync(LarkCliGateway gateway, string baseToken, string locale, ParsedArgs args)
     {
         var snapshot = new RegistrySnapshot();
-        var tableResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+table-list", "--base-token", baseToken, "--offset", "0", "--limit", "100" });
-        foreach (var tableElement in FindJsonObjects(CombinedJsonOutput(tableResult), "table_id"))
+        var tableResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+table-list", "--base-token", baseToken, "--offset", "0", "--limit", "100", "--format", "json" });
+        foreach (var table in ParseLarkBaseTableListJson(CombinedJsonOutput(tableResult), locale))
         {
-            var tableId = GetJsonString(tableElement, "table_id", "tableId");
-            if (string.IsNullOrWhiteSpace(tableId))
-            {
-                continue;
-            }
-
-            var displayName = GetJsonString(tableElement, "table_name", "name", "tableName");
-            var table = new RegistryTableSnapshot
-            {
-                TableId = tableId,
-                DisplayName = displayName,
-                MachineKey = ResolveMachineKey(displayName, RegistryLocalization.Default(locale).Tables)
-            };
             snapshot.Tables.Add(table);
 
-            var fieldResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200" });
-            foreach (var fieldElement in FindJsonObjects(CombinedJsonOutput(fieldResult), "field_id"))
-            {
-                var fieldDisplay = GetJsonString(fieldElement, "field_name", "name", "fieldName");
-                var field = new RegistryFieldSnapshot
-                {
-                    FieldId = GetJsonString(fieldElement, "field_id", "fieldId"),
-                    DisplayName = fieldDisplay,
-                    MachineKey = ResolveMachineKey(fieldDisplay, RegistryLocalization.Default(locale).Fields),
-                    Type = GetJsonString(fieldElement, "type", "field_type", "fieldType"),
-                    IsDefaultField = IsDefaultBaseField(fieldDisplay)
-                };
-                table.Fields.Add(field);
-            }
+            var fieldResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-list", "--base-token", baseToken, "--table-id", table.TableId, "--offset", "0", "--limit", "200", "--format", "json" });
+            table.Fields.AddRange(ParseLarkBaseFieldListJson(CombinedJsonOutput(fieldResult), locale));
 
-            var recordResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200", "--format", "json" });
+            var recordResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", table.TableId, "--offset", "0", "--limit", "200", "--format", "json" });
             table.Records.AddRange(ParseLarkBaseRecordListJson(CombinedJsonOutput(recordResult)));
         }
 
@@ -1547,6 +1522,73 @@ public static class Program
         return string.IsNullOrWhiteSpace(result.Stdout) ? result.Stderr : result.Stdout;
     }
 
+    public static RegistrySnapshot ParseLarkBaseRegistrySnapshotJson(string tableListJson, IDictionary<string, string> fieldListJsonByTableId, IDictionary<string, string> recordListJsonByTableId, string locale)
+    {
+        var snapshot = new RegistrySnapshot();
+        foreach (var table in ParseLarkBaseTableListJson(tableListJson, locale))
+        {
+            if (fieldListJsonByTableId != null && fieldListJsonByTableId.TryGetValue(table.TableId, out var fieldJson))
+            {
+                table.Fields.AddRange(ParseLarkBaseFieldListJson(fieldJson, locale));
+            }
+
+            if (recordListJsonByTableId != null && recordListJsonByTableId.TryGetValue(table.TableId, out var recordJson))
+            {
+                table.Records.AddRange(ParseLarkBaseRecordListJson(recordJson));
+            }
+
+            snapshot.Tables.Add(table);
+        }
+
+        return snapshot;
+    }
+
+    public static IReadOnlyList<RegistryTableSnapshot> ParseLarkBaseTableListJson(string json, string locale)
+    {
+        var tables = new List<RegistryTableSnapshot>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in JsonCandidates(json))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(candidate);
+                CollectTableSnapshots(document.RootElement, tables, seen, locale);
+                if (tables.Count > 0)
+                {
+                    return tables;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return tables;
+    }
+
+    public static IReadOnlyList<RegistryFieldSnapshot> ParseLarkBaseFieldListJson(string json, string locale)
+    {
+        var fields = new List<RegistryFieldSnapshot>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in JsonCandidates(json))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(candidate);
+                CollectFieldSnapshots(document.RootElement, fields, seen, locale);
+                if (fields.Count > 0)
+                {
+                    return fields;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return fields;
+    }
+
     public static IReadOnlyList<RegistryRecordSnapshot> ParseLarkBaseRecordListJson(string json)
     {
         var records = new List<RegistryRecordSnapshot>();
@@ -1569,6 +1611,132 @@ public static class Program
         }
 
         return records;
+    }
+
+    private static void CollectTableSnapshots(JsonElement element, ICollection<RegistryTableSnapshot> tables, ISet<string> seen, string locale)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (TryGetJsonProperty(element, "tables", out var tableArray) && tableArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in tableArray.EnumerateArray())
+                {
+                    AddTableSnapshot(item, tables, seen, locale, allowPlainIdName: true);
+                }
+            }
+
+            AddTableSnapshot(element, tables, seen, locale, allowPlainIdName: false);
+            foreach (var property in element.EnumerateObject())
+            {
+                CollectTableSnapshots(property.Value, tables, seen, locale);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                CollectTableSnapshots(child, tables, seen, locale);
+            }
+        }
+    }
+
+    private static void AddTableSnapshot(JsonElement element, ICollection<RegistryTableSnapshot> tables, ISet<string> seen, string locale, bool allowPlainIdName)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var tableId = GetJsonString(element, "table_id", "tableId");
+        if (string.IsNullOrWhiteSpace(tableId) && allowPlainIdName)
+        {
+            tableId = GetJsonString(element, "id");
+        }
+
+        if (string.IsNullOrWhiteSpace(tableId) || !seen.Add(tableId))
+        {
+            return;
+        }
+
+        var displayName = GetJsonString(element, "table_name", "tableName");
+        if (string.IsNullOrWhiteSpace(displayName) && allowPlainIdName)
+        {
+            displayName = GetJsonString(element, "name");
+        }
+
+        tables.Add(new RegistryTableSnapshot
+        {
+            TableId = tableId,
+            DisplayName = displayName,
+            MachineKey = ResolveMachineKey(displayName, RegistryLocalization.Default(locale).Tables)
+        });
+    }
+
+    private static void CollectFieldSnapshots(JsonElement element, ICollection<RegistryFieldSnapshot> fields, ISet<string> seen, string locale)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (TryGetJsonProperty(element, "fields", out var fieldArray) && fieldArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in fieldArray.EnumerateArray())
+                {
+                    AddFieldSnapshot(item, fields, seen, locale, allowPlainIdName: true);
+                }
+            }
+
+            AddFieldSnapshot(element, fields, seen, locale, allowPlainIdName: false);
+            foreach (var property in element.EnumerateObject())
+            {
+                CollectFieldSnapshots(property.Value, fields, seen, locale);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                CollectFieldSnapshots(child, fields, seen, locale);
+            }
+        }
+    }
+
+    private static void AddFieldSnapshot(JsonElement element, ICollection<RegistryFieldSnapshot> fields, ISet<string> seen, string locale, bool allowPlainIdName)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var fieldId = GetJsonString(element, "field_id", "fieldId");
+        if (string.IsNullOrWhiteSpace(fieldId) && allowPlainIdName)
+        {
+            fieldId = GetJsonString(element, "id");
+        }
+
+        var displayName = GetJsonString(element, "field_name", "fieldName");
+        if (string.IsNullOrWhiteSpace(displayName) && allowPlainIdName)
+        {
+            displayName = GetJsonString(element, "name");
+        }
+
+        if (string.IsNullOrWhiteSpace(fieldId) && string.IsNullOrWhiteSpace(displayName))
+        {
+            return;
+        }
+
+        var key = FirstNonEmpty(fieldId, displayName);
+        if (!seen.Add(key))
+        {
+            return;
+        }
+
+        fields.Add(new RegistryFieldSnapshot
+        {
+            FieldId = fieldId,
+            DisplayName = displayName,
+            MachineKey = ResolveMachineKey(displayName, RegistryLocalization.Default(locale).Fields),
+            Type = GetJsonString(element, "type", "field_type", "fieldType"),
+            IsDefaultField = IsDefaultBaseField(displayName)
+        });
     }
 
     public static IReadOnlyList<RegistryRecordSnapshot> FindMatchingRegistryRecords(IEnumerable<RegistryRecordSnapshot> records, IDictionary<string, string> keys, string locale)
