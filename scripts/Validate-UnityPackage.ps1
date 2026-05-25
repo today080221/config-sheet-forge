@@ -91,4 +91,8 @@ foreach ($requiredText in @("BuildLifecycleInputsJson", "--inputs", "gateReportP
   }
 }
 
+if ($editorSources -notlike "*new UTF8Encoding(false)*") {
+  throw "Unity lifecycle inputs JSON must be written as UTF-8 without BOM."
+}
+
 Write-Host "Unity package structure and import smoke checks look valid."

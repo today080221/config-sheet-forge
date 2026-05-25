@@ -51,6 +51,8 @@ https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.3.
 
 Unity 项目 adapter 模式会通过 `Temp/ConfigSheetForge/unity-lifecycle/<operation>.inputs.json` 传窗口输入，并生成标准 `Temp/ConfigSheetForge/pr-gate-report.json` 给项目 gate wrapper / CI 使用。
 
+`*.inputs.json` 使用 UTF-8 无 BOM。Unity 会向项目 adapter 传 `--inputs <path>`；adapter 读取 inputs 后输出 lifecycle contract，再由 `apply-contract` 生成 `LifecycleContractResult`。`pr-gate-report` 的 `--report` 路径写入纯 `PrGateReport` JSON。
+
 Unity UPM 重新 resolve `packages-lock.json` 时，可能顺带刷新其它 git dependency 的 hash；接入 PR 里应单独核对 manifest/lock diff。
 
 ## 类型行约定

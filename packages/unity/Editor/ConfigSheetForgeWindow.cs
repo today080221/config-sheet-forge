@@ -16,6 +16,7 @@ namespace ConfigSheetForge.Unity.Editor
         private const int TablesTab = 1;
         private const int MergeTab = 2;
         private const int GateTab = 3;
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
 
         private string _cliPath = "config-sheet-forge";
         private string _rootQuery = "";
@@ -574,7 +575,7 @@ namespace ConfigSheetForge.Unity.Editor
                 : ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, ConfigSheetForgeEditorUtility.ExpandToken(_projectConfig.ContractRequestPath, projectRoot, _projectConfig, operation, defaultRequestPath, inputsPath, dryRun));
             var resultPath = Path.Combine(workDir, operation + ".result.json");
             var finalGateReportPath = ResolveGateReportPath(projectRoot);
-            File.WriteAllText(inputsPath, BuildLifecycleInputsJson(operation, dryRun, finalGateReportPath), Encoding.UTF8);
+            File.WriteAllText(inputsPath, BuildLifecycleInputsJson(operation, dryRun, finalGateReportPath), Utf8NoBom);
 
             var adapter = ConfigSheetForgeEditorUtility.CreateProjectLifecycleCommand(_projectConfig, projectRoot, operation, requestPath, inputsPath, dryRun);
             _lastCommand = adapter.ToCommandLine() + Environment.NewLine +
