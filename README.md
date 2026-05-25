@@ -37,7 +37,14 @@ dotnet run --project src/cli/ConfigSheetForge.Cli -- seed-from-xlsx --table Item
 dotnet run --project src/cli/ConfigSheetForge.Cli -- seed-from-xlsx --all --manifest "ProjectSettings/Example.ConfigSheetForge.json" --dry-run
 ```
 
-`seed-from-xlsx` 的 dry-run 会读取本地 xlsx 做便携子集预检和 semantic normalize，但不会写飞书、不会改本地 cache、不会改 ProjectSettings。apply 模式必须显式传 `--yes`；如果要更新 ExcelToSO settings，还必须传 `--confirm-excel-to-so`。
+`seed-from-xlsx` 的 dry-run 会读取本地 xlsx 做便携子集预检和 semantic normalize，并按当前 git branch / Feishu profile 预览目标 Wiki 工作区节点，例如 `项目配置表/branch-codex-config-seed`；不会写飞书、不会改本地 cache、不会改 ProjectSettings。apply 模式必须显式传 `--yes`；如果要更新 ExcelToSO settings，还必须传 `--confirm-excel-to-so`。
+
+长期同步在线表到本地 cache 可走 branch-aware lifecycle：
+
+```bash
+dotnet run --project src/cli/ConfigSheetForge.Cli -- sync-cache --manifest "ProjectSettings/Example.ConfigSheetForge.json" --dry-run --out Temp/ConfigSheetForge/sync-cache.result.json
+dotnet run --project src/cli/ConfigSheetForge.Cli -- apply-contract --request sync-cache.contract.json --out sync-cache.result.json
+```
 
 ## Contract lifecycle
 
@@ -50,10 +57,12 @@ dotnet run --project src/cli/ConfigSheetForge.Cli -- registry-migrate --base "<b
 
 core 支持 `bootstrap-registry`、`new-table`、`seed-from-local-xlsx`、`bootstrap-from-local-xlsx`、`sync-cache`、`compare-merge`、`pr-gate-report` 这些 operation。Base 和字段会保留 machine key 到中文显示名的映射，程序逻辑不依赖中文字段名。
 
+branch/profile 工作区由 contract 的 `branchWorkspace` 和 `branchBindings` 驱动。`requireOneToOneBinding=true` 时，同一 Git 分支不能绑定多个 Feishu profile，同一 profile 也不能被多个 Git 分支复用；冲突会阻断 seed/sync/merge/gate，并输出中文修复建议。
+
 ## Unity UPM 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.0
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.1
 ```
 
 安装后打开 `Tools > Config Sheet Forge` 或 `Tools > Config Sheet Forge > 打开同步窗口`。下游 Unity 项目推荐只保留薄菜单 adapter 和 `ProjectSettings/*ConfigSheetForge*.json` 项目配置，通用窗口、向导、contract 执行、三方比较和 gate UI 都由本包维护。

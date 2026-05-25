@@ -71,6 +71,12 @@ namespace ConfigSheetForge.Unity.Editor
             OpenTab(TablesTab);
         }
 
+        [MenuItem("Tools/Config Sheet Forge/同步在线 Cache")]
+        public static void OpenSyncCache()
+        {
+            OpenTab(StatusTab);
+        }
+
         [MenuItem("Tools/Config Sheet Forge/三方比较与合并")]
         public static void OpenCompareMerge()
         {
@@ -149,7 +155,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("复制 UPM", "复制通过 Unity Package Manager 安装此包的 Git URL。"), GUILayout.Width(88)))
             {
-                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.0";
+                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.1";
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("飞书在线 Sheet 是 Source of Truth，本地 Excel 只是兼容缓存。", EditorStyles.miniLabel);
@@ -172,10 +178,13 @@ namespace ConfigSheetForge.Unity.Editor
             DrawStatusRow("项目配置", _projectConfig.Exists, ToProjectRelativePath(_projectConfig.ProjectConfigPath), "未发现 ProjectSettings/*ConfigSheetForge*.json。");
             DrawReadonlyRow("schemaVersion", FirstNonEmpty(_projectConfig.SchemaVersion, "未声明"), "项目 config 中声明的 schema 版本。");
             DrawReadonlyRow("表数量", _projectConfig.TableCount > 0 ? _projectConfig.TableCount.ToString() : "未声明", "项目 config 中登记的配表数量。");
+            DrawReadonlyRow("当前 Branch 表数量", _projectConfig.TableCount > 0 ? _projectConfig.TableCount.ToString() : "未声明", "当前项目 config 可展示的 branch/profile 表数量；精确值以 BranchBindings + ConfigSheets 为准。");
             DrawReadonlyRow("lifecycle 模式", FirstNonEmpty(_projectConfig.LifecycleApplyMode, "未声明"), "项目 config 中声明的 lifecycle 写入模式。");
             DrawReadonlyRow("Gate 报告", FirstNonEmpty(_projectConfig.GateReportPath, "未声明"), "PR gate report 输出路径。");
             DrawReadonlyRow("Git 分支", FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch, "未知"), "当前本地 git branch。");
             DrawReadonlyRow("Feishu Profile", FirstNonEmpty(_projectConfig.BranchProfile, "未声明"), "项目 config 中绑定的 Feishu branch/profile。");
+            DrawReadonlyRow("Branch 节点", FirstNonEmpty(_projectConfig.BranchWikiNodeTitle, "未声明"), "当前 branch/profile 对应的 Wiki 节点标题。");
+            DrawReadonlyRow("Branch 节点链接", FirstNonEmpty(_projectConfig.BranchWikiNodeUrl, _projectConfig.BranchWikiNodeToken, "未声明"), "当前 branch/profile 对应的 Wiki 节点定位信息。");
             DrawStatusRow("本地配置", File.Exists(configPath), "已找到 .config-sheet-forge/config.json", "未找到；项目 adapter 可直接提供 contract。");
             DrawStatusRow("本地 Registry", File.Exists(registryPath), "已找到 .config-sheet-forge/registry.json", "未找到；在线 Base 注册中心可由 contract 驱动。");
             DrawStatusRow("项目 Adapter", _projectConfig.HasLifecycleAdapter, _projectConfig.AdapterDescription, "未配置 adapterScript 或 contractCommand。");
@@ -222,6 +231,14 @@ namespace ConfigSheetForge.Unity.Editor
 
             DrawStep(
                 "4",
+                "同步在线 Cache",
+                "从当前 branch/profile 的飞书在线表回读、导出、三方比较，再按 hash 更新本地 cache。",
+                "生成同步预览",
+                "通过项目 adapter 生成 sync-cache lifecycle contract；dry-run 不下载、不写文件。",
+                delegate { RunProjectLifecycle("sync-cache", dryRun: true); });
+
+            DrawStep(
+                "5",
                 "提交前检查",
                 "运行 gate，检查 semantic cache、portable subset 和 schema 风险。",
                 "运行 Gate",
@@ -245,6 +262,13 @@ namespace ConfigSheetForge.Unity.Editor
                     dryRun: true,
                     includeNewTableSteps: true);
                 DrawProjectSeedCard();
+                DrawProjectLifecycleCard(
+                    "同步在线 Cache",
+                    "从当前 branch/profile 的 BranchBindings + ConfigSheets 定位在线 Sheet；有变化且三方一致后才更新 .config-sheet-forge 缓存。",
+                    "生成同步预览",
+                    "sync-cache",
+                    dryRun: true,
+                    includeNewTableSteps: false);
                 return;
             }
 
@@ -746,6 +770,10 @@ namespace ConfigSheetForge.Unity.Editor
             builder.AppendLine("{");
             AppendJsonProperty(builder, "operation", operation, comma: true);
             AppendJsonProperty(builder, "dryRun", dryRun, comma: true);
+            AppendJsonProperty(builder, "gitBranch", FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch), comma: true);
+            AppendJsonProperty(builder, "feishuProfile", _projectConfig.BranchProfile, comma: true);
+            AppendJsonProperty(builder, "branchWikiNodeTitle", _projectConfig.BranchWikiNodeTitle, comma: true);
+            AppendJsonProperty(builder, "branchWikiNodeUrl", _projectConfig.BranchWikiNodeUrl, comma: true);
             AppendJsonProperty(builder, "tableId", _tableId, comma: true);
             AppendJsonProperty(builder, "title", _tableName, comma: true);
             AppendJsonProperty(builder, "displayName", _tableName, comma: true);
@@ -1030,6 +1058,11 @@ namespace ConfigSheetForge.Unity.Editor
         public static void OpenSeedFromLocalXlsx()
         {
             ConfigSheetForgeWindow.OpenSeedFromLocalXlsx();
+        }
+
+        public static void OpenSyncCache()
+        {
+            ConfigSheetForgeWindow.OpenSyncCache();
         }
 
         public static void OpenCompareMerge()

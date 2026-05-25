@@ -40,6 +40,7 @@ public static class Program
                 "discover-root" => await DiscoverRootAsync(parsed),
                 "new-table" => await NewTableAsync(parsed),
                 "sync" => await SyncAsync(parsed),
+                "sync-cache" => await SyncCacheLifecycleAsync(parsed),
                 "seed-from-xlsx" => await SeedFromXlsxAsync(parsed),
                 "merge" => await MergeAsync(parsed),
                 "gate" => await GateAsync(parsed),
@@ -325,6 +326,120 @@ public static class Program
         return hasError ? 1 : 0;
     }
 
+    private static async Task<int> SyncTableConfigsAsync(Workspace workspace, ParsedArgs args, IList<TableConfig> tables, string cacheDirectory, string excelCacheDirectory)
+    {
+        Directory.CreateDirectory(cacheDirectory);
+        Directory.CreateDirectory(excelCacheDirectory);
+        var hasError = false;
+        foreach (var table in tables)
+        {
+            var tableProvider = CreateProvider(FirstNonEmpty(table.Provider, workspace.Config.Provider));
+            var tableTemp = Path.Combine(Path.GetTempPath(), "csforge-sync-cache-" + Guid.NewGuid().ToString("N"), table.Id);
+            Directory.CreateDirectory(tableTemp);
+            var result = await tableProvider.ExportAsync(CreateProviderContext(workspace, args), new ProviderExportRequest
+            {
+                RootTokenOrUrl = FirstNonEmpty(table.Spreadsheet, workspace.Config.RootUrl, workspace.Config.RootToken),
+                SpreadsheetTokenOrUrl = table.Spreadsheet,
+                TableId = table.Id,
+                SheetId = table.SheetId,
+                Range = table.Range,
+                CacheDirectory = tableTemp,
+                FieldRow = table.FieldRow,
+                TypeRow = table.TypeRow,
+                DescriptionRow = table.DescriptionRow,
+                DataStartRow = table.DataStartRow,
+                TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
+            }, CancellationToken.None);
+
+            foreach (var finding in result.Findings)
+            {
+                PrintFinding(finding, args.HasFlag("details"));
+                if (finding.Severity == FindingSeverity.Error)
+                {
+                    hasError = true;
+                }
+            }
+
+            var tableHasError = result.Findings.Any(f => f.Severity == FindingSeverity.Error);
+            if (result.Workbook == null)
+            {
+                hasError = true;
+                continue;
+            }
+
+            var xlsxPath = FindExportedXlsx(tableTemp, table.Id);
+            if (string.IsNullOrWhiteSpace(xlsxPath))
+            {
+                var finding = new ProviderDoctorFinding
+                {
+                    Severity = FindingSeverity.Error,
+                    Code = "sync.triangulation_xlsx_missing",
+                    Message = table.Id + " 缺少导出的 xlsx，无法证明在线读取、xlsx 导出、语义归一化三方一致。请确认应用有导出权限后重试。"
+                };
+                PrintFinding(finding, args.HasFlag("details"));
+                hasError = true;
+                tableHasError = true;
+            }
+            else
+            {
+                var structureReport = XlsxWorkbookReader.InspectPortableStructures(xlsxPath, table.Id);
+                foreach (var finding in structureReport.Findings)
+                {
+                    PrintValidation(finding, args.HasFlag("details"));
+                    if (finding.Severity == FindingSeverity.Error)
+                    {
+                        hasError = true;
+                        tableHasError = true;
+                    }
+                }
+
+                var xlsxImport = XlsxWorkbookReader.Import(xlsxPath, new MatrixWorkbookImportOptions
+                {
+                    ProviderId = "xlsx",
+                    SourceId = xlsxPath,
+                    SourceTitle = table.Id,
+                    SheetId = table.SheetId,
+                    SheetName = table.Id,
+                    FieldRow = table.FieldRow,
+                    TypeRow = table.TypeRow,
+                    DescriptionRow = table.DescriptionRow,
+                    DataStartRow = table.DataStartRow,
+                    TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
+                });
+                foreach (var finding in xlsxImport.Report.Findings)
+                {
+                    PrintValidation(finding, args.HasFlag("details"));
+                    if (finding.Severity == FindingSeverity.Error)
+                    {
+                        hasError = true;
+                        tableHasError = true;
+                    }
+                }
+
+                var triangulation = SemanticTriangulator.Compare(result.Workbook, xlsxImport.Workbook, SemanticTriangulator.Normalize(result.Workbook));
+                if (!triangulation.Passed)
+                {
+                    hasError = true;
+                    tableHasError = true;
+                    foreach (var diff in triangulation.DiffSummary)
+                    {
+                        Console.WriteLine("[error] " + diff + " (sync.triangulation_failed)");
+                    }
+                }
+            }
+
+            if (!tableHasError)
+            {
+                var hash = SemanticHasher.ComputeHash(result.Workbook);
+                var cacheWrite = await WriteCacheIfChangedAsync(cacheDirectory, table.Id, result.Workbook, hash, xlsxPath, excelCacheDirectory);
+                Console.WriteLine(table.Id + ": " + hash);
+                Console.WriteLine(cacheWrite ? "  cache updated" : "  cache unchanged");
+            }
+        }
+
+        return hasError ? 1 : 0;
+    }
+
     private static async Task<int> SyncLocalInputAsync(Workspace workspace, string input, string tableId)
     {
         if (!File.Exists(input))
@@ -402,6 +517,91 @@ public static class Program
         return result.Success ? 0 : 1;
     }
 
+    private static async Task<int> SyncCacheLifecycleAsync(ParsedArgs args)
+    {
+        if (args.HasFlag("allow-user-fallback"))
+        {
+            throw new CliException("sync-cache 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+        }
+
+        var workspace = await LoadWorkspaceAsync(requireConfig: false);
+        var request = args.TryGet("manifest", out var manifestPath)
+            ? await ReadSeedManifestAsync(workspace, manifestPath, args)
+            : NewSeedRequestFromWorkspace(workspace, args);
+        request.Operation = "sync-cache";
+        request.DryRun = args.HasFlag("dry-run") || !args.HasFlag("yes");
+        request.SyncCache.TableId = args.Get("table", "");
+        request.SyncCache.CacheDirectory = args.Get("cache-dir", workspace.Paths.CacheDirectory);
+        request.SyncCache.ExcelCacheDirectory = args.Get("excel-cache-dir", Path.Combine(workspace.Paths.StateDirectory, "excel-cache"));
+        request.SyncCache.ConfirmApply = args.HasFlag("yes") || args.HasFlag("confirm");
+        if (!request.DryRun && !request.SyncCache.ConfirmApply)
+        {
+            throw new CliException("sync-cache apply 会更新本地 cache，必须显式传 --yes。", 2);
+        }
+
+        var result = await LifecycleExecutor.ExecuteAsync(request, new CliLifecyclePlatform(args, request), CancellationToken.None);
+        if (result.Success && !request.DryRun)
+        {
+            var tables = BuildSyncCacheTables(request, args.Get("table", ""));
+            if (tables.Count == 0)
+            {
+                result.AddFailure("sync-cache apply 找不到当前 branch/profile 的在线 Sheet 定位信息。请确认 ConfigSheets/ProjectSettings 已包含 spreadsheetToken、sheetId 和 TableId + Branch/Profile。");
+            }
+            else
+            {
+                var exit = await SyncTableConfigsAsync(workspace, args, tables, request.SyncCache.CacheDirectory, request.SyncCache.ExcelCacheDirectory);
+                if (exit != 0)
+                {
+                    result.AddFailure("sync-cache apply 没有通过在线读取 / xlsx 导出 / 三方一致性检查，已阻断 cache 更新。");
+                }
+            }
+        }
+
+        await EmitLifecycleResultAsync(args, result);
+        foreach (var failure in result.HumanReadableFailures)
+        {
+            Console.Error.WriteLine("[error] " + failure);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static List<TableConfig> BuildSyncCacheTables(LifecycleContractRequest request, string selectedTable)
+    {
+        var seed = request.SeedFromLocalXlsx ?? new SeedFromLocalXlsxContract();
+        var tables = new List<TableConfig>();
+        foreach (var table in seed.Tables)
+        {
+            if (!string.IsNullOrWhiteSpace(selectedTable) && !string.Equals(selectedTable, table.TableId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var spreadsheet = FirstNonEmpty(table.SpreadsheetToken, table.SpreadsheetUrl);
+            if (string.IsNullOrWhiteSpace(table.TableId) || string.IsNullOrWhiteSpace(spreadsheet))
+            {
+                continue;
+            }
+
+            tables.Add(new TableConfig
+            {
+                Id = table.TableId,
+                Name = FirstNonEmpty(table.DisplayName, table.TableId),
+                Provider = "lark",
+                Spreadsheet = spreadsheet,
+                SheetId = table.SheetId,
+                Range = "",
+                FieldRow = table.FieldRow,
+                TypeRow = table.TypeRow,
+                DescriptionRow = table.DescriptionRow,
+                DataStartRow = table.DataStartRow,
+                TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
+            });
+        }
+
+        return tables;
+    }
+
     private static async Task<LifecycleContractRequest> BuildSeedRequestAsync(Workspace workspace, ParsedArgs args)
     {
         if (args.TryGet("manifest", out var manifestPath))
@@ -460,7 +660,7 @@ public static class Program
     {
         var cacheDirectory = args.Get("cache-dir", workspace.Paths.CacheDirectory);
         var excelCacheDirectory = args.Get("excel-cache-dir", Path.Combine(workspace.Paths.StateDirectory, "excel-cache"));
-        return new LifecycleContractRequest
+        var request = new LifecycleContractRequest
         {
             Operation = "seed-from-local-xlsx",
             Locale = args.Get("locale", "zh-Hans"),
@@ -488,6 +688,27 @@ public static class Program
                 CleanupDefaultRows = args.HasFlag("cleanup-default-rows")
             }
         };
+
+        request.BranchWorkspace = new BranchWorkspaceContract
+        {
+            Mode = args.Get("branch-binding-mode", "git-branch-to-feishu-branch-profile"),
+            RootWikiToken = request.SeedFromLocalXlsx.WikiRootToken,
+            RootWikiTitle = request.SeedFromLocalXlsx.WikiParentTitle,
+            GitBranch = request.Git.Branch,
+            FeishuBranch = request.Git.FeishuBranch,
+            Profile = request.Git.Profile,
+            MainGitBranch = args.Get("main-git-branch", "main"),
+            MainFeishuBranch = args.Get("main-feishu-branch", "main"),
+            ProfileNameTemplate = args.Get("profile-name-template", "{gitBranch}"),
+            BranchNodeTitleTemplate = args.Get("branch-node-title-template", "branch-{slug}"),
+            MainNodeTitle = args.Get("main-node-title", "main"),
+            CreateIfMissing = !args.HasFlag("no-create-branch-node"),
+            RequireOneToOneBinding = !args.HasFlag("no-one-to-one-binding"),
+            BindingRegistryTable = args.Get("binding-registry-table", "BranchBindings"),
+            OwnerRole = args.Get("owner-role", "")
+        };
+
+        return request;
     }
 
     private static async Task<LifecycleContractRequest> ReadSeedManifestAsync(Workspace workspace, string manifestPath, ParsedArgs args)
@@ -518,9 +739,28 @@ public static class Program
         seedRequest.Registry.BaseToken = FirstNonEmpty(seedRequest.Registry.BaseToken, FindStringDeep(root, "baseToken", "registryBaseToken"));
         seedRequest.Registry.BaseUrl = FirstNonEmpty(seedRequest.Registry.BaseUrl, FindStringDeep(root, "baseUrl", "registryBaseUrl"));
         seedRequest.SeedFromLocalXlsx.WikiRootToken = FirstNonEmpty(seedRequest.SeedFromLocalXlsx.WikiRootToken, FindStringDeep(root, "wikiRootToken", "feishuRootToken", "rootToken"));
+        seedRequest.SeedFromLocalXlsx.WikiParentTitle = FirstNonEmpty(FindStringDeep(root, "wikiRootTitle", "rootWikiTitle", "wikiParentTitle"), seedRequest.SeedFromLocalXlsx.WikiParentTitle);
         seedRequest.SeedFromLocalXlsx.CacheDirectory = FirstNonEmpty(FindStringDeep(root, "semanticCacheDirectory", "cacheDirectory"), seedRequest.SeedFromLocalXlsx.CacheDirectory);
         seedRequest.SeedFromLocalXlsx.ExcelCacheDirectory = FirstNonEmpty(FindStringDeep(root, "excelCacheDirectory", "xlsxCacheDirectory"), seedRequest.SeedFromLocalXlsx.ExcelCacheDirectory);
         seedRequest.SeedFromLocalXlsx.BaselineStrategy = FirstNonEmpty(FindStringDeep(root, "baselineStrategy", "schemaReviewBaselineStrategy"), seedRequest.SeedFromLocalXlsx.BaselineStrategy);
+        seedRequest.BranchWorkspace.Mode = FirstNonEmpty(FindStringDeep(root, "branchBindingMode", "mode"), seedRequest.BranchWorkspace.Mode);
+        seedRequest.BranchWorkspace.RootWikiToken = FirstNonEmpty(FindStringDeep(root, "branchWorkspaceRootWikiToken", "wikiRootToken", "feishuRootToken", "rootToken"), seedRequest.SeedFromLocalXlsx.WikiRootToken);
+        seedRequest.BranchWorkspace.RootWikiTitle = FirstNonEmpty(FindStringDeep(root, "branchWorkspaceRootWikiTitle", "wikiRootTitle", "rootWikiTitle", "wikiParentTitle"), seedRequest.SeedFromLocalXlsx.WikiParentTitle);
+        seedRequest.BranchWorkspace.GitBranch = FirstNonEmpty(FindStringDeep(root, "gitBranch", "currentGitBranch"), seedRequest.Git.Branch);
+        seedRequest.BranchWorkspace.FeishuBranch = FirstNonEmpty(FindStringDeep(root, "feishuBranch", "larkBranch"), seedRequest.Git.FeishuBranch);
+        seedRequest.BranchWorkspace.Profile = FirstNonEmpty(FindStringDeep(root, "profile", "feishuProfile", "larkProfile"), seedRequest.Git.Profile);
+        seedRequest.BranchWorkspace.MainGitBranch = FirstNonEmpty(FindStringDeep(root, "mainGitBranch"), seedRequest.BranchWorkspace.MainGitBranch);
+        seedRequest.BranchWorkspace.MainFeishuBranch = FirstNonEmpty(FindStringDeep(root, "mainFeishuBranch"), seedRequest.BranchWorkspace.MainFeishuBranch);
+        seedRequest.BranchWorkspace.ProfileNameTemplate = FirstNonEmpty(FindStringDeep(root, "profileNameTemplate"), seedRequest.BranchWorkspace.ProfileNameTemplate);
+        seedRequest.BranchWorkspace.BranchNodeTitleTemplate = FirstNonEmpty(FindStringDeep(root, "branchNodeTitleTemplate"), seedRequest.BranchWorkspace.BranchNodeTitleTemplate);
+        seedRequest.BranchWorkspace.MainNodeTitle = FirstNonEmpty(FindStringDeep(root, "mainNodeTitle"), seedRequest.BranchWorkspace.MainNodeTitle);
+        seedRequest.BranchWorkspace.BindingRegistryTable = FirstNonEmpty(FindStringDeep(root, "bindingRegistryTable"), seedRequest.BranchWorkspace.BindingRegistryTable);
+        seedRequest.BranchWorkspace.RequireOneToOneBinding = FindBoolDeep(root, "requireOneToOneBinding", seedRequest.BranchWorkspace.RequireOneToOneBinding);
+        seedRequest.BranchWorkspace.CreateIfMissing = FindBoolDeep(root, "createIfMissing", seedRequest.BranchWorkspace.CreateIfMissing);
+        seedRequest.Git.Branch = FirstNonEmpty(seedRequest.BranchWorkspace.GitBranch, seedRequest.Git.Branch);
+        seedRequest.Git.FeishuBranch = FirstNonEmpty(seedRequest.BranchWorkspace.FeishuBranch, seedRequest.Git.FeishuBranch);
+        seedRequest.Git.Profile = FirstNonEmpty(seedRequest.BranchWorkspace.Profile, seedRequest.Git.Profile);
+        seedRequest.BranchBindings.AddRange(ParseBranchBindings(root));
         var defaultExcelToSoSettings = FindStringDeep(root, "excelToSoSettingsPath", "excelToScriptableObjectSettingsPath");
 
         foreach (var tableElement in FindTableArray(root))
@@ -546,7 +786,7 @@ public static class Program
             {
                 TableId = tableId,
                 DisplayName = FirstNonEmpty(GetJsonString(tableElement, "displayName", "name", "title"), tableId),
-                SourceXlsxPath = FirstNonEmpty(GetJsonString(tableElement, "sourceXlsxPath", "sourceXlsx", "oldExcelPath", "localSourcePath", "excelPath"), ""),
+                SourceXlsxPath = FirstNonEmpty(GetJsonString(tableElement, "sourceXlsxPath", "sourceXlsx", "oldExcelPath", "localSourcePath"), ""),
                 CacheXlsxPath = cacheXlsx,
                 SemanticCachePath = FirstNonEmpty(GetJsonString(tableElement, "semanticCachePath"), Path.Combine(seedRequest.SeedFromLocalXlsx.CacheDirectory, tableId + ".semantic.json")),
                 HashCachePath = FirstNonEmpty(GetJsonString(tableElement, "hashCachePath", "sha256Path"), Path.Combine(seedRequest.SeedFromLocalXlsx.CacheDirectory, tableId + ".sha256")),
@@ -556,6 +796,9 @@ public static class Program
                 SheetId = GetJsonString(tableElement, "sheetId"),
                 SheetName = FirstNonEmpty(GetJsonString(tableElement, "sheetName"), tableId),
                 WikiRootToken = FirstNonEmpty(GetJsonString(tableElement, "wikiRootToken"), seedRequest.SeedFromLocalXlsx.WikiRootToken),
+                WikiNodeUrl = GetJsonString(tableElement, "wikiNodeUrl", "branchWikiNodeUrl"),
+                Branch = GetJsonString(tableElement, "branch", "feishuBranch"),
+                Profile = GetJsonString(tableElement, "profile", "feishuProfile"),
                 OwnerRole = GetJsonString(tableElement, "ownerRole"),
                 RegistryRecordId = GetJsonString(tableElement, "registryRecordId"),
                 SchemaReviewRequired = GetJsonBool(tableElement, true, "schemaReviewRequired"),
@@ -1166,6 +1409,83 @@ public static class Program
         return "";
     }
 
+    private static bool FindBoolDeep(JsonElement element, string name, bool fallback)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var direct = GetJsonProperty(element, name);
+            if (direct.ValueKind == JsonValueKind.True)
+            {
+                return true;
+            }
+
+            if (direct.ValueKind == JsonValueKind.False)
+            {
+                return false;
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                var nested = FindBoolDeep(property.Value, name, fallback);
+                if (nested != fallback)
+                {
+                    return nested;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindBoolDeep(item, name, fallback);
+                if (nested != fallback)
+                {
+                    return nested;
+                }
+            }
+        }
+
+        return fallback;
+    }
+
+    private static IEnumerable<BranchBindingContract> ParseBranchBindings(JsonElement root)
+    {
+        var property = GetJsonProperty(root, "branchBindings", "bindings");
+        if (property.ValueKind != JsonValueKind.Array)
+        {
+            yield break;
+        }
+
+        foreach (var item in property.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var binding = new BranchBindingContract
+            {
+                GitBranch = GetJsonString(item, "gitBranch", "branch"),
+                FeishuBranch = GetJsonString(item, "feishuBranch", "larkBranch"),
+                Profile = GetJsonString(item, "profile", "feishuProfile", "larkProfile"),
+                Slug = GetJsonString(item, "slug"),
+                NodeTitle = GetJsonString(item, "nodeTitle", "wikiNodeTitle"),
+                WikiNodeToken = GetJsonString(item, "wikiNodeToken"),
+                WikiNodeUrl = GetJsonString(item, "wikiNodeUrl", "url"),
+                Status = GetJsonString(item, "status"),
+                OwnerRole = GetJsonString(item, "ownerRole"),
+                CreatedBy = GetJsonString(item, "createdBy"),
+                CreatedAt = GetJsonString(item, "createdAt"),
+                UpdatedAt = GetJsonString(item, "updatedAt")
+            };
+
+            if (!string.IsNullOrWhiteSpace(binding.GitBranch) || !string.IsNullOrWhiteSpace(binding.Profile) || !string.IsNullOrWhiteSpace(binding.FeishuBranch))
+            {
+                yield return binding;
+            }
+        }
+    }
+
     private static IEnumerable<JsonElement> FindTableArray(JsonElement root)
     {
         foreach (var name in new[] { "tables", "configSheets", "tableMappings", "excelTables", "excelToSoTables", "seedTables" })
@@ -1316,6 +1636,7 @@ public static class Program
         Console.WriteLine("  config-sheet-forge discover-root --query <name>");
         Console.WriteLine("  config-sheet-forge new-table --id <id> --name <name> [--spreadsheet <url-or-token>] [--sheet-id <id>] [--range <A1>] [--field-row <0>] [--type-row <1>] [--description-row <2>] [--data-start-row <3>]");
         Console.WriteLine("  config-sheet-forge sync [--table <id>] [--input <semantic.json>]");
+        Console.WriteLine("  config-sheet-forge sync-cache [--table <id>] [--manifest <project-config-or-contract>] [--dry-run] [--yes]");
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --table <id> --source-xlsx <path> --dry-run");
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --all --manifest <project-config-or-contract> --dry-run");
         Console.WriteLine("  config-sheet-forge merge --base <file> --ours <file> --theirs <file> [--out <report.md>]");
@@ -1441,12 +1762,14 @@ public static class Program
         await File.WriteAllTextAsync(path, json, Encoding.UTF8);
     }
 
-    private static async Task<bool> WriteCacheIfChangedAsync(string cacheDirectory, string tableId, WorkbookDocument workbook, string hash, string? tempXlsxPath)
+    private static async Task<bool> WriteCacheIfChangedAsync(string cacheDirectory, string tableId, WorkbookDocument workbook, string hash, string? tempXlsxPath, string? xlsxDirectory = null)
     {
         Directory.CreateDirectory(cacheDirectory);
+        var xlsxRoot = FirstNonEmpty(xlsxDirectory ?? "", cacheDirectory);
+        Directory.CreateDirectory(xlsxRoot);
         var semanticPath = Path.Combine(cacheDirectory, tableId + ".semantic.json");
         var shaPath = Path.Combine(cacheDirectory, tableId + ".sha256");
-        var xlsxPath = Path.Combine(cacheDirectory, MakeSafeFileName(tableId) + ".xlsx");
+        var xlsxPath = Path.Combine(xlsxRoot, MakeSafeFileName(tableId) + ".xlsx");
         var existingHash = await ReadExistingHashAsync(shaPath);
         var hasRequiredFiles = File.Exists(semanticPath) && (string.IsNullOrWhiteSpace(tempXlsxPath) || File.Exists(xlsxPath));
         if (string.Equals(existingHash, hash, StringComparison.Ordinal) && hasRequiredFiles)
@@ -1562,7 +1885,7 @@ public static class Program
         return value.Length <= 8 ? "********" : value.Substring(0, 4) + "..." + value.Substring(value.Length - 4);
     }
 
-    private sealed class CliLifecyclePlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform
+    private sealed class CliLifecyclePlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform, IBranchWorkspacePlatform
     {
         private readonly ParsedArgs _args;
         private readonly LifecycleContractRequest _request;
@@ -1645,15 +1968,29 @@ public static class Program
             {
                 [mapping.Fields["TableId"]] = table.TableId,
                 [mapping.Fields["DisplayName"]] = FirstNonEmpty(table.DisplayName, table.TableId),
+                [mapping.Fields["Branch"]] = FirstNonEmpty(table.Branch, table.Profile, _request.BranchWorkspace.FeishuBranch, _request.Git.FeishuBranch, _request.Git.Profile, _request.Git.Branch),
+                [mapping.Fields["Profile"]] = FirstNonEmpty(table.Profile, _request.BranchWorkspace.Profile, _request.Git.Profile),
+                [mapping.Fields["WikiNodeToken"]] = FirstNonEmpty(table.WikiNodeToken, _request.BranchWorkspace.ExistingWikiNodeToken),
+                [mapping.Fields["WikiNodeUrl"]] = FirstNonEmpty(table.WikiNodeUrl, _request.BranchWorkspace.ExistingWikiNodeUrl),
                 [mapping.Fields["ExcelPath"]] = FirstNonEmpty(table.ExcelPath, table.LocalCachePath),
                 [mapping.Fields["SpreadsheetToken"]] = sheet.SpreadsheetToken,
                 [mapping.Fields["SheetId"]] = sheet.SheetId,
+                [mapping.Fields["SemanticHash"]] = table.SemanticHash,
                 [mapping.Fields["OwnerRole"]] = table.OwnerRole,
                 [mapping.Fields["SchemaReviewRequired"]] = table.SchemaReviewRequired ? "是" : "否",
                 [mapping.Fields["OnlineSheetUrl"]] = FirstNonEmpty(sheet.SpreadsheetUrl, table.OnlineSheetUrl),
-                [mapping.Fields["Status"]] = FirstNonEmpty(table.Status, "active")
+                [mapping.Fields["Status"]] = FirstNonEmpty(table.Status, "active"),
+                [mapping.Fields["UpdatedAt"]] = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture)
             };
-            var recordId = FirstNonEmpty(registry.RegistryRecordId, await FindRegistryRecordIdAsync(registry.BaseToken, tableId, mapping.Fields["TableId"], table.TableId));
+            var branchKey = FirstNonEmpty(table.Branch, table.Profile, _request.BranchWorkspace.FeishuBranch, _request.Git.FeishuBranch, _request.Git.Profile, _request.Git.Branch);
+            var recordId = FirstNonEmpty(
+                registry.RegistryRecordId,
+                await FindRegistryRecordIdAsync(registry.BaseToken, tableId, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    [mapping.Fields["TableId"]] = table.TableId,
+                    [mapping.Fields["Branch"]] = branchKey
+                }),
+                await FindRegistryRecordIdAsync(registry.BaseToken, tableId, mapping.Fields["TableId"], table.TableId));
             var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body) };
             if (!string.IsNullOrWhiteSpace(recordId))
             {
@@ -1676,10 +2013,15 @@ public static class Program
                 [mapping.Fields["TableId"]] = table.TableId,
                 [mapping.Fields["DisplayName"]] = FirstNonEmpty(table.DisplayName, table.TableId),
                 [mapping.Fields["Branch"]] = FirstNonEmpty(git.FeishuBranch, git.Profile, git.Branch),
+                [mapping.Fields["Profile"]] = FirstNonEmpty(git.Profile, git.FeishuBranch, git.Branch),
                 [mapping.Fields["Status"]] = "pending",
                 ["Reason"] = reason
             };
-            var recordId = await FindRegistryRecordIdAsync(registry.BaseToken, tableId, mapping.Fields["TableId"], table.TableId);
+            var recordId = await FindRegistryRecordIdAsync(registry.BaseToken, tableId, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [mapping.Fields["TableId"]] = table.TableId,
+                [mapping.Fields["Branch"]] = FirstNonEmpty(git.FeishuBranch, git.Profile, git.Branch)
+            });
             var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body) };
             if (!string.IsNullOrWhiteSpace(recordId))
             {
@@ -1704,6 +2046,144 @@ public static class Program
                 Status = result.Success ? "done" : "failed",
                 Message = result.Success ? "已应用注册中心迁移。" : string.Join(" ", result.HumanReadableFailures)
             };
+        }
+
+        public async Task<BranchWorkspaceResolution> EnsureBranchWorkspaceAsync(BranchWorkspaceContract workspace, BranchWorkspaceResolution planned, CancellationToken cancellationToken)
+        {
+            planned = planned ?? new BranchWorkspaceResolution();
+            if (!string.IsNullOrWhiteSpace(planned.WikiNodeToken))
+            {
+                try
+                {
+                    var existing = await RunLarkCliStrictAsync(_gateway, _args, new[] { "wiki", "+node-get", "--node-token", planned.WikiNodeToken });
+                    ApplyWikiNodeJson(planned, CombinedJsonOutput(existing));
+                    planned.Status = "reused";
+                    return planned;
+                }
+                catch (CliException)
+                {
+                    planned.WikiNodeToken = "";
+                    planned.WikiNodeUrl = "";
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(planned.RootWikiToken))
+            {
+                planned.Status = "failed";
+                return planned;
+            }
+
+            var rootInfo = new BranchWorkspaceResolution();
+            try
+            {
+                var root = await RunLarkCliStrictAsync(_gateway, _args, new[] { "wiki", "+node-get", "--node-token", planned.RootWikiToken });
+                ApplyWikiNodeJson(rootInfo, CombinedJsonOutput(root));
+            }
+            catch (CliException)
+            {
+                planned.Status = "failed";
+                return planned;
+            }
+
+            if (!string.IsNullOrWhiteSpace(rootInfo.CreatedBy))
+            {
+                planned.CreatedBy = FirstNonEmpty(planned.CreatedBy, rootInfo.CreatedBy);
+            }
+
+            var parentNodeToken = FirstNonEmpty(rootInfo.WikiNodeToken, planned.RootWikiToken);
+            var spaceId = rootInfo.Status;
+            if (!string.IsNullOrWhiteSpace(spaceId))
+            {
+                try
+                {
+                    var children = await RunLarkCliStrictAsync(_gateway, _args, new[] { "wiki", "+node-list", "--space-id", spaceId, "--parent-node-token", parentNodeToken, "--page-all", "--page-limit", "20" });
+                    var existingChild = FindWikiChildByTitle(CombinedJsonOutput(children), planned.NodeTitle);
+                    if (!string.IsNullOrWhiteSpace(existingChild.WikiNodeToken))
+                    {
+                        planned.WikiNodeToken = existingChild.WikiNodeToken;
+                        planned.WikiNodeUrl = existingChild.WikiNodeUrl;
+                        planned.Status = "reused";
+                        return planned;
+                    }
+                }
+                catch (CliException)
+                {
+                    // Listing is an optimization. If the bot can create under the parent, the next step will still work.
+                }
+            }
+
+            if (!planned.CreateIfMissing)
+            {
+                planned.Status = "missing";
+                return planned;
+            }
+
+            try
+            {
+                var create = await RunLarkCliStrictAsync(_gateway, _args, new[] { "wiki", "+node-create", "--parent-node-token", parentNodeToken, "--title", planned.NodeTitle, "--obj-type", "docx" });
+                ApplyWikiNodeJson(planned, CombinedJsonOutput(create));
+                planned.Status = "created";
+            }
+            catch (CliException)
+            {
+                planned.Status = "failed";
+            }
+
+            return planned;
+        }
+
+        public async Task<LifecycleActionResult> UpsertBranchBindingAsync(RegistryContract registry, BranchWorkspaceResolution resolution, CancellationToken cancellationToken)
+        {
+            var action = new LifecycleActionResult
+            {
+                Action = "registry.branch_bindings.upsert",
+                Status = "skipped",
+                Message = "未配置 Base token，跳过 BranchBindings 回填。"
+            };
+            action.Details["gitBranch"] = resolution.GitBranch;
+            action.Details["profile"] = resolution.Profile;
+            action.Details["wikiNodeToken"] = resolution.WikiNodeToken;
+            action.Details["wikiNodeUrl"] = resolution.WikiNodeUrl;
+
+            if (string.IsNullOrWhiteSpace(registry.BaseToken))
+            {
+                return action;
+            }
+
+            var tableId = ResolveRegistryTableId(registry, FirstNonEmpty(resolution.BindingRegistryTable, "BranchBindings"));
+            var mapping = RegistryLocalization.Default(_request.Locale);
+            var now = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+            var body = new Dictionary<string, object>
+            {
+                [mapping.Fields["GitBranch"]] = resolution.GitBranch,
+                [mapping.Fields["FeishuBranch"]] = resolution.FeishuBranch,
+                [mapping.Fields["Profile"]] = resolution.Profile,
+                [mapping.Fields["WikiNodeToken"]] = resolution.WikiNodeToken,
+                [mapping.Fields["WikiNodeUrl"]] = resolution.WikiNodeUrl,
+                [mapping.Fields["Status"]] = FirstNonEmpty(resolution.Status, "active"),
+                [mapping.Fields["OwnerRole"]] = resolution.OwnerRole,
+                [mapping.Fields["CreatedBy"]] = resolution.CreatedBy,
+                [mapping.Fields["UpdatedAt"]] = now
+            };
+
+            var keys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [mapping.Fields["GitBranch"]] = resolution.GitBranch,
+                [mapping.Fields["Profile"]] = FirstNonEmpty(resolution.Profile, resolution.FeishuBranch)
+            };
+            var recordId = await FindRegistryRecordIdAsync(registry.BaseToken, tableId, keys);
+            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body, JsonOptions) };
+            if (!string.IsNullOrWhiteSpace(recordId))
+            {
+                command.Add("--record-id");
+                command.Add(recordId);
+            }
+
+            var upsert = await RunLarkCliStrictAsync(_gateway, _args, command);
+            action.Status = "done";
+            action.Message = "已按 GitBranch + Profile 登记 BranchBindings。";
+            action.Details["recordId"] = FirstNonEmpty(ParseRecordId(CombinedJsonOutput(upsert)), recordId);
+            return action;
         }
 
         public Task<SeedLocalWorkbookResult> ReadLocalXlsxAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, CancellationToken cancellationToken)
@@ -1942,7 +2422,7 @@ public static class Program
                 return action;
             }
 
-            var changed = UpsertProjectConfigSheet(node, table.TableId, sheet);
+            var changed = UpsertProjectConfigSheet(node, table, sheet, _request.BranchWorkspace);
             if (changed)
             {
                 await File.WriteAllTextAsync(path, node.ToJsonString(JsonOptions) + Environment.NewLine, Encoding.UTF8, cancellationToken);
@@ -2115,6 +2595,10 @@ public static class Program
                 SheetName = table.SheetName,
                 WikiRootToken = FirstNonEmpty(table.WikiRootToken, seed.WikiRootToken),
                 WikiNodeToken = FirstNonEmpty(sheet?.WikiNodeToken ?? "", table.WikiNodeToken),
+                WikiNodeUrl = table.WikiNodeUrl,
+                Branch = table.Branch,
+                Profile = table.Profile,
+                SemanticHash = table.SemanticHash,
                 OwnerRole = table.OwnerRole,
                 RegistryRecordId = table.RegistryRecordId,
                 SchemaReviewRequired = table.SchemaReviewRequired,
@@ -2191,9 +2675,10 @@ public static class Program
             return matrix;
         }
 
-        private static bool UpsertProjectConfigSheet(JsonNode node, string tableId, SeedOnlineSheetResult sheet)
+        private static bool UpsertProjectConfigSheet(JsonNode node, SeedTableContract table, SeedOnlineSheetResult sheet, BranchWorkspaceContract workspace)
         {
-            var target = FindProjectConfigTableNode(node, tableId);
+            var tableId = table.TableId;
+            var target = FindProjectConfigTableNode(node, tableId, FirstNonEmpty(table.Branch, table.Profile));
             if (target == null)
             {
                 var tables = FindProjectConfigTablesArray(node);
@@ -2214,6 +2699,11 @@ public static class Program
             changed |= SetJsonString(target, "sheetId", sheet.SheetId);
             changed |= SetJsonString(target, "url", sheet.SpreadsheetUrl);
             changed |= SetJsonString(target, "onlineSheetUrl", sheet.SpreadsheetUrl);
+            changed |= SetJsonString(target, "branch", FirstNonEmpty(table.Branch, workspace.FeishuBranch));
+            changed |= SetJsonString(target, "profile", FirstNonEmpty(table.Profile, workspace.Profile));
+            changed |= SetJsonString(target, "wikiNodeToken", FirstNonEmpty(sheet.WikiNodeToken, table.WikiNodeToken, workspace.ExistingWikiNodeToken));
+            changed |= SetJsonString(target, "branchWikiNodeToken", FirstNonEmpty(table.WikiRootToken, workspace.ExistingWikiNodeToken));
+            changed |= SetJsonString(target, "branchWikiNodeUrl", FirstNonEmpty(table.WikiNodeUrl, workspace.ExistingWikiNodeUrl));
             return changed;
         }
 
@@ -2228,7 +2718,7 @@ public static class Program
             try
             {
                 var node = JsonNode.Parse(File.ReadAllText(path, Encoding.UTF8));
-                var target = FindProjectConfigTableNode(node, table.TableId);
+                var target = FindProjectConfigTableNode(node, table.TableId, FirstNonEmpty(table.Branch, table.Profile));
                 if (target == null)
                 {
                     return new SeedOnlineSheetResult();
@@ -2248,38 +2738,47 @@ public static class Program
             }
         }
 
-        private static JsonObject? FindProjectConfigTableNode(JsonNode? node, string tableId)
+        private static JsonObject? FindProjectConfigTableNode(JsonNode? node, string tableId, string branchKey = "")
+        {
+            var candidates = new List<JsonObject>();
+            CollectProjectConfigTableNodes(node, tableId, candidates);
+            if (!string.IsNullOrWhiteSpace(branchKey))
+            {
+                foreach (var candidate in candidates)
+                {
+                    var candidateBranch = FirstNonEmpty(GetJsonNodeString(candidate, "branch", "feishuBranch"), GetJsonNodeString(candidate, "profile"));
+                    if (string.Equals(candidateBranch, branchKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+
+            return candidates.FirstOrDefault();
+        }
+
+        private static void CollectProjectConfigTableNodes(JsonNode? node, string tableId, IList<JsonObject> candidates)
         {
             if (node is JsonObject obj)
             {
                 var id = GetJsonNodeString(obj, "tableId", "id", "key");
                 if (string.Equals(id, tableId, StringComparison.OrdinalIgnoreCase))
                 {
-                    return obj;
+                    candidates.Add(obj);
                 }
 
                 foreach (var pair in obj)
                 {
-                    var match = FindProjectConfigTableNode(pair.Value, tableId);
-                    if (match != null)
-                    {
-                        return match;
-                    }
+                    CollectProjectConfigTableNodes(pair.Value, tableId, candidates);
                 }
             }
             else if (node is JsonArray array)
             {
                 foreach (var item in array)
                 {
-                    var match = FindProjectConfigTableNode(item, tableId);
-                    if (match != null)
-                    {
-                        return match;
-                    }
+                    CollectProjectConfigTableNodes(item, tableId, candidates);
                 }
             }
-
-            return null;
         }
 
         private static JsonArray? FindProjectConfigTablesArray(JsonNode? node)
@@ -2395,6 +2894,78 @@ public static class Program
             }
 
             return "";
+        }
+
+        private async Task<string> FindRegistryRecordIdAsync(string baseToken, string tableId, IDictionary<string, string> keys)
+        {
+            if (keys == null || keys.Count == 0 || keys.Values.Any(string.IsNullOrWhiteSpace))
+            {
+                return "";
+            }
+
+            var list = await RunLarkCliStrictAsync(_gateway, _args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200" });
+            foreach (var record in FindJsonObjects(CombinedJsonOutput(list), "record_id"))
+            {
+                if (!record.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var matched = 0;
+                foreach (var key in keys)
+                {
+                    foreach (var field in fields.EnumerateObject())
+                    {
+                        if (string.Equals(field.Name, key.Key, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(JsonElementToText(field.Value), key.Value, StringComparison.OrdinalIgnoreCase))
+                        {
+                            matched++;
+                            break;
+                        }
+                    }
+                }
+
+                if (matched == keys.Count)
+                {
+                    return GetJsonString(record, "record_id", "recordId");
+                }
+            }
+
+            return "";
+        }
+
+        private static void ApplyWikiNodeJson(BranchWorkspaceResolution resolution, string json)
+        {
+            foreach (var node in FindJsonObjects(json, "node_token"))
+            {
+                resolution.WikiNodeToken = FirstNonEmpty(resolution.WikiNodeToken, GetJsonString(node, "node_token", "nodeToken"));
+                resolution.WikiNodeUrl = FirstNonEmpty(resolution.WikiNodeUrl, GetJsonString(node, "url", "node_url", "nodeUrl"));
+                resolution.NodeTitle = FirstNonEmpty(GetJsonString(node, "title"), resolution.NodeTitle);
+                resolution.Status = FirstNonEmpty(GetJsonString(node, "space_id", "spaceId"), resolution.Status);
+                resolution.CreatedBy = FirstNonEmpty(resolution.CreatedBy, GetJsonString(node, "creator", "owner"));
+            }
+        }
+
+        private static BranchWorkspaceResolution FindWikiChildByTitle(string json, string title)
+        {
+            foreach (var node in FindJsonObjects(json, "node_token"))
+            {
+                if (!string.Equals(GetJsonString(node, "title"), title, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var resolution = new BranchWorkspaceResolution
+                {
+                    NodeTitle = title,
+                    WikiNodeToken = GetJsonString(node, "node_token", "nodeToken"),
+                    WikiNodeUrl = GetJsonString(node, "url", "node_url", "nodeUrl"),
+                    Status = GetJsonString(node, "space_id", "spaceId")
+                };
+                return resolution;
+            }
+
+            return new BranchWorkspaceResolution();
         }
 
         private static SheetCreationResult ParseSheetCreationResult(string json)

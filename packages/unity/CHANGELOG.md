@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+- 新增 branch/profile workspace resolver，seed dry-run/apply 会先定位或创建 `项目配置表/<branch node>`，不再直接挂到 Wiki 根节点。
+- 新增 BranchBindings 一对一校验和 upsert 结果字段，ConfigSheets 注册按 `TableId + Branch/Profile` 维度登记。
+- 新增 `sync-cache` lifecycle/CLI 预览链路，按 BranchBindings + ConfigSheets 定位在线表，并保留 hash-gated cache 语义。
+- PR gate report 增加 BranchBindings 状态检查；`--report` 仍写纯 `PrGateReport` 本体 JSON。
+- Unity 窗口新增 branch 工作区状态、同步在线 Cache 入口和 `OpenSyncCache()` 稳定 Editor API。
+
 ## 0.4.0
 
 - 新增 `seed-from-xlsx` CLI，以及 `seed-from-local-xlsx` / `bootstrap-from-local-xlsx` lifecycle operation。

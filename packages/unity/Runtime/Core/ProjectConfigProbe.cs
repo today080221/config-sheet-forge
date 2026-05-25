@@ -15,6 +15,9 @@ namespace ConfigSheetForge.Core
         public string GitBranch { get; set; } = "";
         public string FeishuBranch { get; set; } = "";
         public string Profile { get; set; } = "";
+        public string BranchWikiNodeTitle { get; set; } = "";
+        public string BranchWikiNodeUrl { get; set; } = "";
+        public string BranchWikiNodeToken { get; set; } = "";
         public string AdapterScript { get; set; } = "";
         public string AdapterInterpreter { get; set; } = "";
         public string ContractCommand { get; set; } = "";
@@ -87,6 +90,9 @@ namespace ConfigSheetForge.Core
                 GitBranch = FindStringValue(json, "gitBranch", "currentGitBranch", "branch"),
                 FeishuBranch = FindStringValue(json, "feishuBranch", "larkBranch"),
                 Profile = FindStringValue(json, "profile", "feishuProfile", "larkProfile"),
+                BranchWikiNodeTitle = FindStringValue(json, "branchWikiNodeTitle", "wikiNodeTitle", "nodeTitle"),
+                BranchWikiNodeUrl = FindStringValue(json, "branchWikiNodeUrl", "wikiNodeUrl"),
+                BranchWikiNodeToken = FindStringValue(json, "branchWikiNodeToken", "wikiNodeToken"),
                 AdapterScript = FindStringValue(json, "adapterScript", "lifecycleAdapterScript", "contractAdapterScript", "adapterPath"),
                 AdapterInterpreter = FindStringValue(json, "adapterInterpreter", "scriptInterpreter", "interpreter"),
                 ContractCommand = FindStringValue(json, "contractCommand", "lifecycleContractCommand", "adapterCommand"),

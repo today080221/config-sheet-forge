@@ -19,6 +19,8 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("datetime normalization does not assume local timezone", () => RunSync(DateTimeNormalizationDoesNotAssumeLocalTimezone)),
     ("registry localization keeps machine keys", () => RunSync(RegistryLocalizationKeepsMachineKeys)),
     ("registry migration cleans default rows and fields", () => RunSync(RegistryMigrationCleansDefaults)),
+    ("branch workspace resolver creates stable slugs", () => RunSync(BranchWorkspaceResolverCreatesStableSlugs)),
+    ("branch binding one-to-one conflict blocks lifecycle", BranchBindingOneToOneConflictBlocksLifecycle),
     ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
     ("excel to so updater appends json settings", () => RunSync(ExcelToSoUpdaterAppendsJsonSettings)),
@@ -26,6 +28,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("project config probe reads lifecycle summary", () => RunSync(ProjectConfigProbeReadsLifecycleSummary)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
     ("seed dry-run plans xlsx migration without writes", SeedDryRunPlansXlsxMigrationWithoutWrites),
+    ("seed manifest does not treat cache excelPath as source", SeedManifestDoesNotTreatCacheExcelPathAsSource),
     ("seed dry-run blocks merged xlsx cells", SeedDryRunBlocksMergedCells),
     ("portable subset blocks unsupported structures", () => RunSync(PortableSubsetBlocksUnsupportedStructures)),
     ("triangulation passes and fails with readable diffs", () => RunSync(TriangulationPassesAndFailsWithReadableDiffs)),
@@ -225,6 +228,8 @@ static void RegistryLocalizationKeepsMachineKeys()
     var mapping = RegistryLocalization.Default("zh-Hans");
     AssertEqual("配表清单", mapping.Tables["ConfigSheets"], "ConfigSheets should have a Chinese display name.");
     AssertEqual("配表ID", mapping.Fields["TableId"], "TableId should have a Chinese display name.");
+    AssertTrue(mapping.Fields.ContainsKey("WikiNodeToken"), "ConfigSheets should support wiki node token for branch-aware registration.");
+    AssertTrue(mapping.Fields.ContainsKey("SemanticHash"), "ConfigSheets should support semantic hash for branch-aware registration.");
     AssertTrue(mapping.Tables.ContainsKey("ConfigSheets"), "Machine key must remain in the mapping.");
 }
 
@@ -257,6 +262,52 @@ static void RegistryMigrationCleansDefaults()
     AssertTrue(plan.Actions.Any(a => a.Action == "registry.table.rename"), "Existing English table should be renamed for UI display.");
     AssertTrue(plan.Actions.Any(a => a.Action == "registry.record.delete_empty"), "Default empty rows should be cleaned.");
     AssertTrue(plan.Actions.Any(a => a.Action == "registry.field.delete_default"), "Default fields should be cleaned.");
+}
+
+static void BranchWorkspaceResolverCreatesStableSlugs()
+{
+    var request = new LifecycleContractRequest
+    {
+        Git = new ContractGitSpec { Branch = "codex/config-sheet-seed-feishu-main" },
+        BranchWorkspace = new BranchWorkspaceContract
+        {
+            RootWikiToken = "wik_root",
+            RootWikiTitle = "项目配置表",
+            ProfileNameTemplate = "{gitBranch}",
+            BranchNodeTitleTemplate = "branch-{slug}",
+            MainGitBranch = "main",
+            MainFeishuBranch = "main"
+        }
+    };
+
+    var resolved = BranchWorkspaceResolver.Resolve(request);
+    AssertEqual("codex-config-sheet-seed-feishu-main", resolved.Slug, "Branch slug should be filesystem and Feishu friendly.");
+    AssertEqual("branch-codex-config-sheet-seed-feishu-main", resolved.NodeTitle, "Non-main branch should resolve to a branch node.");
+    AssertEqual("codex/config-sheet-seed-feishu-main", resolved.Profile, "Raw profile should be preserved for registry display.");
+
+    request.Git.Branch = "main";
+    var main = BranchWorkspaceResolver.Resolve(request);
+    AssertEqual("main", main.NodeTitle, "Main branch should use the main node.");
+}
+
+static async Task BranchBindingOneToOneConflictBlocksLifecycle()
+{
+    var request = new LifecycleContractRequest
+    {
+        Operation = "sync-cache",
+        DryRun = true,
+        Git = new ContractGitSpec { Branch = "feature/config", Profile = "feature-config" },
+        BranchWorkspace = new BranchWorkspaceContract { RequireOneToOneBinding = true },
+        BranchBindings =
+        {
+            new BranchBindingContract { GitBranch = "feature/config", Profile = "feature-config" },
+            new BranchBindingContract { GitBranch = "other/config", Profile = "feature-config" }
+        }
+    };
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+    AssertTrue(!result.Success, "One profile bound to multiple git branches should block lifecycle.");
+    AssertTrue(result.HumanReadableFailures.Any(f => f.Contains("Feishu profile") && f.Contains("Git 分支")), "Failure should be readable for designers.");
 }
 
 static async Task LifecycleNewTableDryRunDoesNotWriteFiles()
@@ -437,15 +488,54 @@ static async Task SeedDryRunPlansXlsxMigrationWithoutWrites()
         var resultPath = Path.Combine(root, "seed.result.json");
 
         Directory.SetCurrentDirectory(root);
-        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "seed-from-xlsx", "--table", "ItemsData", "--source-xlsx", xlsx, "--dry-run", "--out", resultPath });
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "seed-from-xlsx", "--table", "ItemsData", "--source-xlsx", xlsx, "--branch", "codex/config-sheet-seed-feishu-main", "--dry-run", "--out", resultPath });
 
         AssertEqual("0", exitCode.ToString(), "Seed dry-run should pass for a simple portable xlsx.");
         var resultJson = File.ReadAllText(resultPath);
         AssertTrue(resultJson.Contains("\"seedTables\""), "Result should expose per-table seed results for Unity.");
+        AssertTrue(resultJson.Contains("branch-codex-config-sheet-seed-feishu-main"), "Dry-run should show the branch workspace node.");
         AssertTrue(resultJson.Contains("seed.sheet.import_or_create"), "Dry-run should plan online sheet create/import.");
         AssertTrue(resultJson.Contains("seed.cache.write_preview"), "Dry-run should plan cache write preview.");
         AssertTrue(!Directory.Exists(Path.Combine(root, ".config-sheet-forge", "cache")), "Dry-run must not write semantic cache.");
         AssertTrue(!Directory.Exists(Path.Combine(root, ".config-sheet-forge", "excel-cache")), "Dry-run must not write xlsx cache.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task SeedManifestDoesNotTreatCacheExcelPathAsSource()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-seed-manifest-source-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        var cache = Path.Combine(root, ".config-sheet-forge", "excel-cache", "ItemsData.xlsx");
+        Directory.CreateDirectory(Path.GetDirectoryName(cache)!);
+        CreateMinimalXlsx(cache, withMergedCells: false);
+        var manifest = Path.Combine(root, "ProjectSettings", "Example.ConfigSheetForge.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(manifest)!);
+        await File.WriteAllTextAsync(manifest, """
+        {
+          "tables": [
+            { "id": "ItemsData", "displayName": "Items", "excelPath": ".config-sheet-forge/excel-cache/ItemsData.xlsx" }
+          ]
+        }
+        """);
+
+        Directory.SetCurrentDirectory(root);
+        var resultPath = Path.Combine(root, "seed.result.json");
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "seed-from-xlsx", "--all", "--manifest", manifest, "--dry-run", "--out", resultPath });
+        AssertEqual("1", exitCode.ToString(), "Manifest excelPath is a cache path and must not be treated as source xlsx.");
+        var resultJson = File.ReadAllText(resultPath);
+        AssertTrue(resultJson.Contains("找不到本地 xlsx 源文件"), "Failure should ask for an explicit sourceXlsxPath.");
+        AssertTrue(!Directory.Exists(Path.Combine(root, ".config-sheet-forge", "cache")), "Blocked manifest dry-run must not write semantic cache.");
     }
     finally
     {
@@ -648,6 +738,16 @@ static void GateReportEvaluatorReportsHumanFailures()
         SchemaReview = new GateReviewState { Status = "pending" }
     });
     AssertTrue(schemaPending.HumanReadableFailures.Any(f => f.Contains("Schema 审查")), "Pending schema review should block gate.");
+
+    var bindingConflict = PrGateReportEvaluator.Evaluate(new PrGateReport
+    {
+        GitHead = "abc",
+        Branch = "feature/config",
+        BranchBinding = new GateReviewState { Status = "conflict", Message = "BranchBindings 中当前分支绑定冲突。" },
+        MergeReview = new GateReviewState { Status = "approved" },
+        SchemaReview = new GateReviewState { Status = "approved" }
+    });
+    AssertTrue(bindingConflict.HumanReadableFailures.Any(f => f.Contains("BranchBindings")), "Branch binding conflict should block gate with readable copy.");
 
     var expiredWaiver = PrGateReportEvaluator.Evaluate(new PrGateReport
     {
