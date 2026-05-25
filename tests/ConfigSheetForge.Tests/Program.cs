@@ -22,6 +22,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("registry localization keeps machine keys", () => RunSync(RegistryLocalizationKeepsMachineKeys)),
     ("registry migration cleans default rows and fields", () => RunSync(RegistryMigrationCleansDefaults)),
     ("lark base matrix record lookup finds existing record", () => RunSync(LarkBaseMatrixRecordLookupFindsExistingRecord)),
+    ("lark 1.0.40 registry fixture hydrates and reports duplicate bindings", Lark140RegistryFixtureHydratesAndReportsDuplicateBindings),
     ("registry migration reports branch binding cleanup risks", () => RunSync(RegistryMigrationReportsBranchBindingCleanupRisks)),
     ("branch workspace resolver creates stable slugs", () => RunSync(BranchWorkspaceResolverCreatesStableSlugs)),
     ("branch binding one-to-one conflict blocks lifecycle", BranchBindingOneToOneConflictBlocksLifecycle),
@@ -300,6 +301,114 @@ static void LarkBaseMatrixRecordLookupFindsExistingRecord()
     }, "zh-Hans");
     AssertEqual("1", matches.Count.ToString(), "Machine-key lookup should match Chinese display-name fields.");
     AssertEqual("rec_branch_1", matches[0].RecordId, "Lookup should return the existing record id.");
+}
+
+static async Task Lark140RegistryFixtureHydratesAndReportsDuplicateBindings()
+{
+    var tableListJson = """
+    {
+      "ok": true,
+      "identity": "bot",
+      "data": {
+        "tables": [
+          { "id": "tbl_branch", "name": "分支绑定" },
+          { "id": "tbl_config", "name": "配表清单" }
+        ],
+        "total": 2
+      }
+    }
+    """;
+    var branchFieldsJson = """
+    {
+      "ok": true,
+      "data": {
+        "fields": [
+          { "id": "fld_git", "name": "Git分支", "type": "text" },
+          { "id": "fld_profile", "name": "配置Profile", "type": "text" },
+          { "id": "fld_wiki", "name": "Wiki节点Token", "type": "text" },
+          { "id": "fld_url", "name": "Wiki节点链接", "type": "url" },
+          { "id": "fld_status", "name": "状态", "type": "single_select" }
+        ]
+      }
+    }
+    """;
+    var configFieldsJson = """
+    {
+      "ok": true,
+      "data": {
+        "fields": [
+          { "id": "fld_table", "name": "配表ID", "type": "text" },
+          { "id": "fld_branch", "name": "Feishu分支", "type": "text" },
+          { "id": "fld_profile", "name": "配置Profile", "type": "text" },
+          { "id": "fld_token", "name": "在线表Token", "type": "text" },
+          { "id": "fld_sheet", "name": "工作表ID", "type": "text" }
+        ]
+      }
+    }
+    """;
+    var branchRecordsJson = """
+    {
+      "ok": true,
+      "data": {
+        "fields": ["ID", "状态", "Wiki节点链接", "创建人", "Git分支", "配置Profile", "Wiki节点Token"],
+        "data": [
+          ["1", "active", "https://example.feishu.cn/wiki/wik_feature", "bot", "codex/config-sheet-seed-feishu-main", "codex/config-sheet-seed-feishu-main", "wik_feature"],
+          ["2", "active", "https://example.feishu.cn/wiki/wik_feature", "bot", "codex/config-sheet-seed-feishu-main", "codex/config-sheet-seed-feishu-main", "wik_feature"]
+        ],
+        "record_id_list": ["rec_dup_a", "rec_dup_b"]
+      }
+    }
+    """;
+    var configRecordsJson = """
+    {
+      "ok": true,
+      "data": {
+        "fields": ["配表ID", "显示名称", "Feishu分支", "配置Profile", "在线表Token", "工作表ID", "在线表链接"],
+        "data": [
+          ["ItemsData", "Items", "codex/config-sheet-seed-feishu-main", "codex/config-sheet-seed-feishu-main", "sht_items", "sheet_items", "https://example.feishu.cn/sheets/sht_items"]
+        ],
+        "record_id_list": ["rec_sheet"]
+      }
+    }
+    """;
+
+    var snapshot = ConfigSheetForge.Cli.Program.ParseLarkBaseRegistrySnapshotJson(
+        tableListJson,
+        new Dictionary<string, string>
+        {
+            ["tbl_branch"] = branchFieldsJson,
+            ["tbl_config"] = configFieldsJson
+        },
+        new Dictionary<string, string>
+        {
+            ["tbl_branch"] = branchRecordsJson,
+            ["tbl_config"] = configRecordsJson
+        },
+        "zh-Hans");
+
+    AssertEqual("2", snapshot.Tables.Count.ToString(), "lark 1.0.40 data.tables[].id/name should load registry tables.");
+    var branchTable = snapshot.Tables.First(t => t.MachineKey == "BranchBindings");
+    AssertEqual("tbl_branch", branchTable.TableId, "BranchBindings table id should come from data.tables[].id.");
+    AssertEqual("2", branchTable.Records.Count.ToString(), "Matrix record-list rows should be attached to the table snapshot.");
+
+    var plan = RegistryMigrator.Plan(snapshot, new RegistryMigrationOptions { Locale = "zh-Hans" });
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.branch_bindings.duplicate" && a.Details["recordIds"].Contains("rec_dup_a") && a.Details["recordIds"].Contains("rec_dup_b")), "registry-migrate dry-run must list duplicate BranchBindings record ids.");
+
+    var request = new LifecycleContractRequest
+    {
+        Operation = "sync-cache",
+        DryRun = true,
+        Locale = "zh-Hans",
+        Git = new ContractGitSpec { Branch = "codex/config-sheet-seed-feishu-main", Profile = "codex/config-sheet-seed-feishu-main" },
+        BranchWorkspace = new BranchWorkspaceContract { RequireOneToOneBinding = true },
+        Registry = new RegistryContract { BaseToken = "base_mock" }
+    };
+
+    ConfigSheetForge.Cli.Program.HydrateSyncCacheRequestFromRegistrySnapshot(request, snapshot, "");
+    AssertTrue(request.BranchBindings.Count(b => b.GitBranch == "codex/config-sheet-seed-feishu-main") == 2, "sync-cache should hydrate duplicate live BranchBindings, not collapse them.");
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+    AssertTrue(!result.Success, "sync-cache dry-run should block duplicate BranchBindings.");
+    AssertTrue(result.HumanReadableFailures.Any(f => f.Contains("重复记录") && f.Contains("rec_dup_a") && f.Contains("rec_dup_b")), "sync-cache duplicate blocker should list record ids.");
 }
 
 static void RegistryMigrationReportsBranchBindingCleanupRisks()

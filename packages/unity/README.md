@@ -79,7 +79,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.3
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.4
 ```
 
 ## 测试

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.4
+
+- 修复 lark-cli 1.0.40 `base +table-list --format json` 的 `data.tables[].id/name` 解析，registry snapshot 不再因缺少 `table_id` 为空。
+- `base +field-list` 同步兼容 `data.fields[].id/name` 与旧 `field_id/field_name` 形态。
+- 新增 lark-cli 1.0.40 table-list + field-list + record-list 组合 fixture，覆盖 `registry-migrate --dry-run` 重复 BranchBindings record_id 输出。
+- `sync-cache` dry-run 现在能基于 live registry hydrate 当前 GitBranch + Profile，并在重复 BranchBindings 时中文阻断且列出 record_id。
+
 ## 0.4.3
 
 - 修复 Base `record-list --format json` 矩阵返回解析，统一还原为 `record_id + fields`，registry 查重/定位显式使用 JSON 输出。
