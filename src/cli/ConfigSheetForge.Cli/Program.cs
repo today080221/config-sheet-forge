@@ -20,6 +20,14 @@ public static class Program
         PropertyNameCaseInsensitive = true
     };
 
+    private static readonly JsonSerializerOptions CompactJsonOptions = new()
+    {
+        WriteIndented = false,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
+    };
+
     public static async Task<int> Main(string[] args)
     {
         if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
@@ -216,7 +224,7 @@ public static class Program
         foreach (var table in tables)
         {
             var tableProvider = CreateProvider(FirstNonEmpty(table.Provider, workspace.Config.Provider));
-            var tableTemp = Path.Combine(Path.GetTempPath(), "csforge-sync-" + Guid.NewGuid().ToString("N"), table.Id);
+            var tableTemp = Path.Combine(Directory.GetCurrentDirectory(), "Temp", "ConfigSheetForge", "sync-temp", Guid.NewGuid().ToString("N"), table.Id);
             Directory.CreateDirectory(tableTemp);
             var result = await tableProvider.ExportAsync(CreateProviderContext(workspace, args), new ProviderExportRequest
             {
@@ -334,7 +342,7 @@ public static class Program
         foreach (var table in tables)
         {
             var tableProvider = CreateProvider(FirstNonEmpty(table.Provider, workspace.Config.Provider));
-            var tableTemp = Path.Combine(Path.GetTempPath(), "csforge-sync-cache-" + Guid.NewGuid().ToString("N"), table.Id);
+            var tableTemp = Path.Combine(Directory.GetCurrentDirectory(), "Temp", "ConfigSheetForge", "sync-cache-temp", Guid.NewGuid().ToString("N"), table.Id);
             Directory.CreateDirectory(tableTemp);
             var result = await tableProvider.ExportAsync(CreateProviderContext(workspace, args), new ProviderExportRequest
             {
@@ -681,7 +689,7 @@ public static class Program
                 CacheDirectory = cacheDirectory,
                 ExcelCacheDirectory = excelCacheDirectory,
                 ProjectConfigPath = args.Get("project-config", ""),
-                WikiRootToken = FirstNonEmpty(args.Get("wiki-root", ""), workspace.Config.RootToken, workspace.Config.RootUrl),
+                WikiRootToken = FirstNonEmpty(args.Get("wiki-root", ""), workspace.Config.RootToken),
                 WikiParentTitle = args.Get("wiki-parent-title", "项目配置表"),
                 BaselineStrategy = args.Get("baseline-strategy", "pending"),
                 PreferDriveImport = !args.HasFlag("no-drive-import"),
@@ -693,6 +701,7 @@ public static class Program
         {
             Mode = args.Get("branch-binding-mode", "git-branch-to-feishu-branch-profile"),
             RootWikiToken = request.SeedFromLocalXlsx.WikiRootToken,
+            RootWikiUrl = FirstNonEmpty(args.Get("branch-workspace-root-wiki-url", ""), args.Get("root-wiki-url", ""), args.Get("wiki-root-url", ""), workspace.Config.RootUrl),
             RootWikiTitle = request.SeedFromLocalXlsx.WikiParentTitle,
             GitBranch = request.Git.Branch,
             FeishuBranch = request.Git.FeishuBranch,
@@ -738,6 +747,7 @@ public static class Program
         seedRequest.SeedFromLocalXlsx.ProjectConfigPath = Path.GetFullPath(manifestPath);
         seedRequest.Registry.BaseToken = FirstNonEmpty(seedRequest.Registry.BaseToken, FindStringDeep(root, "baseToken", "registryBaseToken"));
         seedRequest.Registry.BaseUrl = FirstNonEmpty(seedRequest.Registry.BaseUrl, FindStringDeep(root, "baseUrl", "registryBaseUrl"));
+        MergeRegistryTableIds(seedRequest.Registry.TableIds, root);
         seedRequest.SeedFromLocalXlsx.WikiRootToken = FirstNonEmpty(seedRequest.SeedFromLocalXlsx.WikiRootToken, FindStringDeep(root, "wikiRootToken", "feishuRootToken", "rootToken"));
         seedRequest.SeedFromLocalXlsx.WikiParentTitle = FirstNonEmpty(FindStringDeep(root, "wikiRootTitle", "rootWikiTitle", "wikiParentTitle"), seedRequest.SeedFromLocalXlsx.WikiParentTitle);
         seedRequest.SeedFromLocalXlsx.CacheDirectory = FirstNonEmpty(FindStringDeep(root, "semanticCacheDirectory", "cacheDirectory"), seedRequest.SeedFromLocalXlsx.CacheDirectory);
@@ -745,6 +755,7 @@ public static class Program
         seedRequest.SeedFromLocalXlsx.BaselineStrategy = FirstNonEmpty(FindStringDeep(root, "baselineStrategy", "schemaReviewBaselineStrategy"), seedRequest.SeedFromLocalXlsx.BaselineStrategy);
         seedRequest.BranchWorkspace.Mode = FirstNonEmpty(FindStringDeep(root, "branchBindingMode", "mode"), seedRequest.BranchWorkspace.Mode);
         seedRequest.BranchWorkspace.RootWikiToken = FirstNonEmpty(FindStringDeep(root, "branchWorkspaceRootWikiToken", "wikiRootToken", "feishuRootToken", "rootToken"), seedRequest.SeedFromLocalXlsx.WikiRootToken);
+        seedRequest.BranchWorkspace.RootWikiUrl = FirstNonEmpty(FindStringDeep(root, "branchWorkspaceRootWikiUrl", "rootWikiUrl", "wikiRootUrl"), seedRequest.BranchWorkspace.RootWikiUrl);
         seedRequest.BranchWorkspace.RootWikiTitle = FirstNonEmpty(FindStringDeep(root, "branchWorkspaceRootWikiTitle", "wikiRootTitle", "rootWikiTitle", "wikiParentTitle"), seedRequest.SeedFromLocalXlsx.WikiParentTitle);
         seedRequest.BranchWorkspace.GitBranch = FirstNonEmpty(FindStringDeep(root, "gitBranch", "currentGitBranch"), seedRequest.Git.Branch);
         seedRequest.BranchWorkspace.FeishuBranch = FirstNonEmpty(FindStringDeep(root, "feishuBranch", "larkBranch"), seedRequest.Git.FeishuBranch);
@@ -782,6 +793,7 @@ public static class Program
             }
 
             var cacheXlsx = FirstNonEmpty(GetJsonString(tableElement, "cacheXlsxPath", "excelCachePath", "localCachePath", "cachePath"), Path.Combine(seedRequest.SeedFromLocalXlsx.ExcelCacheDirectory, tableId + ".xlsx"));
+            var feishuElement = GetJsonProperty(tableElement, "feishu", "lark");
             var table = new SeedTableContract
             {
                 TableId = tableId,
@@ -791,14 +803,14 @@ public static class Program
                 SemanticCachePath = FirstNonEmpty(GetJsonString(tableElement, "semanticCachePath"), Path.Combine(seedRequest.SeedFromLocalXlsx.CacheDirectory, tableId + ".semantic.json")),
                 HashCachePath = FirstNonEmpty(GetJsonString(tableElement, "hashCachePath", "sha256Path"), Path.Combine(seedRequest.SeedFromLocalXlsx.CacheDirectory, tableId + ".sha256")),
                 ProjectConfigPath = Path.GetFullPath(manifestPath),
-                SpreadsheetToken = GetJsonString(tableElement, "spreadsheetToken", "spreadsheet"),
-                SpreadsheetUrl = GetJsonString(tableElement, "spreadsheetUrl", "url", "onlineSheetUrl"),
-                SheetId = GetJsonString(tableElement, "sheetId"),
+                SpreadsheetToken = FirstNonEmpty(GetJsonString(feishuElement, "spreadsheetToken", "spreadsheet"), GetJsonString(tableElement, "spreadsheetToken", "spreadsheet")),
+                SpreadsheetUrl = FirstNonEmpty(GetJsonString(feishuElement, "spreadsheetUrl", "url", "onlineSheetUrl"), GetJsonString(tableElement, "spreadsheetUrl", "url", "onlineSheetUrl")),
+                SheetId = FirstNonEmpty(GetJsonString(feishuElement, "sheetId"), GetJsonString(tableElement, "sheetId")),
                 SheetName = FirstNonEmpty(GetJsonString(tableElement, "sheetName"), tableId),
-                WikiRootToken = FirstNonEmpty(GetJsonString(tableElement, "wikiRootToken"), seedRequest.SeedFromLocalXlsx.WikiRootToken),
-                WikiNodeUrl = GetJsonString(tableElement, "wikiNodeUrl", "branchWikiNodeUrl"),
-                Branch = GetJsonString(tableElement, "branch", "feishuBranch"),
-                Profile = GetJsonString(tableElement, "profile", "feishuProfile"),
+                WikiRootToken = FirstNonEmpty(GetJsonString(feishuElement, "wikiRootToken"), GetJsonString(tableElement, "wikiRootToken"), seedRequest.SeedFromLocalXlsx.WikiRootToken),
+                WikiNodeUrl = FirstNonEmpty(GetJsonString(feishuElement, "wikiNodeUrl", "branchWikiNodeUrl"), GetJsonString(tableElement, "wikiNodeUrl", "branchWikiNodeUrl")),
+                Branch = FirstNonEmpty(GetJsonString(feishuElement, "branch", "feishuBranch"), GetJsonString(tableElement, "branch", "feishuBranch")),
+                Profile = FirstNonEmpty(GetJsonString(feishuElement, "profile", "feishuProfile"), GetJsonString(tableElement, "profile", "feishuProfile")),
                 OwnerRole = GetJsonString(tableElement, "ownerRole"),
                 RegistryRecordId = GetJsonString(tableElement, "registryRecordId"),
                 SchemaReviewRequired = GetJsonBool(tableElement, true, "schemaReviewRequired"),
@@ -1137,7 +1149,7 @@ public static class Program
                         {
                             ["name"] = GetDetail(action, "displayName"),
                             ["type"] = fieldType
-                        });
+                        }, CompactJsonOptions);
                         await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-update", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--field-id", GetDetail(action, "fieldId"), "--json", fieldJson, "--yes" });
                         action.Status = "done";
                         break;
@@ -1162,31 +1174,130 @@ public static class Program
 
     private static async Task<LarkCliResult> RunLarkCliStrictAsync(LarkCliGateway gateway, ParsedArgs args, IEnumerable<string> commandArgs)
     {
+        var commandList = commandArgs.ToList();
         var doctor = await gateway.RunAsync(new[] { "doctor" }, Directory.GetCurrentDirectory(), CancellationToken.None);
         if (!doctor.Success)
         {
-            throw new CliException("lark-cli doctor 没有通过。请先修复本地 Feishu CLI 配置和权限。", 1, doctor.Stderr);
+            throw new CliException("lark-cli doctor 没有通过。请先修复本地 Feishu CLI 配置和权限。命令类别：" + LarkCommandCategory(commandList) + "。", 1, Trim(doctor.Stderr + "\n" + doctor.Stdout));
         }
 
         var identity = args.Get("lark-identity", "bot");
-        var first = await gateway.RunAsync(WithLarkIdentity(commandArgs, identity), Directory.GetCurrentDirectory(), CancellationToken.None);
+        var first = await gateway.RunAsync(WithLarkIdentity(commandList, identity), Directory.GetCurrentDirectory(), CancellationToken.None);
         if (first.Success || !string.Equals(identity, "bot", StringComparison.OrdinalIgnoreCase) || !args.HasFlag("allow-user-fallback"))
         {
             if (!first.Success)
             {
-                throw new CliException("飞书操作失败。当前是 bot 严格模式，不会静默切换到 user；请补应用权限，或显式传 --allow-user-fallback。", 1, first.Stderr);
+                throw BuildLarkCliFailure(commandList, identity, first, args.HasFlag("allow-user-fallback"));
             }
 
             return first;
         }
 
-        var fallback = await gateway.RunAsync(WithLarkIdentity(commandArgs, "user"), Directory.GetCurrentDirectory(), CancellationToken.None);
+        var fallback = await gateway.RunAsync(WithLarkIdentity(commandList, "user"), Directory.GetCurrentDirectory(), CancellationToken.None);
         if (!fallback.Success)
         {
-            throw new CliException("飞书操作失败，bot 和显式允许的 user fallback 都没有成功。", 1, fallback.Stderr);
+            throw BuildLarkCliFailure(commandList, "user", fallback, allowUserFallback: true);
         }
 
         return fallback;
+    }
+
+    private static CliException BuildLarkCliFailure(IReadOnlyList<string> commandArgs, string identity, LarkCliResult result, bool allowUserFallback)
+    {
+        var category = LarkCommandCategory(commandArgs);
+        var summary = SanitizeLarkCommand(commandArgs);
+        var raw = Trim(result.Stderr + "\n" + result.Stdout);
+        var strict = string.Equals(identity, "bot", StringComparison.OrdinalIgnoreCase) && !allowUserFallback
+            ? "当前是 bot 严格模式，不会静默切换到 user。"
+            : "当前执行身份：" + identity + "。";
+        var message = "飞书操作失败：" + category + "。" + strict +
+                      " 参数摘要：" + summary +
+                      "。lark-cli 返回：" + FirstNonEmpty(ExtractLarkError(raw), raw, "无 stderr/stdout") +
+                      "。修复建议：请检查该步骤所需 scope、bot 是否有目标 Base/Wiki/Sheet 权限，以及 tableId、sheetId、range 是否正确。";
+        var detail = "category=" + category + Environment.NewLine +
+                     "identity=" + identity + Environment.NewLine +
+                     "command=" + summary + Environment.NewLine +
+                     "exitCode=" + result.ExitCode.ToString(CultureInfo.InvariantCulture) + Environment.NewLine +
+                     "resolved=" + result.ResolvedCommand.DisplayPath + Environment.NewLine +
+                     "stderr/stdout=" + raw;
+        return new CliException(message, 1, detail);
+    }
+
+    private static string LarkCommandCategory(IReadOnlyList<string> args)
+    {
+        if (args == null || args.Count == 0)
+        {
+            return "lark-cli";
+        }
+
+        return args.Count == 1 ? args[0] : args[0] + " " + args[1];
+    }
+
+    private static string SanitizeLarkCommand(IReadOnlyList<string> args)
+    {
+        var sensitive = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "--base-token",
+            "--spreadsheet-token",
+            "--node-token",
+            "--parent-node-token",
+            "--folder-token",
+            "--parent-token",
+            "--url",
+            "--wiki-url",
+            "--root-wiki-url"
+        };
+        var builder = new List<string>();
+        for (var i = 0; i < args.Count; i++)
+        {
+            var arg = args[i] ?? "";
+            builder.Add(arg);
+            if (sensitive.Contains(arg) && i + 1 < args.Count)
+            {
+                builder.Add(Mask(args[++i]));
+            }
+            else if ((arg.Equals("--json", StringComparison.OrdinalIgnoreCase) ||
+                      arg.Equals("--data", StringComparison.OrdinalIgnoreCase) ||
+                      arg.Equals("--values", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Count)
+            {
+                var value = args[++i] ?? "";
+                builder.Add(value.Length <= 120 ? value : value.Substring(0, 120) + "...");
+            }
+        }
+
+        return string.Join(" ", builder);
+    }
+
+    private static string ExtractLarkError(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "";
+        }
+
+        foreach (var marker in new[] { "missing_scope", "permission", "forbidden", "unauthorized", "unsafe output path", "command line is too long", "range in request is wrong", "data exceeded", "invalid JSON" })
+        {
+            var index = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index >= 0)
+            {
+                var start = Math.Max(0, index - 80);
+                var length = Math.Min(text.Length - start, 500);
+                return text.Substring(start, length).Trim();
+            }
+        }
+
+        return text.Length <= 500 ? text : text.Substring(0, 500);
+    }
+
+    private static string Trim(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "";
+        }
+
+        text = text.Trim();
+        return text.Length <= 4000 ? text : text.Substring(0, 4000);
     }
 
     private static IEnumerable<string> WithLarkIdentity(IEnumerable<string> args, string identity)
@@ -1446,6 +1557,56 @@ public static class Program
         }
 
         return fallback;
+    }
+
+    private static void MergeRegistryTableIds(IDictionary<string, string> tableIds, JsonElement root)
+    {
+        foreach (var property in new[] { "tableIds", "tables" })
+        {
+            var registry = GetJsonProperty(root, "registry");
+            if (registry.ValueKind == JsonValueKind.Object)
+            {
+                AddRegistryTableIds(tableIds, GetJsonProperty(registry, property));
+            }
+        }
+
+        var feishu = GetJsonProperty(root, "feishu", "lark");
+        if (feishu.ValueKind == JsonValueKind.Object)
+        {
+            var registryBase = GetJsonProperty(feishu, "registryBase", "baseRegistry");
+            if (registryBase.ValueKind == JsonValueKind.Object)
+            {
+                AddRegistryTableIds(tableIds, GetJsonProperty(registryBase, "tableIds", "tables"));
+            }
+        }
+
+        AddRegistryTableIds(tableIds, GetJsonProperty(root, "registryTableIds"));
+    }
+
+    private static void AddRegistryTableIds(IDictionary<string, string> tableIds, JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            var value = "";
+            if (property.Value.ValueKind == JsonValueKind.String)
+            {
+                value = property.Value.GetString() ?? "";
+            }
+            else if (property.Value.ValueKind == JsonValueKind.Object)
+            {
+                value = GetJsonString(property.Value, "tableId", "id", "token");
+            }
+
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                tableIds[property.Name] = value;
+            }
+        }
     }
 
     private static IEnumerable<BranchBindingContract> ParseBranchBindings(JsonElement root)
@@ -1953,8 +2114,7 @@ public static class Program
 
         public async Task<LifecycleActionResult> WriteSheetTemplateAsync(SheetCreationResult sheet, IList<IList<string>> templateRows, CancellationToken cancellationToken)
         {
-            var values = JsonSerializer.Serialize(templateRows);
-            await RunLarkCliStrictAsync(_gateway, _args, new[] { "sheets", "+write", "--spreadsheet-token", sheet.SpreadsheetToken, "--sheet-id", sheet.SheetId, "--range", sheet.SheetId + "!A1", "--values", values });
+            await WriteSheetValuesInChunksAsync(sheet.SpreadsheetToken, sheet.SheetId, templateRows, cancellationToken);
             var action = new LifecycleActionResult { Action = "sheet.template.write", Status = "done", Message = "已写入 ExcelToSO 模板三行。" };
             action.Details["rows"] = templateRows.Count.ToString(CultureInfo.InvariantCulture);
             return action;
@@ -1991,7 +2151,7 @@ public static class Program
                     [mapping.Fields["Branch"]] = branchKey
                 }),
                 await FindRegistryRecordIdAsync(registry.BaseToken, tableId, mapping.Fields["TableId"], table.TableId));
-            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body) };
+            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body, CompactJsonOptions) };
             if (!string.IsNullOrWhiteSpace(recordId))
             {
                 command.Add("--record-id");
@@ -2022,7 +2182,7 @@ public static class Program
                 [mapping.Fields["TableId"]] = table.TableId,
                 [mapping.Fields["Branch"]] = FirstNonEmpty(git.FeishuBranch, git.Profile, git.Branch)
             });
-            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body) };
+            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body, CompactJsonOptions) };
             if (!string.IsNullOrWhiteSpace(recordId))
             {
                 command.Add("--record-id");
@@ -2051,11 +2211,11 @@ public static class Program
         public async Task<BranchWorkspaceResolution> EnsureBranchWorkspaceAsync(BranchWorkspaceContract workspace, BranchWorkspaceResolution planned, CancellationToken cancellationToken)
         {
             planned = planned ?? new BranchWorkspaceResolution();
-            if (!string.IsNullOrWhiteSpace(planned.WikiNodeToken))
+            if (!string.IsNullOrWhiteSpace(planned.WikiNodeToken) || !string.IsNullOrWhiteSpace(planned.WikiNodeUrl))
             {
                 try
                 {
-                    var existing = await RunLarkCliStrictAsync(_gateway, _args, new[] { "wiki", "+node-get", "--node-token", planned.WikiNodeToken });
+                    var existing = await GetWikiNodeAsync(FirstNonEmpty(planned.WikiNodeUrl, planned.WikiNodeToken));
                     ApplyWikiNodeJson(planned, CombinedJsonOutput(existing));
                     planned.Status = "reused";
                     return planned;
@@ -2067,7 +2227,7 @@ public static class Program
                 }
             }
 
-            if (string.IsNullOrWhiteSpace(planned.RootWikiToken))
+            if (string.IsNullOrWhiteSpace(planned.RootWikiToken) && string.IsNullOrWhiteSpace(planned.RootWikiUrl))
             {
                 planned.Status = "failed";
                 return planned;
@@ -2076,7 +2236,7 @@ public static class Program
             var rootInfo = new BranchWorkspaceResolution();
             try
             {
-                var root = await RunLarkCliStrictAsync(_gateway, _args, new[] { "wiki", "+node-get", "--node-token", planned.RootWikiToken });
+                var root = await GetWikiNodeAsync(FirstNonEmpty(planned.RootWikiUrl, planned.RootWikiToken));
                 ApplyWikiNodeJson(rootInfo, CombinedJsonOutput(root));
             }
             catch (CliException)
@@ -2132,6 +2292,19 @@ public static class Program
             return planned;
         }
 
+        private async Task<LarkCliResult> GetWikiNodeAsync(string tokenOrUrl)
+        {
+            try
+            {
+                return await RunLarkCliStrictAsync(_gateway, _args, new[] { "wiki", "+node-get", "--node-token", tokenOrUrl });
+            }
+            catch (CliException) when (!LooksLikeUrl(tokenOrUrl))
+            {
+                var payload = JsonSerializer.Serialize(new Dictionary<string, string> { ["token"] = tokenOrUrl }, CompactJsonOptions);
+                return await RunLarkCliStrictAsync(_gateway, _args, new[] { "wiki", "spaces", "get_node", "--params", payload });
+            }
+        }
+
         public async Task<LifecycleActionResult> UpsertBranchBindingAsync(RegistryContract registry, BranchWorkspaceResolution resolution, CancellationToken cancellationToken)
         {
             var action = new LifecycleActionResult
@@ -2172,7 +2345,7 @@ public static class Program
                 [mapping.Fields["Profile"]] = FirstNonEmpty(resolution.Profile, resolution.FeishuBranch)
             };
             var recordId = await FindRegistryRecordIdAsync(registry.BaseToken, tableId, keys);
-            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body, JsonOptions) };
+            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body, CompactJsonOptions) };
             if (!string.IsNullOrWhiteSpace(recordId))
             {
                 command.Add("--record-id");
@@ -2230,6 +2403,8 @@ public static class Program
         public async Task<SeedOnlineSheetResult> EnsureOnlineSheetAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, WorkbookDocument localWorkbook, string semanticHash, CancellationToken cancellationToken)
         {
             var result = new SeedOnlineSheetResult();
+            var localMatrix = BuildMatrixFromWorkbook(localWorkbook);
+            ApplyMatrixDimensions(result, localMatrix);
             var existingFromConfig = FindExistingSheetInProjectConfig(seed, table);
             var existingToken = FirstNonEmpty(table.SpreadsheetToken, table.SpreadsheetUrl, existingFromConfig.SpreadsheetToken, existingFromConfig.SpreadsheetUrl);
             if (!string.IsNullOrWhiteSpace(existingToken))
@@ -2260,6 +2435,29 @@ public static class Program
                 }
             }
 
+            var existingUnderBranch = await TryFindExistingSheetUnderBranchNodeAsync(table, cancellationToken);
+            if (existingUnderBranch.Findings.Any(f => f.Severity == FindingSeverity.Error))
+            {
+                foreach (var finding in existingUnderBranch.Findings)
+                {
+                    result.Findings.Add(finding);
+                }
+
+                return result;
+            }
+
+            if (!string.IsNullOrWhiteSpace(existingUnderBranch.SpreadsheetToken))
+            {
+                result.SpreadsheetToken = existingUnderBranch.SpreadsheetToken;
+                result.SpreadsheetUrl = existingUnderBranch.SpreadsheetUrl;
+                result.SheetId = FirstNonEmpty(existingUnderBranch.SheetId, table.SheetId, table.SheetName);
+                result.WikiNodeToken = existingUnderBranch.WikiNodeToken;
+                result.Reused = true;
+                result.ImportMode = "existing-wiki-child";
+                ApplyMatrixDimensions(result, localMatrix);
+                return result;
+            }
+
             var importFailure = "";
             if (seed.PreferDriveImport)
             {
@@ -2275,6 +2473,21 @@ public static class Program
                     result.ImportMode = "drive-import-xlsx";
                     if (!string.IsNullOrWhiteSpace(result.SpreadsheetToken))
                     {
+                        if (string.IsNullOrWhiteSpace(result.SheetId) || string.Equals(result.SheetId, table.SheetName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                var info = await RunLarkCliStrictAsync(_gateway, _args, BuildSheetInfoCommand(result.SpreadsheetToken));
+                                var infoSheet = ParseSheetCreationResult(CombinedJsonOutput(info));
+                                result.SheetId = FirstNonEmpty(infoSheet.SheetId, result.SheetId);
+                                result.SpreadsheetUrl = FirstNonEmpty(result.SpreadsheetUrl, infoSheet.SpreadsheetUrl);
+                            }
+                            catch (CliException)
+                            {
+                                // The immediate online read step will fail with a precise strict-bot diagnostic if the sheet cannot be inspected.
+                            }
+                        }
+
                         return result;
                     }
                 }
@@ -2295,25 +2508,140 @@ public static class Program
                 result.CapabilityDifference += " drive import 失败摘要：" + importFailure;
             }
 
-            var matrix = BuildMatrixFromWorkbook(localWorkbook);
-            var values = JsonSerializer.Serialize(matrix, JsonOptions);
-            await RunLarkCliStrictAsync(_gateway, _args, new[] { "sheets", "+write", "--spreadsheet-token", result.SpreadsheetToken, "--sheet-id", result.SheetId, "--range", result.SheetId + "!A1", "--values", values });
+            await WriteSheetValuesInChunksAsync(result.SpreadsheetToken, result.SheetId, localMatrix, cancellationToken);
+            return result;
+        }
+
+        private async Task<SeedOnlineSheetResult> TryFindExistingSheetUnderBranchNodeAsync(SeedTableContract table, CancellationToken cancellationToken)
+        {
+            var result = new SeedOnlineSheetResult();
+            var branchNode = FirstNonEmpty(table.WikiRootToken, table.WikiNodeToken);
+            if (string.IsNullOrWhiteSpace(branchNode))
+            {
+                return result;
+            }
+
+            try
+            {
+                var branchInfo = new BranchWorkspaceResolution();
+                var node = await GetWikiNodeAsync(branchNode);
+                ApplyWikiNodeJson(branchInfo, CombinedJsonOutput(node));
+                var spaceId = branchInfo.Status;
+                var parentNodeToken = FirstNonEmpty(branchInfo.WikiNodeToken, branchNode);
+                if (string.IsNullOrWhiteSpace(spaceId) || string.IsNullOrWhiteSpace(parentNodeToken))
+                {
+                    return result;
+                }
+
+                var children = await RunLarkCliStrictAsync(_gateway, _args, new[] { "wiki", "+node-list", "--space-id", spaceId, "--parent-node-token", parentNodeToken, "--page-all", "--page-limit", "100" });
+                var sheet = FindWikiSheetChildByTitle(CombinedJsonOutput(children), FirstNonEmpty(table.DisplayName, table.TableId));
+                if (string.IsNullOrWhiteSpace(sheet.SpreadsheetToken))
+                {
+                    sheet = FindWikiSheetChildByTitle(CombinedJsonOutput(children), table.TableId);
+                }
+
+                if (string.IsNullOrWhiteSpace(sheet.SpreadsheetToken))
+                {
+                    return result;
+                }
+
+                var info = await RunLarkCliStrictAsync(_gateway, _args, BuildSheetInfoCommand(sheet.SpreadsheetToken));
+                var parsed = ParseSheetCreationResult(CombinedJsonOutput(info));
+                result.SpreadsheetToken = FirstNonEmpty(parsed.SpreadsheetToken, sheet.SpreadsheetToken);
+                result.SpreadsheetUrl = FirstNonEmpty(parsed.SpreadsheetUrl, sheet.SpreadsheetUrl);
+                result.SheetId = FirstNonEmpty(parsed.SheetId, table.SheetId, table.SheetName);
+                result.WikiNodeToken = sheet.WikiNodeToken;
+                return result;
+            }
+            catch (CliException ex)
+            {
+                result.Findings.Add(new ValidationFinding
+                {
+                    Severity = FindingSeverity.Error,
+                    Code = "seed.branch_node_list_failed",
+                    Message = "无法读取分支工作区下已有 Sheet，已阻断以避免重复创建在线表。请检查 bot 的 Wiki 节点读取权限后重试。",
+                    Location = table.TableId,
+                    Details = { ["error"] = ex.Message }
+                });
+                return result;
+            }
+        }
+
+        private async Task WriteSheetValuesInChunksAsync(string spreadsheetToken, string sheetId, IList<IList<string>> rows, CancellationToken cancellationToken)
+        {
+            if (rows == null || rows.Count == 0)
+            {
+                return;
+            }
+
+            var totalColumns = Math.Max(1, rows.Max(r => r == null ? 0 : r.Count));
+            var maxRows = Math.Max(1, _args.GetInt("lark-write-max-rows", 80));
+            var maxJsonChars = Math.Max(4000, _args.GetInt("lark-write-max-json-chars", 24000));
+            var start = 0;
+            while (start < rows.Count)
+            {
+                var count = 0;
+                string valuesJson;
+                do
+                {
+                    count++;
+                    valuesJson = JsonSerializer.Serialize(PadMatrix(rows.Skip(start).Take(count), totalColumns), CompactJsonOptions);
+                    if (valuesJson.Length > maxJsonChars && count > 1)
+                    {
+                        count--;
+                        valuesJson = JsonSerializer.Serialize(PadMatrix(rows.Skip(start).Take(count), totalColumns), CompactJsonOptions);
+                        break;
+                    }
+                }
+                while (start + count < rows.Count && count < maxRows && valuesJson.Length <= maxJsonChars);
+
+                if (count <= 0)
+                {
+                    count = 1;
+                    valuesJson = JsonSerializer.Serialize(PadMatrix(rows.Skip(start).Take(count), totalColumns), CompactJsonOptions);
+                }
+
+                var range = BuildA1Range(sheetId, start + 1, 1, count, totalColumns);
+                Console.Error.WriteLine("[seed] sheets +write range=" + range + " rows=" + count.ToString(CultureInfo.InvariantCulture));
+                await RunLarkCliStrictAsync(_gateway, _args, new[] { "sheets", "+write", "--spreadsheet-token", spreadsheetToken, "--sheet-id", sheetId, "--range", range, "--values", valuesJson });
+                start += count;
+            }
+        }
+
+        private static IList<IList<string>> PadMatrix(IEnumerable<IList<string>> rows, int totalColumns)
+        {
+            var result = new List<IList<string>>();
+            foreach (var row in rows)
+            {
+                var padded = new List<string>();
+                for (var i = 0; i < totalColumns; i++)
+                {
+                    padded.Add(row != null && i < row.Count ? row[i] ?? "" : "");
+                }
+
+                result.Add(padded);
+            }
+
             return result;
         }
 
         public async Task<SeedOnlineRoundTripResult> ReadAndExportOnlineSheetAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, SeedOnlineSheetResult sheet, CancellationToken cancellationToken)
         {
             var result = new SeedOnlineRoundTripResult();
-            var temp = Path.Combine(Path.GetTempPath(), "csforge-seed-" + Guid.NewGuid().ToString("N"), MakeSafeFileName(table.TableId));
+            var temp = Path.Combine(Directory.GetCurrentDirectory(), "Temp", "ConfigSheetForge", "seed-temp", Guid.NewGuid().ToString("N"), MakeSafeFileName(table.TableId));
             Directory.CreateDirectory(temp);
             var provider = new LarkCliWorkbookProvider();
+            var readSheetId = FirstNonEmpty(sheet.SheetId, table.SheetId);
+            var exactRange = sheet.UsedRowCount > 0 && sheet.UsedColumnCount > 0 && !string.IsNullOrWhiteSpace(readSheetId)
+                ? BuildA1Range(readSheetId, 1, 1, sheet.UsedRowCount, sheet.UsedColumnCount)
+                : "";
             var export = await provider.ExportAsync(BuildProviderContext(), new ProviderExportRequest
             {
                 RootTokenOrUrl = FirstNonEmpty(sheet.SpreadsheetToken, sheet.SpreadsheetUrl),
                 SpreadsheetTokenOrUrl = FirstNonEmpty(sheet.SpreadsheetToken, sheet.SpreadsheetUrl),
                 TableId = table.TableId,
-                SheetId = FirstNonEmpty(sheet.SheetId, table.SheetId),
-                Range = "",
+                SheetId = readSheetId,
+                Range = exactRange,
                 CacheDirectory = temp,
                 FieldRow = table.FieldRow,
                 TypeRow = table.TypeRow,
@@ -2523,13 +2851,18 @@ public static class Program
 
         private IEnumerable<string> BuildSheetInfoCommand(string tokenOrUrl)
         {
-            if (tokenOrUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                tokenOrUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            if (LooksLikeUrl(tokenOrUrl))
             {
                 return new[] { "sheets", "+info", "--url", tokenOrUrl };
             }
 
             return new[] { "sheets", "+info", "--spreadsheet-token", tokenOrUrl };
+        }
+
+        private static bool LooksLikeUrl(string value)
+        {
+            return value.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                   value.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
         }
 
         private async Task<LarkCliResult> TryDriveImportXlsxAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, CancellationToken cancellationToken)
@@ -2657,7 +2990,7 @@ public static class Program
             var columns = sheet.Columns.ToList();
             var matrix = new List<IList<string>>
             {
-                columns.Select(c => FirstNonEmpty(c.Key, c.DisplayName)).ToList(),
+                columns.Select(c => FirstNonEmpty(c.DisplayName, c.Details.TryGetValue("sourceColumnName", out var sourceColumnName) ? sourceColumnName : "", c.Key)).ToList(),
                 columns.Select(c => FirstNonEmpty(c.ValueKind, "string")).ToList(),
                 columns.Select(c => c.Details.TryGetValue("description", out var description) ? description : "").ToList()
             };
@@ -2675,35 +3008,71 @@ public static class Program
             return matrix;
         }
 
+        private static void ApplyMatrixDimensions(SeedOnlineSheetResult result, IList<IList<string>> matrix)
+        {
+            if (result == null || matrix == null)
+            {
+                return;
+            }
+
+            result.UsedRowCount = matrix.Count;
+            result.UsedColumnCount = matrix.Count == 0 ? 0 : matrix.Max(r => r == null ? 0 : r.Count);
+        }
+
+        private static string BuildA1Range(string sheetId, int startRow, int startColumn, int rowCount, int columnCount)
+        {
+            startRow = Math.Max(1, startRow);
+            startColumn = Math.Max(1, startColumn);
+            rowCount = Math.Max(1, rowCount);
+            columnCount = Math.Max(1, columnCount);
+            var endColumn = startColumn + columnCount - 1;
+            var endRow = startRow + rowCount - 1;
+            return sheetId + "!" + ToA1Column(startColumn) + startRow.ToString(CultureInfo.InvariantCulture) + ":" + ToA1Column(endColumn) + endRow.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string ToA1Column(int oneBasedColumn)
+        {
+            var column = Math.Max(1, oneBasedColumn);
+            var builder = new StringBuilder();
+            while (column > 0)
+            {
+                column--;
+                builder.Insert(0, (char)('A' + column % 26));
+                column /= 26;
+            }
+
+            return builder.ToString();
+        }
+
         private static bool UpsertProjectConfigSheet(JsonNode node, SeedTableContract table, SeedOnlineSheetResult sheet, BranchWorkspaceContract workspace)
         {
             var tableId = table.TableId;
             var target = FindProjectConfigTableNode(node, tableId, FirstNonEmpty(table.Branch, table.Profile));
             if (target == null)
             {
-                var tables = FindProjectConfigTablesArray(node);
-                if (tables == null)
+                return false;
+            }
+
+            var writeTarget = GetProjectConfigFeishuNode(target);
+            if (writeTarget == null)
+            {
+                if (!HasAnyJsonProperty(target, "spreadsheetToken", "spreadsheet", "spreadsheetUrl", "url", "onlineSheetUrl", "sheetId", "wikiNodeToken", "branchWikiNodeToken"))
                 {
                     return false;
                 }
 
-                target = new JsonObject
-                {
-                    ["id"] = tableId
-                };
-                tables.Add(target);
+                writeTarget = target;
             }
 
             var changed = false;
-            changed |= SetJsonString(target, "spreadsheetToken", sheet.SpreadsheetToken);
-            changed |= SetJsonString(target, "sheetId", sheet.SheetId);
-            changed |= SetJsonString(target, "url", sheet.SpreadsheetUrl);
-            changed |= SetJsonString(target, "onlineSheetUrl", sheet.SpreadsheetUrl);
-            changed |= SetJsonString(target, "branch", FirstNonEmpty(table.Branch, workspace.FeishuBranch));
-            changed |= SetJsonString(target, "profile", FirstNonEmpty(table.Profile, workspace.Profile));
-            changed |= SetJsonString(target, "wikiNodeToken", FirstNonEmpty(sheet.WikiNodeToken, table.WikiNodeToken, workspace.ExistingWikiNodeToken));
-            changed |= SetJsonString(target, "branchWikiNodeToken", FirstNonEmpty(table.WikiRootToken, workspace.ExistingWikiNodeToken));
-            changed |= SetJsonString(target, "branchWikiNodeUrl", FirstNonEmpty(table.WikiNodeUrl, workspace.ExistingWikiNodeUrl));
+            changed |= SetJsonString(writeTarget, "spreadsheetToken", sheet.SpreadsheetToken);
+            changed |= SetJsonString(writeTarget, "sheetId", sheet.SheetId);
+            changed |= SetJsonString(writeTarget, HasAnyJsonProperty(writeTarget, "url") ? "url" : "onlineSheetUrl", sheet.SpreadsheetUrl);
+            changed |= SetJsonString(writeTarget, "branch", FirstNonEmpty(table.Branch, workspace.FeishuBranch));
+            changed |= SetJsonString(writeTarget, "profile", FirstNonEmpty(table.Profile, workspace.Profile));
+            changed |= SetJsonString(writeTarget, "wikiNodeToken", FirstNonEmpty(sheet.WikiNodeToken, table.WikiNodeToken, workspace.ExistingWikiNodeToken));
+            changed |= SetJsonString(writeTarget, "branchWikiNodeToken", FirstNonEmpty(table.WikiRootToken, workspace.ExistingWikiNodeToken));
+            changed |= SetJsonString(writeTarget, "branchWikiNodeUrl", FirstNonEmpty(table.WikiNodeUrl, workspace.ExistingWikiNodeUrl));
             return changed;
         }
 
@@ -2726,10 +3095,10 @@ public static class Program
 
                 return new SeedOnlineSheetResult
                 {
-                    SpreadsheetToken = GetJsonNodeString(target, "spreadsheetToken", "spreadsheet"),
-                    SpreadsheetUrl = GetJsonNodeString(target, "spreadsheetUrl", "onlineSheetUrl", "url"),
-                    SheetId = GetJsonNodeString(target, "sheetId"),
-                    WikiNodeToken = GetJsonNodeString(target, "wikiNodeToken")
+                    SpreadsheetToken = GetProjectConfigString(target, "spreadsheetToken", "spreadsheet"),
+                    SpreadsheetUrl = GetProjectConfigString(target, "spreadsheetUrl", "onlineSheetUrl", "url"),
+                    SheetId = GetProjectConfigString(target, "sheetId"),
+                    WikiNodeToken = GetProjectConfigString(target, "wikiNodeToken")
                 };
             }
             catch
@@ -2746,7 +3115,7 @@ public static class Program
             {
                 foreach (var candidate in candidates)
                 {
-                    var candidateBranch = FirstNonEmpty(GetJsonNodeString(candidate, "branch", "feishuBranch"), GetJsonNodeString(candidate, "profile"));
+                    var candidateBranch = FirstNonEmpty(GetProjectConfigString(candidate, "branch", "feishuBranch"), GetProjectConfigString(candidate, "profile"));
                     if (string.Equals(candidateBranch, branchKey, StringComparison.OrdinalIgnoreCase))
                     {
                         return candidate;
@@ -2806,6 +3175,50 @@ public static class Program
             return null;
         }
 
+        private static JsonObject? GetProjectConfigFeishuNode(JsonObject obj)
+        {
+            foreach (var pair in obj)
+            {
+                if (string.Equals(pair.Key, "feishu", StringComparison.OrdinalIgnoreCase) && pair.Value is JsonObject feishu)
+                {
+                    return feishu;
+                }
+            }
+
+            return null;
+        }
+
+        private static string GetProjectConfigString(JsonObject obj, params string[] names)
+        {
+            var feishu = GetProjectConfigFeishuNode(obj);
+            if (feishu != null)
+            {
+                var nested = GetJsonNodeString(feishu, names);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+
+            return GetJsonNodeString(obj, names);
+        }
+
+        private static bool HasAnyJsonProperty(JsonObject obj, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                foreach (var pair in obj)
+                {
+                    if (string.Equals(pair.Key, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         private static string GetJsonNodeString(JsonObject obj, params string[] names)
         {
             foreach (var name in names)
@@ -2863,6 +3276,11 @@ public static class Program
             if (registry.TableIds.TryGetValue(machineKey, out var tableId) && !string.IsNullOrWhiteSpace(tableId))
             {
                 return tableId;
+            }
+
+            if (!string.IsNullOrWhiteSpace(registry.BaseToken))
+            {
+                throw new CliException("注册中心缺少表 ID 映射：" + machineKey + "。请在 manifest/contract 中提供 registry.tableIds." + machineKey + " 或 feishu.registryBase.tables." + machineKey + "；如果项目配置无法表达 machine key，请改走项目 adapter 生成 apply-contract。不能把中文显示名当 table_id 调用 Base。", 2);
             }
 
             return RegistryLocalization.TableDisplayName(machineKey, _request.Locale);
@@ -2966,6 +3384,32 @@ public static class Program
             }
 
             return new BranchWorkspaceResolution();
+        }
+
+        private static SheetCreationResult FindWikiSheetChildByTitle(string json, string title)
+        {
+            foreach (var node in FindJsonObjects(json, "node_token"))
+            {
+                if (!string.Equals(GetJsonString(node, "title"), title, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var objType = GetJsonString(node, "obj_type", "objType", "type");
+                if (!string.IsNullOrWhiteSpace(objType) && objType.IndexOf("sheet", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+
+                return new SheetCreationResult
+                {
+                    SpreadsheetToken = FirstNonEmpty(GetJsonString(node, "obj_token", "objToken", "spreadsheet_token", "token"), GetJsonString(node, "file_token", "fileToken")),
+                    SpreadsheetUrl = GetJsonString(node, "url", "node_url", "nodeUrl"),
+                    WikiNodeToken = GetJsonString(node, "node_token", "nodeToken")
+                };
+            }
+
+            return new SheetCreationResult();
         }
 
         private static SheetCreationResult ParseSheetCreationResult(string json)

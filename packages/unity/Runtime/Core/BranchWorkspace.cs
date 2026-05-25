@@ -12,6 +12,7 @@ namespace ConfigSheetForge.Core
     {
         public string Mode { get; set; } = "git-branch-to-feishu-branch-profile";
         public string RootWikiToken { get; set; } = "";
+        public string RootWikiUrl { get; set; } = "";
         public string RootWikiTitle { get; set; } = "项目配置表";
         public string GitBranch { get; set; } = "";
         public string FeishuBranch { get; set; } = "";
@@ -34,6 +35,7 @@ namespace ConfigSheetForge.Core
     {
         public string Mode { get; set; } = "";
         public string RootWikiToken { get; set; } = "";
+        public string RootWikiUrl { get; set; } = "";
         public string RootWikiTitle { get; set; } = "";
         public string GitBranch { get; set; } = "";
         public string FeishuBranch { get; set; } = "";
@@ -99,6 +101,7 @@ namespace ConfigSheetForge.Core
             {
                 Mode = FirstNonEmpty(workspace.Mode, "git-branch-to-feishu-branch-profile"),
                 RootWikiToken = FirstNonEmpty(workspace.RootWikiToken, request.SeedFromLocalXlsx.WikiRootToken, request.Table.WikiRootToken),
+                RootWikiUrl = workspace.RootWikiUrl,
                 RootWikiTitle = FirstNonEmpty(workspace.RootWikiTitle, request.SeedFromLocalXlsx.WikiParentTitle, "项目配置表"),
                 GitBranch = gitBranch,
                 FeishuBranch = feishuBranch,
@@ -143,6 +146,7 @@ namespace ConfigSheetForge.Core
             {
                 Mode = FirstNonEmpty(configured.Mode, "git-branch-to-feishu-branch-profile"),
                 RootWikiToken = FirstNonEmpty(configured.RootWikiToken, request.SeedFromLocalXlsx.WikiRootToken, request.Table.WikiRootToken),
+                RootWikiUrl = configured.RootWikiUrl,
                 RootWikiTitle = FirstNonEmpty(configured.RootWikiTitle, request.SeedFromLocalXlsx.WikiParentTitle, "项目配置表"),
                 GitBranch = FirstNonEmpty(configured.GitBranch, request.Git.Branch, "main"),
                 FeishuBranch = FirstNonEmpty(configured.FeishuBranch, request.Git.FeishuBranch),
@@ -209,6 +213,7 @@ namespace ConfigSheetForge.Core
             action.Details["profile"] = resolution.Profile;
             action.Details["slug"] = resolution.Slug;
             action.Details["rootWikiToken"] = resolution.RootWikiToken;
+            action.Details["rootWikiUrl"] = resolution.RootWikiUrl;
             action.Details["rootWikiTitle"] = resolution.RootWikiTitle;
             action.Details["nodeTitle"] = resolution.NodeTitle;
             action.Details["wikiNodeToken"] = resolution.WikiNodeToken;

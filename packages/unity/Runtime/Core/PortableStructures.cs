@@ -203,19 +203,36 @@ namespace ConfigSheetForge.Core
             var clone = WorkbookCloner.Clone(workbook);
             clone.ProviderId = "";
             clone.SourceId = "";
+            clone.SourceTitle = "";
             clone.Revision = "";
+            for (var i = 0; i < clone.Sheets.Count; i++)
+            {
+                var sheet = clone.Sheets[i];
+                sheet.Metadata["triangulationOriginalName"] = FirstNonEmpty(sheet.Name, sheet.Id, "Sheet" + (i + 1).ToString(CultureInfo.InvariantCulture));
+                var comparableSheetName = "sheet-" + (i + 1).ToString("000", CultureInfo.InvariantCulture);
+                sheet.Id = comparableSheetName;
+                sheet.Name = comparableSheetName;
+                foreach (var column in sheet.Columns)
+                {
+                    column.DisplayName = column.Key ?? "";
+                }
+            }
+
             return clone;
         }
 
         private static void AddDiffs(TriangulationReport report, string leftName, WorkbookDocument left, string rightName, WorkbookDocument right)
         {
-            foreach (var sheet in left.Sheets)
+            for (var sheetIndex = 0; sheetIndex < left.Sheets.Count; sheetIndex++)
             {
+                var sheet = left.Sheets[sheetIndex];
                 var rightSheet = right.Sheets.FirstOrDefault(s => string.Equals(s.Name, sheet.Name, StringComparison.OrdinalIgnoreCase) ||
-                                                                  string.Equals(s.Id, sheet.Id, StringComparison.OrdinalIgnoreCase));
+                                                                  string.Equals(s.Id, sheet.Id, StringComparison.OrdinalIgnoreCase)) ??
+                                 (sheetIndex < right.Sheets.Count ? right.Sheets[sheetIndex] : null);
+                var sheetLabel = sheet.Metadata.TryGetValue("triangulationOriginalName", out var originalName) ? originalName : sheet.Name;
                 if (rightSheet == null)
                 {
-                    Add(report, leftName + " 有工作表 “" + sheet.Name + "”，但 " + rightName + " 没有。");
+                    Add(report, leftName + " 有工作表 “" + sheetLabel + "”，但 " + rightName + " 没有。");
                     continue;
                 }
 
@@ -223,7 +240,7 @@ namespace ConfigSheetForge.Core
                 {
                     if (!rightSheet.Columns.Any(c => string.Equals(c.Key, column.Key, StringComparison.OrdinalIgnoreCase)))
                     {
-                        Add(report, sheet.Name + " 缺少列：" + column.Key + "（" + rightName + "）。");
+                        Add(report, sheetLabel + " 缺少列：" + column.Key + "（" + rightName + "）。");
                     }
                 }
 
@@ -232,7 +249,7 @@ namespace ConfigSheetForge.Core
                     var rightRow = rightSheet.Rows.FirstOrDefault(r => string.Equals(r.StableId, row.StableId, StringComparison.OrdinalIgnoreCase));
                     if (rightRow == null)
                     {
-                        Add(report, sheet.Name + " 缺少行：" + row.StableId + "（" + rightName + "）。");
+                        Add(report, sheetLabel + " 缺少行：" + row.StableId + "（" + rightName + "）。");
                         continue;
                     }
 
@@ -243,7 +260,7 @@ namespace ConfigSheetForge.Core
                         var rightFingerprint = SemanticHasher.CellFingerprint(rightCell);
                         if (!string.Equals(leftFingerprint, rightFingerprint, StringComparison.Ordinal))
                         {
-                            Add(report, sheet.Name + " 行 “" + row.StableId + "” 列 “" + cell.Key + "” 在 " + leftName + " 与 " + rightName + " 中不一致。");
+                            Add(report, sheetLabel + " 行 “" + row.StableId + "” 列 “" + cell.Key + "” 在 " + leftName + " 与 " + rightName + " 中不一致。");
                         }
                     }
                 }
@@ -256,6 +273,19 @@ namespace ConfigSheetForge.Core
             {
                 report.DiffSummary.Add(message);
             }
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return "";
         }
     }
 

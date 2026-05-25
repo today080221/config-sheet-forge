@@ -70,7 +70,7 @@ public sealed class LarkCliGateway
 
 public static class LarkCliDiscovery
 {
-    private static readonly string[] WindowsExecutableExtensions = { ".cmd", ".exe", ".bat", ".com" };
+    private static readonly string[] WindowsExecutableExtensions = { ".ps1", ".exe", ".cmd", ".bat", ".com" };
 
     public static LarkCliResolvedCommand Resolve(string? requestedExecutable = null)
     {
@@ -256,7 +256,26 @@ public static class LarkCliDiscovery
 
     private static string? ResolveShell(string command)
     {
-        return FromPath(command, "PATH").FirstOrDefault(c => c.Exists())?.FileName;
+        if (!IsBareCommand(command))
+        {
+            return File.Exists(command) ? command : null;
+        }
+
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        var extensions = IsWindows() ? new[] { ".exe", ".cmd", ".bat", ".com" } : new[] { "" };
+        foreach (var directory in path.Split(Path.PathSeparator).Select(p => p.Trim().Trim('"')).Where(p => !string.IsNullOrWhiteSpace(p)))
+        {
+            foreach (var extension in extensions)
+            {
+                var candidate = Path.Combine(directory, command + extension);
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
     }
 
     private static IEnumerable<string> ExpandWindowsSiblingCandidates(string path)
@@ -293,8 +312,6 @@ public static class LarkCliDiscovery
         {
             yield return extensionFromPath;
         }
-
-        yield return ".ps1";
     }
 
     private static string? TryRunSimpleCommand(string executable, params string[] args)

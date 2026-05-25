@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -858,8 +859,17 @@ namespace ConfigSheetForge.Core
                 return new UnitySettingsUpdateResult { Message = "未配置 Unity ExcelToSO 设置路径。" };
             }
 
-            var existing = File.Exists(path) ? File.ReadAllText(path) : "%YAML 1.1\n--- !u!114 &1\nExcelToScriptableObjectSettings:\n  configs:\n";
-            var updated = UpsertText(existing, entry);
+            var hasBom = false;
+            var existing = "%YAML 1.1\n--- !u!114 &1\nExcelToScriptableObjectSettings:\n  configs:\n";
+            if (File.Exists(path))
+            {
+                var bytes = File.ReadAllBytes(path);
+                hasBom = HasUtf8Bom(bytes);
+                existing = Encoding.UTF8.GetString(hasBom ? bytes.Skip(3).ToArray() : bytes);
+            }
+
+            var newline = DetectNewline(existing);
+            var updated = NormalizeNewlineStyle(UpsertText(existing, entry), newline);
             if (string.Equals(existing, updated, StringComparison.Ordinal))
             {
                 return new UnitySettingsUpdateResult { Changed = false, Message = "Unity ExcelToSO 设置已包含目标表，未改动。" };
@@ -871,7 +881,9 @@ namespace ConfigSheetForge.Core
                 Directory.CreateDirectory(directory);
             }
 
-            File.WriteAllText(path, updated);
+            var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            var bodyBytes = encoding.GetBytes(updated);
+            File.WriteAllBytes(path, hasBom ? new byte[] { 0xEF, 0xBB, 0xBF }.Concat(bodyBytes).ToArray() : bodyBytes);
             return new UnitySettingsUpdateResult { Changed = true, Message = "已更新 Unity ExcelToScriptableObjectSettings.asset。" };
         }
 
@@ -925,13 +937,35 @@ namespace ConfigSheetForge.Core
             return builder.ToString();
         }
 
+        private static bool HasUtf8Bom(byte[] bytes)
+        {
+            return bytes != null && bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+        }
+
+        private static string DetectNewline(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return Environment.NewLine;
+            }
+
+            var crlf = text.IndexOf("\r\n", StringComparison.Ordinal);
+            var lf = text.IndexOf('\n');
+            return crlf >= 0 || lf < 0 ? "\r\n" : "\n";
+        }
+
+        private static string NormalizeNewlineStyle(string text, string newline)
+        {
+            newline = string.IsNullOrEmpty(newline) ? Environment.NewLine : newline;
+            return (text ?? "").Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", newline);
+        }
+
         private static string UpsertJsonLikeText(string json, UnityExcelToSoEntry entry, string tableId, string excelPath)
         {
-            if (!string.IsNullOrWhiteSpace(tableId) &&
-                (json.IndexOf("\"tableId\": \"" + tableId + "\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 json.IndexOf("\"id\": \"" + tableId + "\"", StringComparison.OrdinalIgnoreCase) >= 0))
+            var existingAnchor = FindExistingJsonEntryAnchor(json, tableId, excelPath);
+            if (existingAnchor >= 0)
             {
-                return UpdateExistingJsonEntry(json, entry, tableId, excelPath);
+                return UpdateExistingJsonEntry(json, entry, tableId, excelPath, existingAnchor);
             }
 
             var objectText = BuildJsonEntry(entry, tableId, excelPath, "    ");
@@ -985,12 +1019,12 @@ namespace ConfigSheetForge.Core
 
         private static string UpdateExistingJsonEntry(string json, UnityExcelToSoEntry entry, string tableId, string excelPath)
         {
-            var keyIndex = FindJsonEntryKey(json, "tableId", tableId);
-            if (keyIndex < 0)
-            {
-                keyIndex = FindJsonEntryKey(json, "id", tableId);
-            }
+            var keyIndex = FindExistingJsonEntryAnchor(json, tableId, excelPath);
+            return keyIndex < 0 ? json : UpdateExistingJsonEntry(json, entry, tableId, excelPath, keyIndex);
+        }
 
+        private static string UpdateExistingJsonEntry(string json, UnityExcelToSoEntry entry, string tableId, string excelPath, int keyIndex)
+        {
             if (keyIndex < 0)
             {
                 return json;
@@ -1006,26 +1040,169 @@ namespace ConfigSheetForge.Core
             var before = json.Substring(0, objectStart);
             var body = json.Substring(objectStart, objectEnd - objectStart + 1);
             var after = json.Substring(objectEnd + 1);
-            body = UpsertJsonStringProperty(body, "excelPath", excelPath);
+            body = UpsertJsonStringProperty(body, FirstNonEmpty(FindJsonPathPropertyName(body, tableId, excelPath), "excelPath"), excelPath);
             if (!string.IsNullOrWhiteSpace(entry.ScriptableObjectType))
             {
-                body = UpsertJsonStringProperty(body, "scriptableObjectType", entry.ScriptableObjectType);
+                var scriptableKey = FindJsonPropertyName(body, "scriptableObjectType", "scriptableObject", "targetType", "soType");
+                if (!string.IsNullOrWhiteSpace(scriptableKey))
+                {
+                    body = UpsertJsonStringProperty(body, scriptableKey, entry.ScriptableObjectType);
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(entry.AssetPath))
             {
-                body = UpsertJsonStringProperty(body, "assetPath", NormalizePath(entry.AssetPath));
+                var assetKey = FindJsonPropertyName(body, "assetPath", "outputPath", "asset");
+                if (!string.IsNullOrWhiteSpace(assetKey))
+                {
+                    body = UpsertJsonStringProperty(body, assetKey, NormalizePath(entry.AssetPath));
+                }
             }
 
             foreach (var pair in entry.ExtraFields.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
             {
-                if (!string.Equals(pair.Key, "jsonArrayProperty", StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(pair.Key, "jsonArrayProperty", StringComparison.OrdinalIgnoreCase) &&
+                    FindJsonProperty(body, pair.Key) >= 0)
                 {
                     body = UpsertJsonStringProperty(body, pair.Key, pair.Value);
                 }
             }
 
             return before + body + after;
+        }
+
+        private static int FindExistingJsonEntryAnchor(string json, string tableId, string excelPath)
+        {
+            if (!string.IsNullOrWhiteSpace(tableId))
+            {
+                var keyIndex = FindJsonEntryKey(json, "tableId", tableId);
+                if (keyIndex >= 0)
+                {
+                    return keyIndex;
+                }
+
+                keyIndex = FindJsonEntryKey(json, "id", tableId);
+                if (keyIndex >= 0)
+                {
+                    return keyIndex;
+                }
+            }
+
+            var anchors = new List<string>();
+            AddAnchor(anchors, tableId);
+            AddAnchor(anchors, Path.GetFileNameWithoutExtension(excelPath));
+            AddAnchor(anchors, Path.GetFileName(excelPath));
+            foreach (var anchor in anchors)
+            {
+                var searchFrom = 0;
+                while (searchFrom < json.Length)
+                {
+                    var index = json.IndexOf(anchor, searchFrom, StringComparison.OrdinalIgnoreCase);
+                    if (index < 0)
+                    {
+                        break;
+                    }
+
+                    var objectStart = FindObjectStart(json, index);
+                    var objectEnd = objectStart < 0 ? -1 : FindMatchingBracket(json, objectStart, '{', '}');
+                    if (objectStart >= 0 && objectEnd > objectStart)
+                    {
+                        var body = json.Substring(objectStart, objectEnd - objectStart + 1);
+                        if (LooksLikeExcelToSoJsonEntry(body, tableId, excelPath))
+                        {
+                            return index;
+                        }
+                    }
+
+                    searchFrom = index + anchor.Length;
+                }
+            }
+
+            return -1;
+        }
+
+        private static void AddAnchor(ICollection<string> anchors, string value)
+        {
+            if (!string.IsNullOrWhiteSpace(value) && !anchors.Contains(value, StringComparer.OrdinalIgnoreCase))
+            {
+                anchors.Add(value);
+            }
+        }
+
+        private static bool LooksLikeExcelToSoJsonEntry(string objectText, string tableId, string excelPath)
+        {
+            return objectText.IndexOf(".xlsx", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   (!string.IsNullOrWhiteSpace(tableId) && objectText.IndexOf(tableId, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                   (!string.IsNullOrWhiteSpace(excelPath) && objectText.IndexOf(Path.GetFileNameWithoutExtension(excelPath), StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static string FindJsonPathPropertyName(string objectText, string tableId, string excelPath)
+        {
+            var preferred = FindJsonPropertyName(objectText, "excelPath", "ExcelPath", "xlsxPath", "excelFilePath", "excelFile", "sourcePath", "path", "Path");
+            if (!string.IsNullOrWhiteSpace(preferred))
+            {
+                return preferred;
+            }
+
+            return FindStringPropertyNameByValue(objectText, value =>
+                value.IndexOf(".xlsx", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                (!string.IsNullOrWhiteSpace(tableId) && value.IndexOf(tableId, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                (!string.IsNullOrWhiteSpace(excelPath) && value.IndexOf(Path.GetFileNameWithoutExtension(excelPath), StringComparison.OrdinalIgnoreCase) >= 0));
+        }
+
+        private static string FindJsonPropertyName(string objectText, params string[] candidates)
+        {
+            foreach (var candidate in candidates)
+            {
+                var propertyIndex = FindJsonProperty(objectText, candidate);
+                if (propertyIndex >= 0)
+                {
+                    int keyEnd;
+                    return ParseJsonString(objectText, propertyIndex, out keyEnd);
+                }
+            }
+
+            return "";
+        }
+
+        private static string FindStringPropertyNameByValue(string objectText, Func<string, bool> predicate)
+        {
+            var searchFrom = 0;
+            while (searchFrom < objectText.Length)
+            {
+                var keyStart = objectText.IndexOf('"', searchFrom);
+                if (keyStart < 0)
+                {
+                    return "";
+                }
+
+                int keyEnd;
+                var key = ParseJsonString(objectText, keyStart, out keyEnd);
+                var colon = objectText.IndexOf(':', keyEnd + 1);
+                if (colon < 0)
+                {
+                    return "";
+                }
+
+                var valueStart = SkipWhitespace(objectText, colon + 1);
+                if (valueStart < objectText.Length && objectText[valueStart] == '"')
+                {
+                    int valueEnd;
+                    var value = ParseJsonString(objectText, valueStart, out valueEnd);
+                    if (predicate(value))
+                    {
+                        return key;
+                    }
+
+                    searchFrom = valueEnd + 1;
+                }
+                else
+                {
+                    searchFrom = colon + 1;
+                }
+            }
+
+            return "";
         }
 
         private static int FindJsonEntryKey(string json, string key, string value)
