@@ -109,6 +109,7 @@ namespace ConfigSheetForge.Core
 
     public sealed class BranchBindingContract
     {
+        public string RecordId { get; set; } = "";
         public string GitBranch { get; set; } = "";
         public string FeishuBranch { get; set; } = "";
         public string Profile { get; set; } = "";
@@ -267,6 +268,7 @@ namespace ConfigSheetForge.Core
         public string Locale { get; set; } = "zh-Hans";
         public bool CleanupDefaultRows { get; set; }
         public bool CleanupDefaultFields { get; set; }
+        public bool CleanupDuplicateBranchBindings { get; set; }
     }
 
     public sealed class RegistrySnapshot
@@ -381,6 +383,16 @@ namespace ConfigSheetForge.Core
                         action.Details["recordId"] = record.RecordId;
                     }
                 }
+                else
+                {
+                    foreach (var record in table.Records.Where(r => r.IsEmpty))
+                    {
+                        var action = Add(plan, "registry.record.empty_default", "planned", "检测到注册中心自动生成的空白默认行；dry-run 不删除，apply 清理需显式传 cleanup 选项和 --yes。");
+                        action.Details["table"] = FirstNonEmpty(table.MachineKey, table.DisplayName, table.TableId);
+                        action.Details["tableId"] = table.TableId;
+                        action.Details["recordId"] = record.RecordId;
+                    }
+                }
 
                 if (options.CleanupDefaultFields)
                 {
@@ -393,9 +405,131 @@ namespace ConfigSheetForge.Core
                         action.Details["fieldType"] = field.Type;
                     }
                 }
+
+                AddFieldAmbiguityDiagnostics(plan, table);
+                AddBranchBindingDuplicateDiagnostics(plan, table, options);
             }
 
             return plan;
+        }
+
+        private static void AddFieldAmbiguityDiagnostics(RegistryMigrationPlan plan, RegistryTableSnapshot table)
+        {
+            var mapping = plan.DisplayNameMapping.Fields;
+            var groups = table.Fields
+                .Select(f => new { Field = f, MachineKey = ResolveMachineKey(f.DisplayName, f.MachineKey, mapping) })
+                .Where(v => !string.IsNullOrWhiteSpace(v.MachineKey))
+                .GroupBy(v => v.MachineKey, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .ToList();
+
+            foreach (var group in groups)
+            {
+                var action = Add(plan, "registry.field.ambiguous_alias", "planned", "检测到注册中心字段存在中英文/旧 schema 重复：“" + group.Key + "”。请保留一个字段名，避免 upsert/lookup 歧义。");
+                action.Details["table"] = FirstNonEmpty(table.MachineKey, table.DisplayName, table.TableId);
+                action.Details["tableId"] = table.TableId;
+                action.Details["machineKey"] = group.Key;
+                action.Details["fieldIds"] = string.Join(",", group.Select(v => v.Field.FieldId).Where(v => !string.IsNullOrWhiteSpace(v)));
+                action.Details["displayNames"] = string.Join(",", group.Select(v => v.Field.DisplayName).Where(v => !string.IsNullOrWhiteSpace(v)));
+            }
+        }
+
+        private static void AddBranchBindingDuplicateDiagnostics(RegistryMigrationPlan plan, RegistryTableSnapshot table, RegistryMigrationOptions options)
+        {
+            var tableName = FirstNonEmpty(table.MachineKey, table.DisplayName);
+            if (!string.Equals(tableName, "BranchBindings", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(tableName, plan.DisplayNameMapping.Tables["BranchBindings"], StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            var groups = table.Records
+                .Where(r => !r.IsEmpty)
+                .Select(r => new
+                {
+                    Record = r,
+                    GitBranch = GetRecordValue(r, "GitBranch", plan.DisplayNameMapping),
+                    Profile = FirstNonEmpty(GetRecordValue(r, "Profile", plan.DisplayNameMapping), GetRecordValue(r, "FeishuBranch", plan.DisplayNameMapping))
+                })
+                .Where(v => !string.IsNullOrWhiteSpace(v.GitBranch) && !string.IsNullOrWhiteSpace(v.Profile))
+                .GroupBy(v => v.GitBranch + "\n" + v.Profile, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .ToList();
+
+            foreach (var group in groups)
+            {
+                var first = group.First();
+                var recordIds = group.Select(v => v.Record.RecordId).Where(v => !string.IsNullOrWhiteSpace(v)).ToList();
+                var action = Add(plan, "registry.branch_bindings.duplicate", "planned", "检测到 BranchBindings 重复绑定：GitBranch “" + first.GitBranch + "” + Profile “" + first.Profile + "” 有 " + group.Count().ToString(CultureInfo.InvariantCulture) + " 条记录（record_id: " + string.Join(", ", recordIds) + "）。请先清理重复历史记录后再运行 seed/sync-cache。");
+                action.Details["table"] = FirstNonEmpty(table.MachineKey, table.DisplayName, table.TableId);
+                action.Details["tableId"] = table.TableId;
+                action.Details["gitBranch"] = first.GitBranch;
+                action.Details["profile"] = first.Profile;
+                action.Details["count"] = group.Count().ToString(CultureInfo.InvariantCulture);
+                action.Details["recordIds"] = string.Join(",", recordIds);
+
+                if (options.CleanupDuplicateBranchBindings)
+                {
+                    foreach (var duplicate in group.Skip(1))
+                    {
+                        var delete = Add(plan, "registry.record.delete_duplicate_branch_binding", "planned", "清理重复 BranchBindings 历史记录，保留第一条记录。");
+                        delete.Details["table"] = FirstNonEmpty(table.MachineKey, table.DisplayName, table.TableId);
+                        delete.Details["tableId"] = table.TableId;
+                        delete.Details["recordId"] = duplicate.Record.RecordId;
+                        delete.Details["gitBranch"] = first.GitBranch;
+                        delete.Details["profile"] = first.Profile;
+                    }
+                }
+            }
+        }
+
+        private static string GetRecordValue(RegistryRecordSnapshot record, string machineKey, RegistryDisplayMapping mapping)
+        {
+            var fallback = "";
+            foreach (var alias in FieldAliases(machineKey, mapping))
+            {
+                foreach (var value in record.Values)
+                {
+                    if (string.Equals(value.Key, alias, StringComparison.OrdinalIgnoreCase))
+                    {
+                        fallback = value.Value ?? "";
+                        if (!string.IsNullOrWhiteSpace(fallback))
+                        {
+                            return fallback;
+                        }
+                    }
+                }
+            }
+
+            return fallback;
+        }
+
+        private static IEnumerable<string> FieldAliases(string machineKey, RegistryDisplayMapping mapping)
+        {
+            yield return machineKey;
+            if (mapping.Fields.TryGetValue(machineKey, out var displayName) && !string.IsNullOrWhiteSpace(displayName))
+            {
+                yield return displayName;
+            }
+        }
+
+        private static string ResolveMachineKey(string displayName, string existingMachineKey, IDictionary<string, string> mapping)
+        {
+            if (!string.IsNullOrWhiteSpace(existingMachineKey))
+            {
+                return existingMachineKey;
+            }
+
+            foreach (var pair in mapping)
+            {
+                if (string.Equals(displayName, pair.Key, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(displayName, pair.Value, StringComparison.OrdinalIgnoreCase))
+                {
+                    return pair.Key;
+                }
+            }
+
+            return displayName ?? "";
         }
 
         private static LifecycleActionResult Add(RegistryMigrationPlan plan, string actionName, string status, string message)
@@ -777,7 +911,12 @@ namespace ConfigSheetForge.Core
             var bindings = request.BranchBindings;
             var branchMatches = bindings.Where(b => string.Equals(b.GitBranch, branch, StringComparison.OrdinalIgnoreCase)).ToList();
             var profileMatches = bindings.Where(b => string.Equals(FirstNonEmpty(b.FeishuBranch, b.Profile), feishu, StringComparison.OrdinalIgnoreCase)).ToList();
-            if (branchMatches.Count > 1)
+            var branchProfiles = branchMatches
+                .Select(b => FirstNonEmpty(b.Profile, b.FeishuBranch))
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (branchProfiles.Count > 1)
             {
                 result.AddFailure("当前 Git 分支 “" + branch + "” 绑定了多个 Feishu profile。请先清理分支绑定。");
             }

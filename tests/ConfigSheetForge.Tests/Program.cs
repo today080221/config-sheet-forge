@@ -21,8 +21,13 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("datetime normalization does not assume local timezone", () => RunSync(DateTimeNormalizationDoesNotAssumeLocalTimezone)),
     ("registry localization keeps machine keys", () => RunSync(RegistryLocalizationKeepsMachineKeys)),
     ("registry migration cleans default rows and fields", () => RunSync(RegistryMigrationCleansDefaults)),
+    ("lark base matrix record lookup finds existing record", () => RunSync(LarkBaseMatrixRecordLookupFindsExistingRecord)),
+    ("registry migration reports branch binding cleanup risks", () => RunSync(RegistryMigrationReportsBranchBindingCleanupRisks)),
     ("branch workspace resolver creates stable slugs", () => RunSync(BranchWorkspaceResolverCreatesStableSlugs)),
     ("branch binding one-to-one conflict blocks lifecycle", BranchBindingOneToOneConflictBlocksLifecycle),
+    ("duplicate branch bindings block lifecycle with record ids", DuplicateBranchBindingsBlockLifecycleWithRecordIds),
+    ("sync-cache hydrates branch workspace from registry snapshot", SyncCacheHydratesBranchWorkspaceFromRegistrySnapshot),
+    ("seed registry lookup reuses existing branch binding record", () => RunSync(SeedRegistryLookupReusesExistingBranchBindingRecord)),
     ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
     ("excel to so updater appends json settings", () => RunSync(ExcelToSoUpdaterAppendsJsonSettings)),
@@ -271,6 +276,60 @@ static void RegistryMigrationCleansDefaults()
     AssertTrue(plan.Actions.Any(a => a.Action == "registry.field.delete_default"), "Default fields should be cleaned.");
 }
 
+static void LarkBaseMatrixRecordLookupFindsExistingRecord()
+{
+    var json = """
+    {
+      "data": {
+        "fields": ["Git分支", "配置Profile", "Wiki节点Token"],
+        "data": [
+          ["feature/config", "feature-config", "wik_feature"]
+        ],
+        "record_id_list": ["rec_branch_1"]
+      }
+    }
+    """;
+
+    var records = ConfigSheetForge.Cli.Program.ParseLarkBaseRecordListJson(json);
+    AssertEqual("1", records.Count.ToString(), "Matrix record-list should produce one normalized record.");
+    AssertEqual("rec_branch_1", records[0].RecordId, "record_id_list should map onto the normalized record.");
+    var matches = ConfigSheetForge.Cli.Program.FindMatchingRegistryRecords(records, new Dictionary<string, string>
+    {
+        ["GitBranch"] = "feature/config",
+        ["Profile"] = "feature-config"
+    }, "zh-Hans");
+    AssertEqual("1", matches.Count.ToString(), "Machine-key lookup should match Chinese display-name fields.");
+    AssertEqual("rec_branch_1", matches[0].RecordId, "Lookup should return the existing record id.");
+}
+
+static void RegistryMigrationReportsBranchBindingCleanupRisks()
+{
+    var snapshot = new RegistrySnapshot();
+    snapshot.Tables.Add(new RegistryTableSnapshot
+    {
+        MachineKey = "BranchBindings",
+        TableId = "tbl_branch",
+        DisplayName = "分支绑定",
+        Fields =
+        {
+            new RegistryFieldSnapshot { MachineKey = "GitBranch", FieldId = "fld_git_en", DisplayName = "GitBranch" },
+            new RegistryFieldSnapshot { FieldId = "fld_git_zh", DisplayName = "Git分支" },
+            new RegistryFieldSnapshot { MachineKey = "Profile", FieldId = "fld_profile", DisplayName = "配置Profile" }
+        },
+        Records =
+        {
+            new RegistryRecordSnapshot { RecordId = "rec_a", Values = { ["Git分支"] = "feature/config", ["配置Profile"] = "feature-config" } },
+            new RegistryRecordSnapshot { RecordId = "rec_b", Values = { ["GitBranch"] = "feature/config", ["Profile"] = "feature-config" } },
+            new RegistryRecordSnapshot { RecordId = "rec_empty" }
+        }
+    });
+
+    var plan = RegistryMigrator.Plan(snapshot, new RegistryMigrationOptions { Locale = "zh-Hans" });
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.branch_bindings.duplicate" && a.Details["recordIds"].Contains("rec_a") && a.Details["recordIds"].Contains("rec_b")), "Duplicate BranchBindings should be listed in dry-run.");
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.record.empty_default"), "Blank default rows should be listed even when cleanup is not enabled.");
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.field.ambiguous_alias" && a.Details["machineKey"] == "GitBranch"), "Bilingual duplicate fields should be reported as ambiguous.");
+}
+
 static void BranchWorkspaceResolverCreatesStableSlugs()
 {
     var request = new LifecycleContractRequest
@@ -315,6 +374,121 @@ static async Task BranchBindingOneToOneConflictBlocksLifecycle()
     var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
     AssertTrue(!result.Success, "One profile bound to multiple git branches should block lifecycle.");
     AssertTrue(result.HumanReadableFailures.Any(f => f.Contains("Feishu profile") && f.Contains("Git 分支")), "Failure should be readable for designers.");
+}
+
+static async Task DuplicateBranchBindingsBlockLifecycleWithRecordIds()
+{
+    var request = new LifecycleContractRequest
+    {
+        Operation = "sync-cache",
+        DryRun = true,
+        Git = new ContractGitSpec { Branch = "feature/config", Profile = "feature-config" },
+        BranchWorkspace = new BranchWorkspaceContract { RequireOneToOneBinding = true },
+        BranchBindings =
+        {
+            new BranchBindingContract { RecordId = "rec_a", GitBranch = "feature/config", Profile = "feature-config", WikiNodeToken = "wik_a" },
+            new BranchBindingContract { RecordId = "rec_b", GitBranch = "feature/config", Profile = "feature-config", WikiNodeToken = "wik_b" }
+        }
+    };
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+    AssertTrue(!result.Success, "Duplicate BranchBindings for the same GitBranch + Profile must block.");
+    AssertTrue(result.HumanReadableFailures.Any(f => f.Contains("重复记录") && f.Contains("rec_a") && f.Contains("rec_b")), "Duplicate failure should list record ids and be readable.");
+}
+
+static async Task SyncCacheHydratesBranchWorkspaceFromRegistrySnapshot()
+{
+    var request = new LifecycleContractRequest
+    {
+        Operation = "sync-cache",
+        DryRun = true,
+        Locale = "zh-Hans",
+        Git = new ContractGitSpec { Branch = "feature/config", Profile = "feature-config" },
+        BranchWorkspace = new BranchWorkspaceContract { RequireOneToOneBinding = true },
+        Registry = new RegistryContract { BaseToken = "base_mock" }
+    };
+    request.BranchBindings.Add(new BranchBindingContract { GitBranch = "main", Profile = "main", WikiNodeToken = "wik_main" });
+
+    var snapshot = new RegistrySnapshot();
+    snapshot.Tables.Add(new RegistryTableSnapshot
+    {
+        MachineKey = "BranchBindings",
+        TableId = "tbl_branch",
+        DisplayName = "分支绑定",
+        Records =
+        {
+            new RegistryRecordSnapshot
+            {
+                RecordId = "rec_branch",
+                Values =
+                {
+                    ["Git分支"] = "feature/config",
+                    ["配置Profile"] = "feature-config",
+                    ["Wiki节点Token"] = "wik_feature",
+                    ["Wiki节点链接"] = "https://example.feishu.cn/wiki/wik_feature",
+                    ["状态"] = "active"
+                }
+            }
+        }
+    });
+    snapshot.Tables.Add(new RegistryTableSnapshot
+    {
+        MachineKey = "ConfigSheets",
+        TableId = "tbl_config",
+        DisplayName = "配表清单",
+        Records =
+        {
+            new RegistryRecordSnapshot
+            {
+                RecordId = "rec_sheet",
+                Values =
+                {
+                    ["配表ID"] = "ItemsData",
+                    ["显示名称"] = "Items",
+                    ["Feishu分支"] = "feature-config",
+                    ["配置Profile"] = "feature-config",
+                    ["在线表Token"] = "sht_items",
+                    ["工作表ID"] = "sheet_items",
+                    ["在线表链接"] = "https://example.feishu.cn/sheets/sht_items",
+                    ["Wiki节点Token"] = "wik_feature"
+                }
+            }
+        }
+    });
+
+    ConfigSheetForge.Cli.Program.HydrateSyncCacheRequestFromRegistrySnapshot(request, snapshot, "");
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+    AssertTrue(result.Success, "Hydrated BranchBindings should let sync-cache dry-run continue.");
+    AssertEqual("wik_feature", result.BranchWorkspace.WikiNodeToken, "Branch workspace should come from live registry data.");
+    AssertTrue(request.SeedFromLocalXlsx.Tables.Any(t => t.TableId == "ItemsData" && t.SpreadsheetToken == "sht_items"), "ConfigSheets rows should hydrate sync-cache table locators.");
+    AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.online_read" && a.Status == "planned"), "sync-cache dry-run should plan online read.");
+    AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.export_xlsx" && a.Status == "planned"), "sync-cache dry-run should plan export.");
+    AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.triangulation_compare" && a.Status == "planned"), "sync-cache dry-run should plan triangulation.");
+    AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.cache_hash_gate" && a.Status == "planned"), "sync-cache dry-run should plan hash gate.");
+}
+
+static void SeedRegistryLookupReusesExistingBranchBindingRecord()
+{
+    var json = """
+    {
+      "data": {
+        "fields": ["GitBranch", "Profile", "WikiNodeToken"],
+        "data": [
+          ["feature/config", "feature-config", "wik_feature"]
+        ],
+        "record_id_list": ["rec_existing"]
+      }
+    }
+    """;
+
+    var records = ConfigSheetForge.Cli.Program.ParseLarkBaseRecordListJson(json);
+    var matches = ConfigSheetForge.Cli.Program.FindMatchingRegistryRecords(records, new Dictionary<string, string>
+    {
+        ["Git分支"] = "feature/config",
+        ["配置Profile"] = "feature-config"
+    }, "zh-Hans");
+    AssertEqual("1", matches.Count.ToString(), "Seed upsert should find the existing BranchBindings record by GitBranch + Profile.");
+    AssertEqual("rec_existing", matches[0].RecordId, "Seed rerun should reuse record_id instead of appending.");
 }
 
 static async Task LifecycleNewTableDryRunDoesNotWriteFiles()

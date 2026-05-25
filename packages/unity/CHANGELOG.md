@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.3
+
+- 修复 Base `record-list --format json` 矩阵返回解析，统一还原为 `record_id + fields`，registry 查重/定位显式使用 JSON 输出。
+- seed/SchemaReviews/ConfigSheets/BranchBindings upsert 按复合 key 定位既有记录；ConfigSheets 不再用裸 `TableId` 覆盖 main 分支记录。
+- `sync-cache` 在配置 registry Base 时会 live hydrate 当前 Git branch/profile 的 BranchBindings 与 ConfigSheets，contract 只带 main binding 时也能继续 dry-run。
+- 同一 `GitBranch + Profile` 的重复 BranchBindings 会阻断并列出 record_id，避免静默任选一条。
+- `registry-migrate --dry-run` 会列出重复 BranchBindings、空白默认行和中英文/旧 schema 字段歧义；删除类 cleanup apply 需要显式 `--yes`。
+
 ## 0.4.2
 
 - 修复 Windows + `lark-cli` strict bot seed apply：优先使用 `lark-cli.ps1`，飞书 `--json`/`--values` 参数改为 compact JSON，并保留 action/category/stderr 诊断。

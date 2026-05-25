@@ -59,10 +59,12 @@ core 支持 `bootstrap-registry`、`new-table`、`seed-from-local-xlsx`、`boots
 
 branch/profile 工作区由 contract 的 `branchWorkspace` 和 `branchBindings` 驱动。`requireOneToOneBinding=true` 时，同一 Git 分支不能绑定多个 Feishu profile，同一 profile 也不能被多个 Git 分支复用；冲突会阻断 seed/sync/merge/gate，并输出中文修复建议。
 
+`sync-cache` 会在配置 Base 注册中心时从 live BranchBindings / ConfigSheets hydrate 当前 branch/profile 的在线表定位；如果检测到同一 `GitBranch + Profile` 多条 BranchBindings，会阻断并列出 record_id。清理前先跑 `config-sheet-forge registry-migrate --base <base-token> --dry-run` 审计重复行、空白默认行和中英文重复字段；执行删除类 cleanup 必须额外传 `--yes`。
+
 ## Unity UPM 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.2
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.3
 ```
 
 安装后打开 `Tools > Config Sheet Forge` 或 `Tools > Config Sheet Forge > 打开同步窗口`。下游 Unity 项目推荐只保留薄菜单 adapter 和 `ProjectSettings/*ConfigSheetForge*.json` 项目配置，通用窗口、向导、contract 执行、三方比较和 gate UI 都由本包维护。

@@ -537,6 +537,7 @@ public static class Program
             ? await ReadSeedManifestAsync(workspace, manifestPath, args)
             : NewSeedRequestFromWorkspace(workspace, args);
         request.Operation = "sync-cache";
+        request.SyncCache ??= new SyncCacheContract();
         request.DryRun = args.HasFlag("dry-run") || !args.HasFlag("yes");
         request.SyncCache.TableId = args.Get("table", "");
         request.SyncCache.CacheDirectory = args.Get("cache-dir", workspace.Paths.CacheDirectory);
@@ -547,6 +548,7 @@ public static class Program
             throw new CliException("sync-cache apply 会更新本地 cache，必须显式传 --yes。", 2);
         }
 
+        await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
         var result = await LifecycleExecutor.ExecuteAsync(request, new CliLifecyclePlatform(args, request), CancellationToken.None);
         if (result.Success && !request.DryRun)
         {
@@ -608,6 +610,150 @@ public static class Program
         }
 
         return tables;
+    }
+
+    private static async Task HydrateSyncCacheRequestFromRegistryAsync(LifecycleContractRequest request, ParsedArgs args, string selectedTable)
+    {
+        if (request == null || request.Registry == null || string.IsNullOrWhiteSpace(request.Registry.BaseToken))
+        {
+            return;
+        }
+
+        var gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
+        var snapshot = await LoadRegistrySnapshotFromLarkAsync(gateway, request.Registry.BaseToken, request.Locale, args);
+        HydrateSyncCacheRequestFromRegistrySnapshot(request, snapshot, selectedTable);
+    }
+
+    public static void HydrateSyncCacheRequestFromRegistrySnapshot(LifecycleContractRequest request, RegistrySnapshot snapshot, string selectedTable)
+    {
+        if (request == null || snapshot == null)
+        {
+            return;
+        }
+
+        request.BranchBindings ??= new List<BranchBindingContract>();
+        request.Registry ??= new RegistryContract();
+        request.SeedFromLocalXlsx ??= new SeedFromLocalXlsxContract();
+        var resolution = BranchWorkspaceResolver.Resolve(request);
+        var effectiveProfile = FirstNonEmpty(resolution.Profile, resolution.FeishuBranch);
+        var branchTable = FindRegistryTable(snapshot, "BranchBindings", request.Locale);
+        if (branchTable != null)
+        {
+            var matches = branchTable.Records
+                .Where(r => !r.IsEmpty)
+                .Where(r => string.Equals(GetRegistryRecordValue(r, "GitBranch", request.Locale, request.Registry), resolution.GitBranch, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(FirstNonEmpty(GetRegistryRecordValue(r, "Profile", request.Locale, request.Registry), GetRegistryRecordValue(r, "FeishuBranch", request.Locale, request.Registry)), effectiveProfile, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var match in matches)
+            {
+                var binding = new BranchBindingContract
+                {
+                    RecordId = match.RecordId,
+                    GitBranch = GetRegistryRecordValue(match, "GitBranch", request.Locale, request.Registry),
+                    FeishuBranch = GetRegistryRecordValue(match, "FeishuBranch", request.Locale, request.Registry),
+                    Profile = GetRegistryRecordValue(match, "Profile", request.Locale, request.Registry),
+                    WikiNodeToken = GetRegistryRecordValue(match, "WikiNodeToken", request.Locale, request.Registry),
+                    WikiNodeUrl = GetRegistryRecordValue(match, "WikiNodeUrl", request.Locale, request.Registry),
+                    Status = GetRegistryRecordValue(match, "Status", request.Locale, request.Registry),
+                    OwnerRole = GetRegistryRecordValue(match, "OwnerRole", request.Locale, request.Registry),
+                    CreatedBy = GetRegistryRecordValue(match, "CreatedBy", request.Locale, request.Registry),
+                    CreatedAt = GetRegistryRecordValue(match, "CreatedAt", request.Locale, request.Registry),
+                    UpdatedAt = GetRegistryRecordValue(match, "UpdatedAt", request.Locale, request.Registry)
+                };
+                if (matches.Count > 1 || !request.BranchBindings.Any(b => SameBranchBindingIdentity(b, binding)))
+                {
+                    request.BranchBindings.Add(binding);
+                }
+            }
+        }
+
+        var configTable = FindRegistryTable(snapshot, "ConfigSheets", request.Locale);
+        if (configTable == null)
+        {
+            return;
+        }
+
+        var sheetRows = configTable.Records
+            .Where(r => !r.IsEmpty)
+            .Select(r => new
+            {
+                Record = r,
+                TableId = GetRegistryRecordValue(r, "TableId", request.Locale, request.Registry),
+                Branch = FirstNonEmpty(
+                    GetRegistryRecordValue(r, "Branch", request.Locale, request.Registry),
+                    GetRegistryRecordValue(r, "Profile", request.Locale, request.Registry),
+                    GetRegistryRecordValue(r, "FeishuBranch", request.Locale, request.Registry))
+            })
+            .Where(r => !string.IsNullOrWhiteSpace(r.TableId) &&
+                        string.Equals(r.Branch, effectiveProfile, StringComparison.OrdinalIgnoreCase) &&
+                        (string.IsNullOrWhiteSpace(selectedTable) || string.Equals(r.TableId, selectedTable, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        var duplicateGroups = sheetRows
+            .GroupBy(r => r.TableId + "\n" + r.Branch, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .ToList();
+        if (duplicateGroups.Count > 0)
+        {
+            var group = duplicateGroups[0];
+            var first = group.First();
+            var recordIds = string.Join(", ", group.Select(v => v.Record.RecordId).Where(v => !string.IsNullOrWhiteSpace(v)));
+            throw new CliException("ConfigSheets 中 TableId “" + first.TableId + "” + Branch/Profile “" + first.Branch + "” 存在 " + group.Count().ToString(CultureInfo.InvariantCulture) + " 条重复记录（record_id: " + recordIds + "）。请先运行 registry-migrate --dry-run 查看 cleanup/migrate 计划，确认后清理重复行。", 2);
+        }
+
+        foreach (var row in sheetRows)
+        {
+            UpsertSeedTableFromRegistryRecord(request.SeedFromLocalXlsx, row.Record, request.Locale, request.Registry);
+        }
+    }
+
+    private static bool SameBranchBindingIdentity(BranchBindingContract left, BranchBindingContract right)
+    {
+        if (!string.IsNullOrWhiteSpace(left.RecordId) && !string.IsNullOrWhiteSpace(right.RecordId))
+        {
+            return string.Equals(left.RecordId, right.RecordId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return string.Equals(left.GitBranch, right.GitBranch, StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(FirstNonEmpty(left.Profile, left.FeishuBranch), FirstNonEmpty(right.Profile, right.FeishuBranch), StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(left.WikiNodeToken, right.WikiNodeToken, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void UpsertSeedTableFromRegistryRecord(SeedFromLocalXlsxContract seed, RegistryRecordSnapshot record, string locale, RegistryContract registry)
+    {
+        var tableId = GetRegistryRecordValue(record, "TableId", locale, registry);
+        if (string.IsNullOrWhiteSpace(tableId))
+        {
+            return;
+        }
+
+        var table = seed.Tables.FirstOrDefault(t => string.Equals(t.TableId, tableId, StringComparison.OrdinalIgnoreCase));
+        if (table == null)
+        {
+            table = new SeedTableContract { TableId = tableId };
+            seed.Tables.Add(table);
+        }
+
+        table.RegistryRecordId = FirstNonEmpty(table.RegistryRecordId, record.RecordId);
+        table.DisplayName = FirstNonEmpty(table.DisplayName, GetRegistryRecordValue(record, "DisplayName", locale, registry), table.TableId);
+        table.CacheXlsxPath = FirstNonEmpty(table.CacheXlsxPath, GetRegistryRecordValue(record, "ExcelPath", locale, registry));
+        table.SpreadsheetToken = FirstNonEmpty(GetRegistryRecordValue(record, "SpreadsheetToken", locale, registry), table.SpreadsheetToken);
+        table.SpreadsheetUrl = FirstNonEmpty(GetRegistryRecordValue(record, "OnlineSheetUrl", locale, registry), table.SpreadsheetUrl);
+        table.SheetId = FirstNonEmpty(GetRegistryRecordValue(record, "SheetId", locale, registry), table.SheetId);
+        table.WikiNodeToken = FirstNonEmpty(GetRegistryRecordValue(record, "WikiNodeToken", locale, registry), table.WikiNodeToken);
+        table.WikiNodeUrl = FirstNonEmpty(GetRegistryRecordValue(record, "WikiNodeUrl", locale, registry), table.WikiNodeUrl);
+        table.Branch = FirstNonEmpty(GetRegistryRecordValue(record, "Branch", locale, registry), GetRegistryRecordValue(record, "FeishuBranch", locale, registry), table.Branch);
+        table.Profile = FirstNonEmpty(GetRegistryRecordValue(record, "Profile", locale, registry), table.Profile);
+        table.SemanticHash = FirstNonEmpty(GetRegistryRecordValue(record, "SemanticHash", locale, registry), table.SemanticHash);
+        table.OwnerRole = FirstNonEmpty(table.OwnerRole, GetRegistryRecordValue(record, "OwnerRole", locale, registry));
+        var reviewRequired = GetRegistryRecordValue(record, "SchemaReviewRequired", locale, registry);
+        if (!string.IsNullOrWhiteSpace(reviewRequired))
+        {
+            table.SchemaReviewRequired = !(reviewRequired.Equals("否", StringComparison.OrdinalIgnoreCase) ||
+                                           reviewRequired.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+                                           reviewRequired.Equals("0", StringComparison.OrdinalIgnoreCase));
+        }
     }
 
     private static async Task<LifecycleContractRequest> BuildSeedRequestAsync(Workspace workspace, ParsedArgs args)
@@ -970,6 +1116,17 @@ public static class Program
             request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate = request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate || args.HasFlag("confirm-project-config");
         }
 
+        if (SyncCacheOperationRequested(request.Operation))
+        {
+            request.SyncCache ??= new SyncCacheContract();
+            if (args.HasFlag("allow-user-fallback"))
+            {
+                throw new CliException("sync-cache 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+            }
+
+            await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
+        }
+
         ILifecyclePlatform platform = request.DryRun && !SeedOperationRequested(request.Operation)
             ? new PreviewLifecyclePlatform()
             : new CliLifecyclePlatform(args, request);
@@ -1038,7 +1195,8 @@ public static class Program
         {
             Locale = locale,
             CleanupDefaultRows = args.HasFlag("cleanup-default-rows"),
-            CleanupDefaultFields = args.HasFlag("cleanup-default-fields")
+            CleanupDefaultFields = args.HasFlag("cleanup-default-fields"),
+            CleanupDuplicateBranchBindings = args.HasFlag("cleanup-duplicate-branch-bindings") || args.HasFlag("cleanup-duplicates")
         });
         var result = new LifecycleContractResult
         {
@@ -1059,6 +1217,11 @@ public static class Program
         }
         else
         {
+            if (plan.Actions.Any(IsDestructiveRegistryMigrationAction) && !args.HasFlag("yes"))
+            {
+                throw new CliException("registry-migrate apply 包含删除空白默认行/默认字段/重复 BranchBindings 等危险动作，必须显式传 --yes。建议先运行 --dry-run 审计 record_id 后再确认。", 2);
+            }
+
             var gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
             await ApplyRegistryMigrationToLarkAsync(gateway, baseToken, plan, args, result);
         }
@@ -1074,6 +1237,13 @@ public static class Program
         }
 
         return 0;
+    }
+
+    private static bool IsDestructiveRegistryMigrationAction(LifecycleActionResult action)
+    {
+        return string.Equals(action.Action, "registry.record.delete_empty", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(action.Action, "registry.field.delete_default", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(action.Action, "registry.record.delete_duplicate_branch_binding", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<RegistrySnapshot> LoadRegistrySnapshotFromLarkAsync(LarkCliGateway gateway, string baseToken, string locale, ParsedArgs args)
@@ -1112,20 +1282,8 @@ public static class Program
                 table.Fields.Add(field);
             }
 
-            var recordResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200" });
-            foreach (var recordElement in FindJsonObjects(CombinedJsonOutput(recordResult), "record_id"))
-            {
-                var record = new RegistryRecordSnapshot { RecordId = GetJsonString(recordElement, "record_id", "recordId") };
-                if (recordElement.TryGetProperty("fields", out var fields) && fields.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var field in fields.EnumerateObject())
-                    {
-                        record.Values[field.Name] = field.Value.ValueKind == JsonValueKind.String ? field.Value.GetString() ?? "" : field.Value.ToString();
-                    }
-                }
-
-                table.Records.Add(record);
-            }
+            var recordResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200", "--format", "json" });
+            table.Records.AddRange(ParseLarkBaseRecordListJson(CombinedJsonOutput(recordResult)));
         }
 
         return snapshot;
@@ -1154,6 +1312,7 @@ public static class Program
                         action.Status = "done";
                         break;
                     case "registry.record.delete_empty":
+                    case "registry.record.delete_duplicate_branch_binding":
                         await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+record-delete", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--record-id", GetDetail(action, "recordId"), "--yes" });
                         action.Status = "done";
                         break;
@@ -1388,6 +1547,275 @@ public static class Program
         return string.IsNullOrWhiteSpace(result.Stdout) ? result.Stderr : result.Stdout;
     }
 
+    public static IReadOnlyList<RegistryRecordSnapshot> ParseLarkBaseRecordListJson(string json)
+    {
+        var records = new List<RegistryRecordSnapshot>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in JsonCandidates(json))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(candidate);
+                CollectMatrixRegistryRecords(document.RootElement, records, seen);
+                CollectObjectRegistryRecords(document.RootElement, records, seen);
+                if (records.Count > 0)
+                {
+                    return records;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return records;
+    }
+
+    public static IReadOnlyList<RegistryRecordSnapshot> FindMatchingRegistryRecords(IEnumerable<RegistryRecordSnapshot> records, IDictionary<string, string> keys, string locale)
+    {
+        return FindMatchingRegistryRecords(records, keys, locale, new RegistryContract());
+    }
+
+    private static IReadOnlyList<RegistryRecordSnapshot> FindMatchingRegistryRecords(IEnumerable<RegistryRecordSnapshot> records, IDictionary<string, string> keys, string locale, RegistryContract registry)
+    {
+        if (records == null || keys == null || keys.Count == 0 || keys.Values.Any(string.IsNullOrWhiteSpace))
+        {
+            return Array.Empty<RegistryRecordSnapshot>();
+        }
+
+        return records
+            .Where(record => keys.All(key =>
+            {
+                var value = GetRegistryRecordValue(record, key.Key, locale, registry);
+                return string.Equals(value, key.Value, StringComparison.OrdinalIgnoreCase);
+            }))
+            .ToList();
+    }
+
+    private static void CollectMatrixRegistryRecords(JsonElement element, ICollection<RegistryRecordSnapshot> records, ISet<string> seen)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (TryGetJsonProperty(element, "fields", out var fieldsElement) && fieldsElement.ValueKind == JsonValueKind.Array &&
+                TryGetJsonProperty(element, "data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Array &&
+                TryGetJsonProperty(element, "record_id_list", out var recordIdsElement) && recordIdsElement.ValueKind == JsonValueKind.Array)
+            {
+                var fieldNames = fieldsElement.EnumerateArray()
+                    .Select(RegistryMatrixFieldName)
+                    .ToList();
+                var recordIds = recordIdsElement.EnumerateArray()
+                    .Select(JsonElementToText)
+                    .ToList();
+                var rows = dataElement.EnumerateArray().ToList();
+                for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+                {
+                    var recordId = rowIndex < recordIds.Count ? recordIds[rowIndex] : "";
+                    var record = new RegistryRecordSnapshot { RecordId = recordId };
+                    if (rows[rowIndex].ValueKind == JsonValueKind.Array)
+                    {
+                        var cells = rows[rowIndex].EnumerateArray().ToList();
+                        for (var column = 0; column < cells.Count && column < fieldNames.Count; column++)
+                        {
+                            if (!string.IsNullOrWhiteSpace(fieldNames[column]))
+                            {
+                                record.Values[fieldNames[column]] = JsonElementToText(cells[column]);
+                            }
+                        }
+                    }
+                    else if (rows[rowIndex].ValueKind == JsonValueKind.Object)
+                    {
+                        foreach (var property in rows[rowIndex].EnumerateObject())
+                        {
+                            record.Values[property.Name] = JsonElementToText(property.Value);
+                        }
+                    }
+
+                    AddRegistryRecord(records, seen, record);
+                }
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                CollectMatrixRegistryRecords(property.Value, records, seen);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                CollectMatrixRegistryRecords(child, records, seen);
+            }
+        }
+    }
+
+    private static void CollectObjectRegistryRecords(JsonElement element, ICollection<RegistryRecordSnapshot> records, ISet<string> seen)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var recordId = GetJsonString(element, "record_id", "recordId");
+            if (!string.IsNullOrWhiteSpace(recordId) && TryGetJsonProperty(element, "fields", out var fields) && fields.ValueKind == JsonValueKind.Object)
+            {
+                var record = new RegistryRecordSnapshot { RecordId = recordId };
+                foreach (var field in fields.EnumerateObject())
+                {
+                    record.Values[field.Name] = JsonElementToText(field.Value);
+                }
+
+                AddRegistryRecord(records, seen, record);
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                CollectObjectRegistryRecords(property.Value, records, seen);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                CollectObjectRegistryRecords(child, records, seen);
+            }
+        }
+    }
+
+    private static void AddRegistryRecord(ICollection<RegistryRecordSnapshot> records, ISet<string> seen, RegistryRecordSnapshot record)
+    {
+        var key = FirstNonEmpty(record.RecordId, string.Join("\n", record.Values.Select(v => v.Key + "=" + v.Value)));
+        if (!string.IsNullOrWhiteSpace(key) && !seen.Add(key))
+        {
+            return;
+        }
+
+        records.Add(record);
+    }
+
+    private static string RegistryMatrixFieldName(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            return element.GetString() ?? "";
+        }
+
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            return FirstNonEmpty(GetJsonString(element, "field_name", "name", "fieldName", "title", "key"), GetJsonString(element, "field_id", "fieldId", "id"));
+        }
+
+        return JsonElementToText(element);
+    }
+
+    private static RegistryTableSnapshot? FindRegistryTable(RegistrySnapshot snapshot, string machineKey, string locale)
+    {
+        if (snapshot == null)
+        {
+            return null;
+        }
+
+        var mapping = RegistryLocalization.Default(locale).Tables;
+        var display = mapping.TryGetValue(machineKey, out var mapped) ? mapped : machineKey;
+        return snapshot.Tables.FirstOrDefault(t =>
+            string.Equals(t.MachineKey, machineKey, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(t.DisplayName, machineKey, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(t.DisplayName, display, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string GetRegistryRecordValue(RegistryRecordSnapshot record, string fieldName, string locale, RegistryContract? registry)
+    {
+        if (record == null || string.IsNullOrWhiteSpace(fieldName))
+        {
+            return "";
+        }
+
+        var fallback = "";
+        foreach (var alias in RegistryFieldAliases(fieldName, locale, registry))
+        {
+            foreach (var value in record.Values)
+            {
+                if (string.Equals(value.Key, alias, StringComparison.OrdinalIgnoreCase))
+                {
+                    fallback = value.Value ?? "";
+                    if (!string.IsNullOrWhiteSpace(fallback))
+                    {
+                        return fallback;
+                    }
+                }
+            }
+        }
+
+        return fallback;
+    }
+
+    private static IEnumerable<string> RegistryFieldAliases(string fieldName, string locale, RegistryContract? registry)
+    {
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Add(string value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                aliases.Add(value);
+            }
+        }
+
+        Add(fieldName);
+        foreach (var pair in RegistryLocalization.Default(locale).Fields)
+        {
+            if (string.Equals(fieldName, pair.Key, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(fieldName, pair.Value, StringComparison.OrdinalIgnoreCase))
+            {
+                Add(pair.Key);
+                Add(pair.Value);
+            }
+        }
+
+        if (registry != null)
+        {
+            foreach (var tableFields in registry.FieldDisplayNames.Values)
+            {
+                foreach (var pair in tableFields)
+                {
+                    if (string.Equals(fieldName, pair.Key, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(fieldName, pair.Value, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Add(pair.Key);
+                        Add(pair.Value);
+                    }
+                }
+            }
+        }
+
+        return aliases;
+    }
+
+    private static bool TryGetJsonProperty(JsonElement element, string name, out JsonElement value)
+    {
+        value = default;
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (element.TryGetProperty(name, out value))
+        {
+            return true;
+        }
+
+        foreach (var pair in element.EnumerateObject())
+        {
+            if (string.Equals(pair.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = pair.Value;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string JsonElementToText(JsonElement element)
+    {
+        return element.ValueKind == JsonValueKind.String ? element.GetString() ?? "" : element.ToString();
+    }
+
     private static string GetJsonString(JsonElement element, params string[] names)
     {
         if (element.ValueKind != JsonValueKind.Object)
@@ -1418,6 +1846,12 @@ public static class Program
     {
         return string.Equals(operation, "seed-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool SyncCacheOperationRequested(string operation)
+    {
+        return string.Equals(operation, "sync-cache", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(operation, "sync-from-online-sheet", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool GetJsonBool(JsonElement element, bool fallback, params string[] names)
@@ -1626,6 +2060,7 @@ public static class Program
 
             var binding = new BranchBindingContract
             {
+                RecordId = GetJsonString(item, "recordId", "record_id"),
                 GitBranch = GetJsonString(item, "gitBranch", "branch"),
                 FeishuBranch = GetJsonString(item, "feishuBranch", "larkBranch"),
                 Profile = GetJsonString(item, "profile", "feishuProfile", "larkProfile"),
@@ -1803,7 +2238,7 @@ public static class Program
         Console.WriteLine("  config-sheet-forge merge --base <file> --ours <file> --theirs <file> [--out <report.md>]");
         Console.WriteLine("  config-sheet-forge gate [--cache <dir>] [--details] [--annotations github]");
         Console.WriteLine("  config-sheet-forge apply-contract --request <contract.json> [--out <result.json>] [--dry-run]");
-        Console.WriteLine("  config-sheet-forge registry-migrate --base <token> [--locale zh-Hans] [--cleanup-default-rows] [--cleanup-default-fields]");
+        Console.WriteLine("  config-sheet-forge registry-migrate --base <token> [--locale zh-Hans] [--dry-run] [--cleanup-default-rows] [--cleanup-default-fields] [--cleanup-duplicate-branch-bindings] [--yes]");
     }
 
     private static int UnknownCommand(string command)
@@ -2150,7 +2585,11 @@ public static class Program
                     [mapping.Fields["TableId"]] = table.TableId,
                     [mapping.Fields["Branch"]] = branchKey
                 }),
-                await FindRegistryRecordIdAsync(registry.BaseToken, tableId, mapping.Fields["TableId"], table.TableId));
+                await FindRegistryRecordIdAsync(registry.BaseToken, tableId, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    [mapping.Fields["TableId"]] = table.TableId,
+                    [mapping.Fields["Profile"]] = branchKey
+                }));
             var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body, CompactJsonOptions) };
             if (!string.IsNullOrWhiteSpace(recordId))
             {
@@ -2182,6 +2621,14 @@ public static class Program
                 [mapping.Fields["TableId"]] = table.TableId,
                 [mapping.Fields["Branch"]] = FirstNonEmpty(git.FeishuBranch, git.Profile, git.Branch)
             });
+            if (string.IsNullOrWhiteSpace(recordId))
+            {
+                recordId = await FindRegistryRecordIdAsync(registry.BaseToken, tableId, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    [mapping.Fields["TableId"]] = table.TableId,
+                    [mapping.Fields["Profile"]] = FirstNonEmpty(git.Profile, git.FeishuBranch, git.Branch)
+                });
+            }
             var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body, CompactJsonOptions) };
             if (!string.IsNullOrWhiteSpace(recordId))
             {
@@ -2345,6 +2792,14 @@ public static class Program
                 [mapping.Fields["Profile"]] = FirstNonEmpty(resolution.Profile, resolution.FeishuBranch)
             };
             var recordId = await FindRegistryRecordIdAsync(registry.BaseToken, tableId, keys);
+            if (string.IsNullOrWhiteSpace(recordId))
+            {
+                recordId = await FindRegistryRecordIdAsync(registry.BaseToken, tableId, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    [mapping.Fields["GitBranch"]] = resolution.GitBranch,
+                    [mapping.Fields["FeishuBranch"]] = FirstNonEmpty(resolution.FeishuBranch, resolution.Profile)
+                });
+            }
             var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", tableId, "--json", JsonSerializer.Serialize(body, CompactJsonOptions) };
             if (!string.IsNullOrWhiteSpace(recordId))
             {
@@ -3293,25 +3748,10 @@ public static class Program
                 return "";
             }
 
-            var list = await RunLarkCliStrictAsync(_gateway, _args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200" });
-            foreach (var record in FindJsonObjects(CombinedJsonOutput(list), "record_id"))
+            return await FindRegistryRecordIdAsync(baseToken, tableId, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                if (!record.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object)
-                {
-                    continue;
-                }
-
-                foreach (var field in fields.EnumerateObject())
-                {
-                    if (string.Equals(field.Name, keyFieldName, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(JsonElementToText(field.Value), keyValue, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return GetJsonString(record, "record_id", "recordId");
-                    }
-                }
-            }
-
-            return "";
+                [keyFieldName] = keyValue
+            });
         }
 
         private async Task<string> FindRegistryRecordIdAsync(string baseToken, string tableId, IDictionary<string, string> keys)
@@ -3321,35 +3761,41 @@ public static class Program
                 return "";
             }
 
-            var list = await RunLarkCliStrictAsync(_gateway, _args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200" });
-            foreach (var record in FindJsonObjects(CombinedJsonOutput(list), "record_id"))
+            var list = await RunLarkCliStrictAsync(_gateway, _args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", tableId, "--offset", "0", "--limit", "200", "--format", "json" });
+            var records = ParseLarkBaseRecordListJson(CombinedJsonOutput(list));
+            var matches = FindMatchingRegistryRecords(records, keys, _request.Locale, _request.Registry);
+            if (matches.Count > 1)
             {
-                if (!record.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object)
-                {
-                    continue;
-                }
-
-                var matched = 0;
-                foreach (var key in keys)
-                {
-                    foreach (var field in fields.EnumerateObject())
-                    {
-                        if (string.Equals(field.Name, key.Key, StringComparison.OrdinalIgnoreCase) &&
-                            string.Equals(JsonElementToText(field.Value), key.Value, StringComparison.OrdinalIgnoreCase))
-                        {
-                            matched++;
-                            break;
-                        }
-                    }
-                }
-
-                if (matched == keys.Count)
-                {
-                    return GetJsonString(record, "record_id", "recordId");
-                }
+                throw BuildDuplicateRegistryRecordException(tableId, keys, matches);
             }
 
-            return "";
+            return matches.Count == 1 ? matches[0].RecordId : "";
+        }
+
+        private static CliException BuildDuplicateRegistryRecordException(string tableId, IDictionary<string, string> keys, IReadOnlyList<RegistryRecordSnapshot> matches)
+        {
+            var recordIds = string.Join(", ", matches.Select(m => FirstNonEmpty(m.RecordId, "(无 record_id)")));
+            var keyText = string.Join(" + ", keys.Select(k => k.Key + " “" + k.Value + "”"));
+            var tableLabel = RegistryLookupLabel(keys);
+            return new CliException(tableLabel + " 按 " + keyText + " 查到 " + matches.Count.ToString(CultureInfo.InvariantCulture) + " 条重复记录（record_id: " + recordIds + "）。请先运行 registry-migrate --dry-run 查看 cleanup/migrate 计划，确认后清理重复行；config-sheet-forge 不会静默任选一条。table_id=" + Mask(tableId), 2);
+        }
+
+        private static string RegistryLookupLabel(IDictionary<string, string> keys)
+        {
+            var names = keys.Keys.ToList();
+            if (names.Any(n => n.Contains("GitBranch", StringComparison.OrdinalIgnoreCase) || n.Contains("Git分支", StringComparison.OrdinalIgnoreCase)) &&
+                names.Any(n => n.Contains("Profile", StringComparison.OrdinalIgnoreCase) || n.Contains("配置Profile", StringComparison.OrdinalIgnoreCase)))
+            {
+                return "BranchBindings";
+            }
+
+            if (names.Any(n => n.Contains("TableId", StringComparison.OrdinalIgnoreCase) || n.Contains("配表ID", StringComparison.OrdinalIgnoreCase)) &&
+                names.Any(n => n.Contains("Branch", StringComparison.OrdinalIgnoreCase) || n.Contains("分支", StringComparison.OrdinalIgnoreCase) || n.Contains("Profile", StringComparison.OrdinalIgnoreCase)))
+            {
+                return "ConfigSheets/SchemaReviews";
+            }
+
+            return "注册中心";
         }
 
         private static void ApplyWikiNodeJson(BranchWorkspaceResolution resolution, string json)
