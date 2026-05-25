@@ -175,6 +175,19 @@ namespace ConfigSheetForge.Core
 
             var bindings = request.BranchBindings ?? new List<BranchBindingContract>();
             var effectiveProfile = FirstNonEmpty(resolution.Profile, resolution.FeishuBranch);
+            var duplicateBindings = bindings
+                .Where(b => !string.IsNullOrWhiteSpace(b.GitBranch) && !string.IsNullOrWhiteSpace(FirstNonEmpty(b.Profile, b.FeishuBranch)))
+                .GroupBy(b => b.GitBranch + "\n" + FirstNonEmpty(b.Profile, b.FeishuBranch), StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .ToList();
+            foreach (var duplicate in duplicateBindings)
+            {
+                var first = duplicate.First();
+                var profile = FirstNonEmpty(first.Profile, first.FeishuBranch);
+                var recordIds = duplicate.Select(b => FirstNonEmpty(b.RecordId, "(无 record_id)")).ToList();
+                result.AddFailure("BranchBindings 中 GitBranch “" + first.GitBranch + "” + Profile “" + profile + "” 存在 " + duplicate.Count().ToString(CultureInfo.InvariantCulture) + " 条重复记录（record_id: " + string.Join(", ", recordIds) + "）。请先运行 registry-migrate --dry-run 查看 cleanup/migrate 计划，确认后清理重复行。");
+            }
+
             var branchProfiles = bindings
                 .Where(b => string.Equals(b.GitBranch, resolution.GitBranch, StringComparison.OrdinalIgnoreCase))
                 .Select(b => FirstNonEmpty(b.Profile, b.FeishuBranch))
