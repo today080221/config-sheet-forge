@@ -89,7 +89,7 @@ config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.Conf
 通过 Unity Package Manager 安装：
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.4
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.5
 ```
 
 打开 `Tools > Config Sheet Forge`。Unity 窗口会使用同一份共享 core 做本地检查，provider 访问仍交给已安装的 CLI。

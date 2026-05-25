@@ -23,6 +23,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("registry migration cleans default rows and fields", () => RunSync(RegistryMigrationCleansDefaults)),
     ("lark base matrix record lookup finds existing record", () => RunSync(LarkBaseMatrixRecordLookupFindsExistingRecord)),
     ("lark 1.0.40 registry fixture hydrates and reports duplicate bindings", Lark140RegistryFixtureHydratesAndReportsDuplicateBindings),
+    ("registry migrate keeps table and field list argv compatible", RegistryMigrateKeepsTableAndFieldListArgvCompatible),
     ("registry migration reports branch binding cleanup risks", () => RunSync(RegistryMigrationReportsBranchBindingCleanupRisks)),
     ("branch workspace resolver creates stable slugs", () => RunSync(BranchWorkspaceResolverCreatesStableSlugs)),
     ("branch binding one-to-one conflict blocks lifecycle", BranchBindingOneToOneConflictBlocksLifecycle),
@@ -409,6 +410,86 @@ static async Task Lark140RegistryFixtureHydratesAndReportsDuplicateBindings()
     var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
     AssertTrue(!result.Success, "sync-cache dry-run should block duplicate BranchBindings.");
     AssertTrue(result.HumanReadableFailures.Any(f => f.Contains("重复记录") && f.Contains("rec_dup_a") && f.Contains("rec_dup_b")), "sync-cache duplicate blocker should list record ids.");
+}
+
+static async Task RegistryMigrateKeepsTableAndFieldListArgvCompatible()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-registry-argv-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    var oldDir = Directory.GetCurrentDirectory();
+    var script = Path.Combine(temp, "lark-cli.cmd");
+    var log = Path.Combine(temp, "calls.log");
+    var output = Path.Combine(temp, "registry-migrate.json");
+    await File.WriteAllTextAsync(script,
+        "@echo off\r\n" +
+        "echo %*>>\"" + log + "\"\r\n" +
+        "echo %* | find \"doctor\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +table-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo %* | find \"--format\" >nul\r\n" +
+        "  if not errorlevel 1 (\r\n" +
+        "    echo Error: unknown flag: --format 1>&2\r\n" +
+        "    exit /b 2\r\n" +
+        "  )\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"tables\":[{\"id\":\"tbl_branch\",\"name\":\"BranchBindings\"}],\"total\":1}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +field-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo %* | find \"--format\" >nul\r\n" +
+        "  if not errorlevel 1 (\r\n" +
+        "    echo Error: unknown flag: --format 1>&2\r\n" +
+        "    exit /b 2\r\n" +
+        "  )\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"fields\":[{\"id\":\"fld_git\",\"name\":\"GitBranch\",\"type\":\"text\"},{\"id\":\"fld_profile\",\"name\":\"Profile\",\"type\":\"text\"}]}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +record-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"fields\":[\"GitBranch\",\"Profile\"],\"data\":[[\"feature/config\",\"feature-config\"],[\"feature/config\",\"feature-config\"]],\"record_id_list\":[\"rec_dup_a\",\"rec_dup_b\"]}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo unexpected command %* 1>&2\r\n" +
+        "exit /b 2\r\n");
+
+    try
+    {
+        Directory.SetCurrentDirectory(temp);
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[]
+        {
+            "registry-migrate",
+            "--base", "base_mock",
+            "--locale", "zh-Hans",
+            "--dry-run",
+            "--cleanup-duplicate-branch-bindings",
+            "--lark-cli", script,
+            "--out", output
+        });
+        AssertEqual("0", exitCode.ToString(), "registry-migrate should not pass --format to table-list or field-list.");
+        var calls = File.ReadAllLines(log);
+        AssertTrue(calls.Any(line => line.Contains("base +table-list") && !line.Contains("--format")), "table-list argv should avoid unsupported --format.");
+        AssertTrue(calls.Any(line => line.Contains("base +field-list") && !line.Contains("--format")), "field-list argv should avoid unsupported --format.");
+        AssertTrue(calls.Any(line => line.Contains("base +record-list") && line.Contains("--format json")), "record-list should still request JSON output explicitly.");
+        var resultJson = await File.ReadAllTextAsync(output);
+        AssertTrue(resultJson.Contains("rec_dup_a") && resultJson.Contains("rec_dup_b"), "dry-run should still list duplicate BranchBindings record ids.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(oldDir);
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
 }
 
 static void RegistryMigrationReportsBranchBindingCleanupRisks()

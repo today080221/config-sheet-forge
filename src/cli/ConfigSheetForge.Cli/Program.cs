@@ -1249,12 +1249,12 @@ public static class Program
     private static async Task<RegistrySnapshot> LoadRegistrySnapshotFromLarkAsync(LarkCliGateway gateway, string baseToken, string locale, ParsedArgs args)
     {
         var snapshot = new RegistrySnapshot();
-        var tableResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+table-list", "--base-token", baseToken, "--offset", "0", "--limit", "100", "--format", "json" });
+        var tableResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+table-list", "--base-token", baseToken, "--offset", "0", "--limit", "100" });
         foreach (var table in ParseLarkBaseTableListJson(CombinedJsonOutput(tableResult), locale))
         {
             snapshot.Tables.Add(table);
 
-            var fieldResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-list", "--base-token", baseToken, "--table-id", table.TableId, "--offset", "0", "--limit", "200", "--format", "json" });
+            var fieldResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-list", "--base-token", baseToken, "--table-id", table.TableId, "--offset", "0", "--limit", "200" });
             table.Fields.AddRange(ParseLarkBaseFieldListJson(CombinedJsonOutput(fieldResult), locale));
 
             var recordResult = await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+record-list", "--base-token", baseToken, "--table-id", table.TableId, "--offset", "0", "--limit", "200", "--format", "json" });
