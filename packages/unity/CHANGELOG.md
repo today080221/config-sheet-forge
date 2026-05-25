@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- 新增 `seed-from-xlsx` CLI，以及 `seed-from-local-xlsx` / `bootstrap-from-local-xlsx` lifecycle operation。
+- 支持旧本地 ExcelToSO xlsx dry-run 预检、semantic normalize、在线 Sheet 创建/复用、三方一致性校验和 hash-gated cache 回填。
+- seed apply 支持回填 ProjectSettings、Base ConfigSheets、SchemaReviews 和 ExcelToSO settings；默认 strict bot，禁止静默 fallback 到 user。
+- 扩展 xlsx portable subset 检查：读取失败、公式、图片、合并单元格、富文本、跨表/跨工作簿引用、日期对象和不稳定结构给出中文可读阻断。
+- Unity 窗口新增本地 Excel Seed 入口和稳定 `OpenSeedFromLocalXlsx()` Editor API。
+
 ## 0.3.0
 
 - 新增 lifecycle contract、PR gate report、strict bot、三方一致性和 hash-gated cache 能力。
