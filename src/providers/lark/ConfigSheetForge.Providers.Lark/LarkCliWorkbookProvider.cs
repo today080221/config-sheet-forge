@@ -103,7 +103,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
                 ProviderId = Id,
                 Title = "Search failed",
                 ObjectType = "diagnostic",
-                Reason = "lark-cli docs search failed. Check auth scopes for docs/wiki/sheets."
+                Reason = StrictBotFailureMessage(context, result, "lark-cli docs search failed. Check auth scopes for docs/wiki/sheets.")
             });
             candidates[^1].Details["stderr"] = Trim(result.Stderr);
             return candidates;
@@ -147,14 +147,14 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         }
         else
         {
-            result.Findings.Add(Finding(FindingSeverity.Warning, "lark.export_xlsx_failed", "Could not export an xlsx cache. The provider will still try to read semantic values."));
+            result.Findings.Add(Finding(FindingSeverity.Warning, "lark.export_xlsx_failed", StrictBotFailureMessage(context, exported, "Could not export an xlsx cache. The provider will still try to read semantic values.")));
             result.Findings[^1].Details["stderr"] = Trim(exported.Stderr);
         }
 
         var read = await TryReadValuesAsync(gateway, context, source, request, cancellationToken).ConfigureAwait(false);
         if (!read.Success)
         {
-            result.Findings.Add(Finding(FindingSeverity.Error, "lark.read_failed", "Could not read sheet values for semantic hashing. Check sheet id, range, and scopes."));
+            result.Findings.Add(Finding(FindingSeverity.Error, "lark.read_failed", StrictBotFailureMessage(context, read, "Could not read sheet values for semantic hashing. Check sheet id, range, and scopes.")));
             result.Findings[^1].Details["stderr"] = Trim(read.Stderr);
             if (File.Exists(xlsxPath))
             {
@@ -500,7 +500,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         }
 
         var first = await gateway.RunAsync(WithIdentity(args, requested), context.WorkspaceRoot, cancellationToken).ConfigureAwait(false);
-        if (first.Success || requested != "bot")
+        if (first.Success || requested != "bot" || !IsUserFallbackAllowed(context))
         {
             return first;
         }
@@ -589,6 +589,35 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
                text.Contains("forbidden") ||
                text.Contains("unauthorized") ||
                text.Contains("auth");
+    }
+
+    private static string StrictBotFailureMessage(ProviderContext context, LarkCliResult result, string fallback)
+    {
+        if (GetIdentity(context) == "bot" && !IsUserFallbackAllowed(context) && LooksLikePermissionFailure(result))
+        {
+            return fallback + " 当前是 bot 严格模式，不会静默切换到 user。请给应用/bot 补充缺失 scope 或资源权限；只有显式传入 --allow-user-fallback 时才会尝试 user fallback。";
+        }
+
+        return fallback;
+    }
+
+    private static bool IsUserFallbackAllowed(ProviderContext context)
+    {
+        if (context.Settings.TryGetValue("larkAllowUserFallback", out var value))
+        {
+            return value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                   value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+                   value.Equals("yes", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (context.Settings.TryGetValue("allowUserFallback", out value))
+        {
+            return value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                   value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+                   value.Equals("yes", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return false;
     }
 
     private static string ToCliOutputPath(string workspaceRoot, string outputPath)

@@ -152,8 +152,7 @@ namespace ConfigSheetForge.Core
             var valueKind = column.ValueKind ?? "";
             if (!PortableKinds.Contains(valueKind))
             {
-                var severity = valueKind.Equals("formula", StringComparison.OrdinalIgnoreCase) ? FindingSeverity.Warning : FindingSeverity.Error;
-                report.Add(severity, "column.kind_not_portable", "This column type is not part of the portable subset. Convert it to text, number, bool, date, enum, or json.", location);
+                report.Add(FindingSeverity.Error, "column.kind_not_portable", "This column type is not part of the portable subset. Convert it to text, number, bool, date, enum, or json.", location);
             }
         }
     }

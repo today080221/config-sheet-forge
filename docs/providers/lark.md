@@ -25,9 +25,11 @@ provider 使用进程参数数组调用命令，不拼接 shell 字符串。
 
 ## 身份策略
 
-默认 `larkCliIdentity = bot`。provider 会先用 `--as bot`，失败后 fallback 到 `--as user`。如果项目明确只想使用当前用户身份，可配置为 `user`。
+默认 `larkCliIdentity = bot`，且是严格模式：provider 会用 `--as bot`，但 bot 失败时不会静默 fallback 到 user。需要临时允许 user fallback 时，显式传 `--allow-user-fallback`，或在本地 config 中设置 `providerSettings.larkAllowUserFallback = true`。
 
 bot 身份适合已通过群组或知识库授权 bridge 授权给应用的资源；用户身份适合用户自己的云文档、电子表格和知识库。
+
+strict bot 模式下，权限错误会提示补应用/bot 的 scope 或资源授权，避免 CI 和本地手动同步读到不同身份的数据。
 
 ## JSON 解析
 

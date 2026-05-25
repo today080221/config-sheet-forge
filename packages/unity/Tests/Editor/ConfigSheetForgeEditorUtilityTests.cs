@@ -47,6 +47,44 @@ namespace ConfigSheetForge.Unity.Editor.Tests
         }
 
         [Test]
+        public void FindsProjectSettingsConfigSheetForgeConfig()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "csforge-unity-config-" + System.Guid.NewGuid().ToString("N"));
+            try
+            {
+                var projectSettings = Path.Combine(root, "ProjectSettings");
+                Directory.CreateDirectory(projectSettings);
+                var config = Path.Combine(projectSettings, "Project.ConfigSheetForge.json");
+                File.WriteAllText(config, "{}");
+
+                Assert.That(ConfigSheetForgeEditorUtility.FindProjectConfigPath(root), Is.EqualTo(config));
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                {
+                    Directory.Delete(root, true);
+                }
+            }
+        }
+
+        [Test]
+        public void ExcelToSoUpdaterCanAppendJsonSettingsWithoutReordering()
+        {
+            var json = "{\n  \"configs\": [\n    { \"tableId\": \"SkillsData\", \"excelPath\": \"Excel/SkillsData.xlsx\" }\n  ]\n}\n";
+            var updated = UnityExcelToSoSettingsUpdater.UpsertText(json, new UnityExcelToSoEntry
+            {
+                TableId = "MonsterData",
+                ExcelPath = "Excel/MonsterData.xlsx",
+                ScriptableObjectType = "MonsterConfig"
+            });
+
+            Assert.That(updated, Does.Contain("\"tableId\": \"SkillsData\""));
+            Assert.That(updated, Does.Contain("\"tableId\": \"MonsterData\""));
+            Assert.That(updated.IndexOf("SkillsData", System.StringComparison.Ordinal), Is.LessThan(updated.IndexOf("MonsterData", System.StringComparison.Ordinal)));
+        }
+
+        [Test]
         public void LaunchFailureMessageIsHumanReadable()
         {
             var message = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure("config-sheet-forge doctor", "file not found");

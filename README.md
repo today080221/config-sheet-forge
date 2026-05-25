@@ -28,13 +28,32 @@ dotnet run --project src/cli/ConfigSheetForge.Cli -- gate --annotations github
 
 本地状态写入 `.config-sheet-forge/`，该目录已被 git 忽略。
 
+`sync` 会先导出到临时目录，完成 portable subset 检查和在线读取 / xlsx 导出 / 语义归一化三方一致性比较后，才更新正式 cache。semantic hash 没变时不会重写 `.xlsx`、`.semantic.json` 或 `.sha256`。
+
+## Contract lifecycle
+
+项目 adapter 可以用 JSON contract 调通用生命周期入口：
+
+```bash
+dotnet run --project src/cli/ConfigSheetForge.Cli -- apply-contract --request contract.json --out result.json
+dotnet run --project src/cli/ConfigSheetForge.Cli -- registry-migrate --base "<base-token>" --locale zh-Hans --cleanup-default-rows --cleanup-default-fields --dry-run
+```
+
+core 支持 `bootstrap-registry`、`new-table`、`sync-cache`、`compare-merge`、`pr-gate-report` 这些 operation。Base 和字段会保留 machine key 到中文显示名的映射，程序逻辑不依赖中文字段名。
+
 ## Unity UPM 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.2.0
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.3.0
 ```
 
-安装后打开 `Tools > Config Sheet Forge`。
+安装后打开 `Tools > Config Sheet Forge` 或 `Tools > Config Sheet Forge > 打开同步窗口`。下游 Unity 项目推荐只保留薄菜单 adapter 和 `ProjectSettings/*ConfigSheetForge*.json` 项目配置，通用窗口、向导、contract 执行、三方比较和 gate UI 都由本包维护。
+
+Unity 项目 adapter 模式会通过 `Temp/ConfigSheetForge/unity-lifecycle/<operation>.inputs.json` 传窗口输入，并生成标准 `Temp/ConfigSheetForge/pr-gate-report.json` 给项目 gate wrapper / CI 使用。
+
+`*.inputs.json` 使用 UTF-8 无 BOM。Unity 会向项目 adapter 传 `--inputs <path>`；adapter 读取 inputs 后输出 lifecycle contract，再由 `apply-contract` 生成 `LifecycleContractResult`。`pr-gate-report` 的 `--report` 路径写入纯 `PrGateReport` JSON。
+
+Unity UPM 重新 resolve `packages-lock.json` 时，可能顺带刷新其它 git dependency 的 hash；接入 PR 里应单独核对 manifest/lock diff。
 
 ## 类型行约定
 

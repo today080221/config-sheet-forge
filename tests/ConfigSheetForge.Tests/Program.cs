@@ -16,6 +16,19 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("lark read parser accepts record arrays", () => RunSync(LarkReadParserAcceptsRecordArrays)),
     ("lark read parser matches object keys case-insensitively", () => RunSync(LarkReadParserMatchesObjectKeysCaseInsensitively)),
     ("datetime normalization does not assume local timezone", () => RunSync(DateTimeNormalizationDoesNotAssumeLocalTimezone)),
+    ("registry localization keeps machine keys", () => RunSync(RegistryLocalizationKeepsMachineKeys)),
+    ("registry migration cleans default rows and fields", () => RunSync(RegistryMigrationCleansDefaults)),
+    ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
+    ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
+    ("excel to so updater appends json settings", () => RunSync(ExcelToSoUpdaterAppendsJsonSettings)),
+    ("project config probe reads lifecycle summary", () => RunSync(ProjectConfigProbeReadsLifecycleSummary)),
+    ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
+    ("portable subset blocks unsupported structures", () => RunSync(PortableSubsetBlocksUnsupportedStructures)),
+    ("triangulation passes and fails with readable diffs", () => RunSync(TriangulationPassesAndFailsWithReadableDiffs)),
+    ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
+    ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
+    ("gate report evaluator reports human failures", () => RunSync(GateReportEvaluatorReportsHumanFailures)),
+    ("powershell json safety flags inline json params", () => RunSync(PowerShellJsonSafetyFlagsInlineJsonParams)),
     ("gate can print github annotations", GateCanPrintGitHubAnnotations)
 };
 
@@ -202,6 +215,382 @@ static void DateTimeNormalizationDoesNotAssumeLocalTimezone()
     AssertEqual("2026-05-24T02:00:00.000Z", withOffset.NormalizedText, "Offset datetimes should normalize to UTC.");
 }
 
+static void RegistryLocalizationKeepsMachineKeys()
+{
+    var mapping = RegistryLocalization.Default("zh-Hans");
+    AssertEqual("配表清单", mapping.Tables["ConfigSheets"], "ConfigSheets should have a Chinese display name.");
+    AssertEqual("配表ID", mapping.Fields["TableId"], "TableId should have a Chinese display name.");
+    AssertTrue(mapping.Tables.ContainsKey("ConfigSheets"), "Machine key must remain in the mapping.");
+}
+
+static void RegistryMigrationCleansDefaults()
+{
+    var snapshot = new RegistrySnapshot();
+    snapshot.Tables.Add(new RegistryTableSnapshot
+    {
+        MachineKey = "ConfigSheets",
+        TableId = "tbl_config",
+        DisplayName = "ConfigSheets",
+        Fields =
+        {
+            new RegistryFieldSnapshot { MachineKey = "TableId", FieldId = "fld_table_id", DisplayName = "TableId" },
+            new RegistryFieldSnapshot { FieldId = "fld_text", DisplayName = "Text", IsDefaultField = true }
+        },
+        Records =
+        {
+            new RegistryRecordSnapshot { RecordId = "rec_empty" }
+        }
+    });
+
+    var plan = RegistryMigrator.Plan(snapshot, new RegistryMigrationOptions
+    {
+        Locale = "zh-Hans",
+        CleanupDefaultRows = true,
+        CleanupDefaultFields = true
+    });
+
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.table.rename"), "Existing English table should be renamed for UI display.");
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.record.delete_empty"), "Default empty rows should be cleaned.");
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.field.delete_default"), "Default fields should be cleaned.");
+}
+
+static async Task LifecycleNewTableDryRunDoesNotWriteFiles()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-lifecycle-dry-" + Guid.NewGuid().ToString("N"));
+    var settings = Path.Combine(temp, "ProjectSettings", "ExcelToScriptableObjectSettings.asset");
+    try
+    {
+        var request = SampleNewTableRequest(settings);
+        request.DryRun = true;
+        var result = await LifecycleExecutor.ExecuteAsync(request, new RecordingLifecyclePlatform(), CancellationToken.None);
+        AssertTrue(result.Success, "Dry-run new-table should succeed.");
+        AssertTrue(!File.Exists(settings), "Dry-run must not write Unity settings.");
+        AssertEqual("preview-schema-review-id", result.SchemaReviewId, "Dry-run should still preview schema review id.");
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static async Task LifecycleNewTableApplyMockCompletesSteps()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-lifecycle-apply-" + Guid.NewGuid().ToString("N"));
+    var settings = Path.Combine(temp, "ProjectSettings", "ExcelToScriptableObjectSettings.asset");
+    try
+    {
+        var request = SampleNewTableRequest(settings);
+        var platform = new RecordingLifecyclePlatform();
+        var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
+        AssertTrue(result.Success, "Apply new-table should succeed with the mock platform.");
+        AssertEqual("sht_mock", result.SpreadsheetToken, "Result should include spreadsheet token.");
+        AssertEqual("sheet_mock", result.SheetId, "Result should include sheet id.");
+        AssertEqual("wik_mock", result.WikiNodeToken, "Result should include wiki node token.");
+        AssertEqual("rec_config", result.RegistryRecordId, "Result should include registry record id.");
+        AssertEqual("schema_pending", result.SchemaReviewId, "Result should include schema review id.");
+        AssertTrue(platform.Calls.Contains("create-sheet"), "Mock provider should create the sheet.");
+        AssertTrue(platform.Calls.Contains("write-template"), "Mock provider should write the template.");
+        AssertTrue(platform.Calls.Contains("upsert-registry"), "Mock provider should upsert registry.");
+        AssertTrue(platform.Calls.Contains("upsert-schema"), "Mock provider should upsert schema review.");
+        AssertTrue(File.ReadAllText(settings).Contains("excelPath: Assets/Config/Items.xlsx"), "Unity settings should append the target table without rewriting unrelated entries.");
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static void ExcelToSoUpdaterAppendsJsonSettings()
+{
+    var json = "{\n  \"configs\": [\n    { \"tableId\": \"SkillsData\", \"excelPath\": \"Excel/SkillsData.xlsx\" }\n  ]\n}\n";
+    var updated = UnityExcelToSoSettingsUpdater.UpsertText(json, new UnityExcelToSoEntry
+    {
+        TableId = "MonsterData",
+        ExcelPath = "Excel/MonsterData.xlsx",
+        ScriptableObjectType = "MonsterConfig"
+    });
+
+    AssertTrue(updated.Contains("\"tableId\": \"SkillsData\""), "Existing JSON entry should stay.");
+    AssertTrue(updated.Contains("\"tableId\": \"MonsterData\""), "New JSON entry should be appended.");
+    AssertTrue(updated.IndexOf("SkillsData", StringComparison.Ordinal) < updated.IndexOf("MonsterData", StringComparison.Ordinal), "Existing entry should not be reordered after the new entry.");
+}
+
+static void ProjectConfigProbeReadsLifecycleSummary()
+{
+    var json = """
+    {
+      "schemaVersion": "example.config-source/v1",
+      "lifecycleApplyMode": "dry-run-only",
+      "toolkit": { "defaultGateReportPath": "Temp/ConfigSheetForge/pr-gate-report.json" },
+      "adapterScript": "tools/config_bridge.py",
+      "contractArgs": ["--config", "{projectConfig}", "--operation", "{operation}", "--out", "{request}"],
+      "gitBranch": "feature/config",
+      "profile": "feature-config",
+      "tables": [
+        { "id": "ItemsData" },
+        { "id": "SkillsData" }
+      ]
+    }
+    """;
+
+    var summary = ProjectConfigProbe.ProbeJson("ProjectSettings/Example.ConfigSheetForge.json", json);
+
+    AssertTrue(summary.Exists, "Project config should be marked as existing.");
+    AssertEqual("example.config-source/v1", summary.SchemaVersion, "schemaVersion should be read.");
+    AssertEqual("2", summary.TableCount.ToString(), "table count should be read from tables array.");
+    AssertEqual("dry-run-only", summary.LifecycleApplyMode, "lifecycle mode should be read.");
+    AssertEqual("Temp/ConfigSheetForge/pr-gate-report.json", summary.GateReportPath, "gate report path should be read.");
+    AssertEqual("feature/config", summary.GitBranch, "git branch should be read.");
+    AssertEqual("feature-config", summary.Profile, "profile should be read.");
+    AssertEqual("tools/config_bridge.py", summary.AdapterScript, "adapter script should be read.");
+    AssertEqual("6", summary.ContractArguments.Count.ToString(), "contract args should be read.");
+    AssertTrue(summary.HasLifecycleAdapter, "adapterScript should enable project lifecycle mode.");
+}
+
+static async Task ApplyContractPrGateReportWritesStandardReport()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-pr-gate-lifecycle-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        Directory.SetCurrentDirectory(root);
+        var requestPath = Path.Combine(root, "request.json");
+        var resultPath = Path.Combine(root, "Temp", "ConfigSheetForge", "unity-lifecycle", "pr-gate-report.result.json");
+        var gateReportPath = Path.Combine("Temp", "ConfigSheetForge", "pr-gate-report.json");
+        var request = new LifecycleContractRequest
+        {
+            Operation = "pr-gate-report",
+            GateReportPath = gateReportPath,
+            GateReport = new PrGateReport
+            {
+                GitHead = "abc123",
+                Branch = "feature/config",
+                MergeReview = new GateReviewState { Status = "approved" },
+                PortableSubset = new GateCheckState { Passed = true },
+                Triangulation = new GateCheckState { Passed = true },
+                SchemaReview = new GateReviewState { Status = "approved" }
+            }
+        };
+        File.WriteAllText(requestPath, JsonSerializer.Serialize(request));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "apply-contract", "--request", requestPath, "--out", resultPath });
+        AssertEqual("0", exitCode.ToString(), "pr-gate-report lifecycle should pass.");
+
+        var finalGateReport = Path.Combine(root, gateReportPath);
+        AssertTrue(File.Exists(finalGateReport), "apply-contract should write the standard gate report path.");
+        var gateJson = File.ReadAllText(finalGateReport);
+        AssertTrue(gateJson.Contains("\"gitHead\""), "standard gate report should be a PrGateReport JSON object.");
+        AssertTrue(!gateJson.Contains("\"prGateReport\""), "standard gate report should not wrap LifecycleContractResult.");
+
+        var resultJson = File.ReadAllText(resultPath);
+        AssertTrue(resultJson.Contains("\"prGateReport\""), "lifecycle result should still contain the nested report.");
+        AssertTrue(resultJson.Contains("\"gateReportPath\""), "lifecycle result should record the final report path.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, true);
+        }
+    }
+}
+
+static void PortableSubsetBlocksUnsupportedStructures()
+{
+    var blocked = new[] { "formula", "floatingImage", "cellImage", "image", "mergedRange", "richText", "crossSheetReference", "mentionUser", "mentionDoc", "dateObject", "unsupportedCellType" };
+    foreach (var key in blocked)
+    {
+        var workbook = SampleWorkbook();
+        var cell = workbook.Sheets[0].Rows[0].Cells["name"];
+        cell.Details[key] = key == "mergedRange" ? "B2:C2" : "true";
+        cell.Details["sourceA1"] = "C12";
+        var report = PortableStructureValidator.Validate(workbook);
+        AssertTrue(report.HasErrors, key + " should fail portable structure validation.");
+        AssertTrue(report.Findings[0].Message.Contains("Items!C12"), key + " should include a human-readable cell location.");
+    }
+}
+
+static void TriangulationPassesAndFailsWithReadableDiffs()
+{
+    var online = SampleWorkbook();
+    var exported = SampleWorkbook();
+    exported.ProviderId = "xlsx";
+    exported.SourceId = "temp.xlsx";
+    var normalized = SemanticTriangulator.Normalize(online);
+    var pass = SemanticTriangulator.Compare(online, exported, normalized);
+    AssertTrue(pass.Passed, "Identical semantic content should pass triangulation even when provider/source identities differ.");
+
+    exported.Sheets[0].Rows[0].Cells["power"].NormalizedText = "999";
+    var fail = SemanticTriangulator.Compare(online, exported, normalized);
+    AssertTrue(!fail.Passed, "Changed xlsx semantic should fail triangulation.");
+    AssertTrue(fail.DiffSummary.Any(d => d.Contains("item_sword") && d.Contains("power")), "Diff should identify the changed row and column.");
+}
+
+static async Task SyncLocalInputDoesNotRewriteUnchangedCache()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-sync-mtime-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var state = Path.Combine(temp, ".config-sheet-forge");
+        Directory.CreateDirectory(state);
+        await File.WriteAllTextAsync(Path.Combine(state, "config.json"), JsonSerializer.Serialize(new ForgeConfig(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        var input = Path.Combine(temp, "items.semantic.json");
+        await File.WriteAllTextAsync(input, JsonSerializer.Serialize(SampleWorkbook(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var oldDir = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(temp);
+            var first = await ConfigSheetForge.Cli.Program.Main(new[] { "sync", "--input", input, "--table", "items" });
+            AssertEqual("0", first.ToString(), "First sync should pass.");
+            var semantic = Path.Combine(state, "cache", "items.semantic.json");
+            var sha = Path.Combine(state, "cache", "items.sha256");
+            var semanticTime = File.GetLastWriteTimeUtc(semantic);
+            var shaTime = File.GetLastWriteTimeUtc(sha);
+            await Task.Delay(1300);
+            var second = await ConfigSheetForge.Cli.Program.Main(new[] { "sync", "--input", input, "--table", "items" });
+            AssertEqual("0", second.ToString(), "Second sync should pass.");
+            AssertEqual(semanticTime.Ticks.ToString(), File.GetLastWriteTimeUtc(semantic).Ticks.ToString(), "Unchanged semantic cache mtime should not change.");
+            AssertEqual(shaTime.Ticks.ToString(), File.GetLastWriteTimeUtc(sha).Ticks.ToString(), "Unchanged sha mtime should not change.");
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(oldDir);
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static async Task StrictBotModeDoesNotFallbackToUser()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-strict-bot-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    var log = Path.Combine(temp, "calls.log");
+    var script = Path.Combine(temp, "lark-cli.cmd");
+    await File.WriteAllTextAsync(script,
+        "@echo off\r\n" +
+        "echo %*>>\"" + log + "\"\r\n" +
+        "echo %* | find \"doctor\" >nul\r\n" +
+        "if %ERRORLEVEL%==0 exit /b 0\r\n" +
+        "echo %* | find \"--as bot\" >nul\r\n" +
+        "if %ERRORLEVEL%==0 (\r\n" +
+        "  echo missing_scope 1>&2\r\n" +
+        "  exit /b 3\r\n" +
+        ")\r\n" +
+        "echo {\"data\":{\"values\":[[\"id\"],[\"a\"]]}}\r\n" +
+        "exit /b 0\r\n");
+
+    try
+    {
+        var provider = new LarkCliWorkbookProvider();
+        var context = new ProviderContext { WorkspaceRoot = temp };
+        context.Settings["larkCliPath"] = script;
+        context.Settings["larkCliIdentity"] = "bot";
+        var candidates = await provider.DiscoverRootsAsync(context, "配置根", CancellationToken.None);
+        var calls = File.ReadAllText(log);
+        AssertTrue(candidates.Any(c => c.Title == "Search failed"), "Bot permission failure should be returned to the caller.");
+        AssertTrue(calls.Contains("--as bot"), "Provider should try bot identity.");
+        AssertTrue(!calls.Contains("--as user"), "Strict bot mode must not fallback to user.");
+    }
+    finally
+    {
+        Directory.Delete(temp, recursive: true);
+    }
+}
+
+static void GateReportEvaluatorReportsHumanFailures()
+{
+    var missing = PrGateReportEvaluator.Evaluate(new PrGateReport());
+    AssertTrue(missing.HumanReadableFailures.Any(f => f.Contains("gitHead")), "Missing gitHead should be reported.");
+
+    var noPermission = PrGateReportEvaluator.Evaluate(new PrGateReport
+    {
+        GitHead = "abc",
+        Branch = "feature/config",
+        Permissions = new GatePermissions { CanReadRegistry = false, CanReadSheets = true },
+        MergeReview = new GateReviewState { Status = "approved" },
+        SchemaReview = new GateReviewState { Status = "approved" }
+    });
+    AssertTrue(noPermission.HumanReadableFailures.Any(f => f.Contains("Base 注册中心")), "Registry permission failure should be readable.");
+
+    var schemaPending = PrGateReportEvaluator.Evaluate(new PrGateReport
+    {
+        GitHead = "abc",
+        Branch = "feature/config",
+        MergeReview = new GateReviewState { Status = "approved" },
+        SchemaChangeDetected = true,
+        SchemaReview = new GateReviewState { Status = "pending" }
+    });
+    AssertTrue(schemaPending.HumanReadableFailures.Any(f => f.Contains("Schema 审查")), "Pending schema review should block gate.");
+
+    var expiredWaiver = PrGateReportEvaluator.Evaluate(new PrGateReport
+    {
+        GitHead = "abc",
+        Branch = "feature/config",
+        MergeReview = new GateReviewState { Status = "approved" },
+        SchemaReview = new GateReviewState { Status = "approved" },
+        Waiver = new GateWaiverState { Approved = true, ApprovedByRole = "designer", ExpiresAt = "2020-01-01T00:00:00Z", Branch = "feature/config", RecordId = "rec" }
+    });
+    AssertTrue(expiredWaiver.HumanReadableFailures.Any(f => f.Contains("配置负责人")), "Waiver must be approved by configOwner.");
+    AssertTrue(expiredWaiver.HumanReadableFailures.Any(f => f.Contains("过期")), "Expired waiver should block gate.");
+}
+
+static void PowerShellJsonSafetyFlagsInlineJsonParams()
+{
+    AssertTrue(PowerShellJsonSafety.ShouldAvoidInlineJson("powershell", new[] { "wiki", "spaces", "get_node", "--params", "{\"token\":\"abc\"}" }), "PowerShell inline --params JSON should be flagged.");
+    AssertTrue(!PowerShellJsonSafety.ShouldAvoidInlineJson("bash", new[] { "--params", "{\"token\":\"abc\"}" }), "Non-PowerShell shells should not be flagged by the Windows-specific guard.");
+    AssertTrue(PowerShellJsonSafety.Recommendation().Contains("request 文件"), "Recommendation should point users toward file-based JSON.");
+}
+
+static LifecycleContractRequest SampleNewTableRequest(string settings)
+{
+    return new LifecycleContractRequest
+    {
+        Operation = "new-table",
+        Registry = new RegistryContract { BaseToken = "base", BaseUrl = "https://example.feishu.cn/base/base" },
+        Git = new ContractGitSpec { Branch = "feature/config", FeishuBranch = "feature/config", Head = "abc123" },
+        Table = new ContractTableSpec
+        {
+            TableId = "items",
+            DisplayName = "道具",
+            ExcelPath = "Assets/Config/Items.xlsx",
+            WikiRootToken = "wik_root",
+            OwnerRole = "configOwner",
+            Fields =
+            {
+                new ContractFieldSpec { Key = "id", DisplayName = "ID", ValueKind = "string", Description = "稳定ID" },
+                new ContractFieldSpec { Key = "power", DisplayName = "战力", ValueKind = "integer", Description = "战斗力" }
+            }
+        },
+        UnityExcelToSo = new UnityExcelToSoContract
+        {
+            SettingsPath = settings,
+            TableId = "items",
+            ExcelPath = "Assets/Config/Items.xlsx",
+            ScriptableObjectType = "ItemConfig"
+        }
+    };
+}
+
 static MatrixWorkbookImportResult InvokeLarkImport(string json)
 {
     var method = typeof(LarkCliWorkbookProvider).GetMethod("BuildWorkbookFromReadJson", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
@@ -293,5 +682,65 @@ static void AssertEqual(string expected, string actual, string message)
     if (!string.Equals(expected, actual, StringComparison.Ordinal))
     {
         throw new InvalidOperationException(message + " Expected '" + expected + "', got '" + actual + "'.");
+    }
+}
+
+sealed class RecordingLifecyclePlatform : ILifecyclePlatform
+{
+    public List<string> Calls { get; } = new();
+
+    public Task<RegistrySnapshot> GetRegistrySnapshotAsync(RegistryContract registry, CancellationToken cancellationToken)
+    {
+        Calls.Add("snapshot");
+        return Task.FromResult(new RegistrySnapshot());
+    }
+
+    public Task<LifecycleActionResult> EnsureRegistryAsync(RegistryContract registry, RegistryDisplayMapping mapping, CancellationToken cancellationToken)
+    {
+        Calls.Add("ensure-registry");
+        return Task.FromResult(new LifecycleActionResult { Action = "registry.ensure", Status = "done", Message = "mock registry ensured" });
+    }
+
+    public Task<SheetCreationResult> CreateOnlineSheetAsync(ContractTableSpec table, CancellationToken cancellationToken)
+    {
+        Calls.Add("create-sheet");
+        return Task.FromResult(new SheetCreationResult
+        {
+            SpreadsheetToken = "sht_mock",
+            SpreadsheetUrl = "https://example.feishu.cn/sheets/sht_mock",
+            SheetId = "sheet_mock",
+            WikiNodeToken = "wik_mock"
+        });
+    }
+
+    public Task<LifecycleActionResult> WriteSheetTemplateAsync(SheetCreationResult sheet, IList<IList<string>> templateRows, CancellationToken cancellationToken)
+    {
+        Calls.Add("write-template");
+        var action = new LifecycleActionResult { Action = "sheet.template.write", Status = "done", Message = "mock template written" };
+        action.Details["rows"] = templateRows.Count.ToString();
+        return Task.FromResult(action);
+    }
+
+    public Task<LifecycleActionResult> UpsertRegistryRecordAsync(RegistryContract registry, ContractTableSpec table, SheetCreationResult sheet, CancellationToken cancellationToken)
+    {
+        Calls.Add("upsert-registry");
+        var action = new LifecycleActionResult { Action = "registry.config_sheets.upsert", Status = "done", Message = "mock registry upsert" };
+        action.Details["recordId"] = "rec_config";
+        return Task.FromResult(action);
+    }
+
+    public Task<LifecycleActionResult> UpsertSchemaReviewAsync(RegistryContract registry, ContractTableSpec table, ContractGitSpec git, string reason, CancellationToken cancellationToken)
+    {
+        Calls.Add("upsert-schema");
+        var action = new LifecycleActionResult { Action = "registry.schema_reviews.upsert", Status = "done", Message = "mock schema review" };
+        action.Details["schemaReviewId"] = "schema_pending";
+        action.Details["reason"] = reason;
+        return Task.FromResult(action);
+    }
+
+    public Task<LifecycleActionResult> ApplyRegistryMigrationAsync(RegistryContract registry, RegistryMigrationPlan plan, CancellationToken cancellationToken)
+    {
+        Calls.Add("apply-migration");
+        return Task.FromResult(new LifecycleActionResult { Action = "registry.migration.apply", Status = "done", Message = "mock migration" });
     }
 }

@@ -14,6 +14,12 @@ namespace ConfigSheetForge.Core
                 return report;
             }
 
+            var structureReport = PortableStructureValidator.Validate(workbook);
+            foreach (var finding in structureReport.Findings)
+            {
+                report.Findings.Add(finding);
+            }
+
             foreach (var sheet in workbook.Sheets)
             {
                 ReviewSheet(report, sheet);

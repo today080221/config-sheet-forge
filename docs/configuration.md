@@ -20,7 +20,8 @@ Config Sheet Forge 有两个本地文件：
   "cacheDirectory": ".config-sheet-forge/cache",
   "providerSettings": {
     "larkCliPath": "lark-cli",
-    "larkCliIdentity": "bot"
+    "larkCliIdentity": "bot",
+    "larkAllowUserFallback": "false"
   }
 }
 ```
@@ -29,9 +30,11 @@ Config Sheet Forge 有两个本地文件：
 
 `larkCliIdentity` 支持：
 
-- `bot`：默认值，先用机器人身份，失败后 provider 会 fallback 到 user。
+- `bot`：默认值，使用机器人身份。默认严格模式下不会 fallback 到 user。
 - `user`：直接使用当前用户 OAuth 身份。
 - `default`：不向 `lark-cli` 传 `--as`。
+
+`larkAllowUserFallback` 默认为 `false`。只有显式设为 `true`，或命令行传 `--allow-user-fallback`，provider 才会在 bot 权限失败后尝试 user 身份。
 
 ## registry.json
 
