@@ -83,7 +83,7 @@ namespace ConfigSheetForge.Core
                 SchemaVersion = FindStringValue(json, "schemaVersion", "schema", "version"),
                 TableCount = FindTableCount(json),
                 LifecycleApplyMode = FindStringValue(json, "lifecycleApplyMode", "applyMode", "writeMode"),
-                GateReportPath = FindStringValue(json, "gateReportPath", "prGateReportPath", "reportPath"),
+                GateReportPath = FindStringValue(json, "gateReportPath", "prGateReportPath", "defaultGateReportPath", "reportPath"),
                 GitBranch = FindStringValue(json, "gitBranch", "currentGitBranch", "branch"),
                 FeishuBranch = FindStringValue(json, "feishuBranch", "larkBranch"),
                 Profile = FindStringValue(json, "profile", "feishuProfile", "larkProfile"),

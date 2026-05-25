@@ -476,6 +476,28 @@ public static class Program
             ? new PreviewLifecyclePlatform()
             : new CliLifecyclePlatform(args, request);
         var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
+        if (string.Equals(request.Operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
+        {
+            var gateReportPath = ResolveGateReportPath(args, request);
+            result.GateReportPath = Path.GetFullPath(gateReportPath);
+            foreach (var action in result.Actions.Where(a => string.Equals(a.Action, "pr-gate-report.write", StringComparison.OrdinalIgnoreCase)))
+            {
+                action.Details["path"] = result.GateReportPath;
+            }
+
+            await WriteJsonAsync(gateReportPath, result.PrGateReport);
+            Console.WriteLine("PR gate report: " + result.GateReportPath);
+            Console.WriteLine("passed: " + result.PrGateReport.Passed.ToString().ToLowerInvariant());
+            if (result.PrGateReport.HumanReadableFailures.Count > 0)
+            {
+                Console.WriteLine("failures:");
+                foreach (var failure in result.PrGateReport.HumanReadableFailures)
+                {
+                    Console.WriteLine("- " + failure);
+                }
+            }
+        }
+
         var outPath = args.Get("out", "");
         if (!string.IsNullOrWhiteSpace(outPath))
         {
@@ -492,6 +514,17 @@ public static class Program
         }
 
         return result.Success ? 0 : 1;
+    }
+
+    private static string ResolveGateReportPath(ParsedArgs args, LifecycleContractRequest request)
+    {
+        var path = FirstNonEmpty(
+            request.GateReportPath,
+            request.ReportPath,
+            args.Get("gate-report", ""),
+            args.Get("report", ""),
+            Path.Combine("Temp", "ConfigSheetForge", "pr-gate-report.json"));
+        return Path.IsPathRooted(path) ? path : Path.Combine(Directory.GetCurrentDirectory(), path);
     }
 
     private static async Task<int> RegistryMigrateAsync(ParsedArgs args)

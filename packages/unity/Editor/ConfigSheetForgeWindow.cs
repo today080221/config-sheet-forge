@@ -24,11 +24,18 @@ namespace ConfigSheetForge.Unity.Editor
         private string _spreadsheet = "";
         private string _sheetId = "";
         private string _range = "A1:Z500";
+        private string _ownerRole = "";
+        private string _schemaChangeSummary = "";
+        private string _excelPath = "";
+        private string _sheetName = "";
+        private string _fieldsText = "id|ID|string|唯一ID" + "\n" + "name|名称|string|显示名称";
         private string _basePath = "";
         private string _oursPath = "";
         private string _theirsPath = "";
         private string _mergeReportPath = "merge-report.md";
         private string _mergedPath = "merged.semantic.json";
+        private bool _writeBackToMain;
+        private bool _confirmWriteMain;
         private string _output = "";
         private string _lastCommand = "";
         private int _selectedTab;
@@ -220,6 +227,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (_projectConfig.Exists)
             {
+                DrawProjectNewTableInputs();
                 DrawProjectLifecycleCard(
                     "新建配表向导",
                     "发现项目配置后，这里走 adapter 生成 new-table lifecycle contract，再交给 core apply-contract dry-run。",
@@ -270,6 +278,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (_projectConfig.Exists)
             {
+                DrawProjectMergeInputs();
                 DrawProjectLifecycleCard(
                     "项目三方比较与合并",
                     "发现项目配置后，这里走 adapter 生成 compare-merge lifecycle contract。低风险 merge 默认只生成预览。",
@@ -339,6 +348,44 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndVertical();
         }
 
+        private void DrawProjectNewTableInputs()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("新表输入", EditorStyles.boldLabel);
+            _tableId = EditorGUILayout.TextField(new GUIContent("配表ID", "会写入 inputs.tableId，并由项目 adapter 转成 contract.table.tableId。"), _tableId);
+            _tableName = EditorGUILayout.TextField(new GUIContent("标题/显示名称", "会同时写入 inputs.title 和 inputs.displayName。"), _tableName);
+            _ownerRole = EditorGUILayout.TextField(new GUIContent("负责人角色", "例如 configOwner；为空时由项目 adapter 默认。"), _ownerRole);
+            _schemaChangeSummary = EditorGUILayout.TextField(new GUIContent("Schema 变更说明", "写入 inputs.schemaChangeSummary，供 SchemaReviews reason 使用。"), _schemaChangeSummary);
+            _excelPath = EditorGUILayout.TextField(new GUIContent("本地 Excel 路径", "可选；写入 inputs.excelPath。"), _excelPath);
+            _sheetName = EditorGUILayout.TextField(new GUIContent("工作表名", "可选；写入 inputs.sheetName。"), _sheetName);
+            EditorGUILayout.LabelField(new GUIContent("字段模板", "每行格式：key|displayName|valueKind|description。复杂字段写入 inputs JSON，不走长 inline JSON 参数。"));
+            _fieldsText = EditorGUILayout.TextArea(_fieldsText, GUILayout.MinHeight(72));
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawProjectMergeInputs()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("合并输入", EditorStyles.boldLabel);
+            _tableId = EditorGUILayout.TextField(new GUIContent("配表ID", "写入 inputs.tableId。"), _tableId);
+            DrawPathField("基线", ref _basePath, "共同祖先 semantic workbook JSON。");
+            DrawPathField("本分支", ref _oursPath, "本地 semantic workbook JSON。");
+            DrawPathField("对方", ref _theirsPath, "待合入 semantic workbook JSON。");
+            _mergeReportPath = EditorGUILayout.TextField(new GUIContent("报告", "写入 inputs.mergeReportPath。"), _mergeReportPath);
+            _mergedPath = EditorGUILayout.TextField(new GUIContent("合并结果", "写入 inputs.mergedPath。"), _mergedPath);
+            _writeBackToMain = EditorGUILayout.Toggle(new GUIContent("申请写回 main", "默认关闭；关闭时只生成 merge.preview。"), _writeBackToMain);
+            if (_writeBackToMain)
+            {
+                _confirmWriteMain = EditorGUILayout.Toggle(new GUIContent("确认写回 main", "只有显式确认后，inputs.confirmWriteMain 才会为 true。"), _confirmWriteMain);
+            }
+            else
+            {
+                _confirmWriteMain = false;
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
         private void DrawProjectLifecycleCard(string title, string body, string buttonLabel, string operation, bool dryRun, bool includeNewTableSteps)
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
@@ -358,14 +405,14 @@ namespace ConfigSheetForge.Unity.Editor
                 }
 
                 EditorGUILayout.BeginHorizontal();
-                if (GUILayout.Button(new GUIContent(buttonLabel, "先生成 contract，再运行 apply-contract。dry-run 不写飞书、不改本地文件。"), GUILayout.Height(28)))
+                if (GUILayout.Button(new GUIContent(ProjectButtonLabel(buttonLabel, operation), "先生成 contract，再运行 apply-contract。dry-run 不写飞书、不改本地文件。"), GUILayout.Height(28)))
                 {
-                    RunProjectLifecycle(operation, dryRun);
+                    RunProjectLifecycle(operation, EffectiveDryRun(operation, dryRun));
                 }
 
                 if (GUILayout.Button(new GUIContent("复制 adapter 命令", "复制将要调用的 adapter 命令。"), GUILayout.Width(128), GUILayout.Height(28)))
                 {
-                    CopyProjectLifecycleAdapterCommand(operation, dryRun);
+                    CopyProjectLifecycleAdapterCommand(operation, EffectiveDryRun(operation, dryRun));
                 }
                 EditorGUILayout.EndHorizontal();
             }
@@ -395,6 +442,26 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.TextArea(string.IsNullOrWhiteSpace(_output) ? "暂无命令输出。" : _output, GUILayout.ExpandHeight(true));
             EditorGUILayout.EndScrollView();
             EditorGUILayout.EndVertical();
+        }
+
+        private bool EffectiveDryRun(string operation, bool defaultDryRun)
+        {
+            if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
+            {
+                return !(_writeBackToMain && _confirmWriteMain);
+            }
+
+            return defaultDryRun;
+        }
+
+        private string ProjectButtonLabel(string fallback, string operation)
+        {
+            if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase) && _writeBackToMain && _confirmWriteMain)
+            {
+                return "确认写回 main";
+            }
+
+            return fallback;
         }
 
         private void DrawStep(string number, string title, string body, string buttonLabel, string tooltip, Action action)
@@ -501,20 +568,24 @@ namespace ConfigSheetForge.Unity.Editor
             var workDir = Path.Combine(projectRoot, "Temp", "ConfigSheetForge", "unity-lifecycle");
             Directory.CreateDirectory(workDir);
             var defaultRequestPath = Path.Combine(workDir, operation + ".contract.json");
+            var inputsPath = Path.Combine(workDir, operation + ".inputs.json");
             var requestPath = string.IsNullOrWhiteSpace(_projectConfig.ContractRequestPath)
                 ? defaultRequestPath
-                : ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, ConfigSheetForgeEditorUtility.ExpandToken(_projectConfig.ContractRequestPath, projectRoot, _projectConfig, operation, defaultRequestPath, dryRun));
+                : ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, ConfigSheetForgeEditorUtility.ExpandToken(_projectConfig.ContractRequestPath, projectRoot, _projectConfig, operation, defaultRequestPath, inputsPath, dryRun));
             var resultPath = Path.Combine(workDir, operation + ".result.json");
+            var finalGateReportPath = ResolveGateReportPath(projectRoot);
+            File.WriteAllText(inputsPath, BuildLifecycleInputsJson(operation, dryRun, finalGateReportPath), Encoding.UTF8);
 
-            var adapter = ConfigSheetForgeEditorUtility.CreateProjectLifecycleCommand(_projectConfig, projectRoot, operation, requestPath, dryRun);
+            var adapter = ConfigSheetForgeEditorUtility.CreateProjectLifecycleCommand(_projectConfig, projectRoot, operation, requestPath, inputsPath, dryRun);
             _lastCommand = adapter.ToCommandLine() + Environment.NewLine +
-                           ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, new[] { "apply-contract", "--request", requestPath, "--out", resultPath });
+                           ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, BuildApplyContractArgs(operation, requestPath, resultPath, finalGateReportPath));
 
             try
             {
                 var output = new StringBuilder();
                 var adapterResult = RunProcessCapture(ConfigSheetForgeEditorUtility.ResolveExecutable(adapter.Executable), adapter.Arguments, projectRoot);
                 output.AppendLine(adapterResult.Render(adapter.ToCommandLine()));
+                output.AppendLine("Inputs: " + inputsPath);
                 if (adapterResult.ExitCode != 0)
                 {
                     output.AppendLine("adapter 没有成功生成 contract，请按上面的错误处理。");
@@ -532,13 +603,22 @@ namespace ConfigSheetForge.Unity.Editor
                 }
 
                 output.AppendLine("Contract request: " + requestPath);
-                var applyArgs = new[] { "apply-contract", "--request", requestPath, "--out", resultPath };
+                var applyArgs = BuildApplyContractArgs(operation, requestPath, resultPath, finalGateReportPath);
                 var applyResult = RunProcessCapture(ConfigSheetForgeEditorUtility.ResolveExecutable(_cliPath), applyArgs, projectRoot);
                 output.AppendLine(applyResult.Render(ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, applyArgs)));
                 if (File.Exists(resultPath))
                 {
-                    output.AppendLine("Contract result: " + resultPath);
+                    output.AppendLine("Lifecycle result: " + resultPath);
                     output.AppendLine(File.ReadAllText(resultPath));
+                }
+
+                if (string.Equals(operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
+                {
+                    output.AppendLine("Final gate report: " + finalGateReportPath);
+                    if (File.Exists(finalGateReportPath))
+                    {
+                        output.AppendLine(BuildGateReportSummary(File.ReadAllText(finalGateReportPath)));
+                    }
                 }
 
                 _output = output.ToString();
@@ -574,7 +654,8 @@ namespace ConfigSheetForge.Unity.Editor
             RefreshReadonlyStatus();
             var projectRoot = FindProjectRoot();
             var requestPath = Path.Combine(projectRoot, "Temp", "ConfigSheetForge", "unity-lifecycle", operation + ".contract.json");
-            var adapter = ConfigSheetForgeEditorUtility.CreateProjectLifecycleCommand(_projectConfig, projectRoot, operation, requestPath, dryRun);
+            var inputsPath = Path.Combine(projectRoot, "Temp", "ConfigSheetForge", "unity-lifecycle", operation + ".inputs.json");
+            var adapter = ConfigSheetForgeEditorUtility.CreateProjectLifecycleCommand(_projectConfig, projectRoot, operation, requestPath, inputsPath, dryRun);
             EditorGUIUtility.systemCopyBuffer = adapter.ToCommandLine();
         }
 
@@ -583,6 +664,133 @@ namespace ConfigSheetForge.Unity.Editor
             var projectRoot = FindProjectRoot();
             _projectConfig = ConfigSheetForgeEditorUtility.LoadProjectConfigSummary(projectRoot);
             _currentGitBranch = TryRunReadOnlyGit("branch", "--show-current");
+        }
+
+        private string[] BuildApplyContractArgs(string operation, string requestPath, string resultPath, string finalGateReportPath)
+        {
+            var args = new List<string> { "apply-contract", "--request", requestPath, "--out", resultPath };
+            if (string.Equals(operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
+            {
+                args.Add("--report");
+                args.Add(finalGateReportPath);
+            }
+
+            return args.ToArray();
+        }
+
+        private string ResolveGateReportPath(string projectRoot)
+        {
+            var path = FirstNonEmpty(_projectConfig.GateReportPath, Path.Combine("Temp", "ConfigSheetForge", "pr-gate-report.json"));
+            return ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, path);
+        }
+
+        private string BuildLifecycleInputsJson(string operation, bool dryRun, string finalGateReportPath)
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("{");
+            AppendJsonProperty(builder, "operation", operation, comma: true);
+            AppendJsonProperty(builder, "dryRun", dryRun, comma: true);
+            AppendJsonProperty(builder, "tableId", _tableId, comma: true);
+            AppendJsonProperty(builder, "title", _tableName, comma: true);
+            AppendJsonProperty(builder, "displayName", _tableName, comma: true);
+            AppendJsonProperty(builder, "ownerRole", _ownerRole, comma: true);
+            AppendJsonProperty(builder, "schemaChangeSummary", _schemaChangeSummary, comma: true);
+            AppendJsonProperty(builder, "excelPath", _excelPath, comma: true);
+            AppendJsonProperty(builder, "sheetName", _sheetName, comma: true);
+            AppendJsonProperty(builder, "basePath", _basePath, comma: true);
+            AppendJsonProperty(builder, "oursPath", _oursPath, comma: true);
+            AppendJsonProperty(builder, "theirsPath", _theirsPath, comma: true);
+            AppendJsonProperty(builder, "mergeReportPath", _mergeReportPath, comma: true);
+            AppendJsonProperty(builder, "mergedPath", _mergedPath, comma: true);
+            AppendJsonProperty(builder, "writeBackToMain", _writeBackToMain, comma: true);
+            AppendJsonProperty(builder, "confirmWriteMain", _writeBackToMain && _confirmWriteMain, comma: true);
+            AppendJsonProperty(builder, "gateReportPath", finalGateReportPath, comma: true);
+            builder.AppendLine("  \"fields\": [");
+            var fields = ParseFieldsText();
+            for (var i = 0; i < fields.Count; i++)
+            {
+                builder.Append("    { ");
+                builder.Append("\"key\": \"").Append(EscapeJson(fields[i].Key)).Append("\", ");
+                builder.Append("\"displayName\": \"").Append(EscapeJson(fields[i].DisplayName)).Append("\", ");
+                builder.Append("\"valueKind\": \"").Append(EscapeJson(fields[i].ValueKind)).Append("\", ");
+                builder.Append("\"description\": \"").Append(EscapeJson(fields[i].Description)).Append("\" }");
+                if (i + 1 < fields.Count)
+                {
+                    builder.Append(',');
+                }
+
+                builder.AppendLine();
+            }
+
+            builder.AppendLine("  ]");
+            builder.AppendLine("}");
+            return builder.ToString();
+        }
+
+        private List<ProjectFieldInput> ParseFieldsText()
+        {
+            var fields = new List<ProjectFieldInput>();
+            foreach (var rawLine in (_fieldsText ?? "").Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parts = rawLine.Split('|');
+                var key = parts.Length > 0 ? parts[0].Trim() : "";
+                if (string.IsNullOrWhiteSpace(key))
+                {
+                    continue;
+                }
+
+                fields.Add(new ProjectFieldInput
+                {
+                    Key = key,
+                    DisplayName = parts.Length > 1 ? parts[1].Trim() : key,
+                    ValueKind = parts.Length > 2 ? parts[2].Trim() : "string",
+                    Description = parts.Length > 3 ? parts[3].Trim() : ""
+                });
+            }
+
+            return fields;
+        }
+
+        private static void AppendJsonProperty(StringBuilder builder, string key, string value, bool comma)
+        {
+            builder.Append("  \"").Append(EscapeJson(key)).Append("\": \"").Append(EscapeJson(value)).Append("\"");
+            if (comma)
+            {
+                builder.Append(',');
+            }
+
+            builder.AppendLine();
+        }
+
+        private static void AppendJsonProperty(StringBuilder builder, string key, bool value, bool comma)
+        {
+            builder.Append("  \"").Append(EscapeJson(key)).Append("\": ").Append(value ? "true" : "false");
+            if (comma)
+            {
+                builder.Append(',');
+            }
+
+            builder.AppendLine();
+        }
+
+        private static string BuildGateReportSummary(string json)
+        {
+            var passed = json.IndexOf("\"passed\": true", StringComparison.OrdinalIgnoreCase) >= 0
+                ? "true"
+                : json.IndexOf("\"passed\": false", StringComparison.OrdinalIgnoreCase) >= 0 ? "false" : "unknown";
+            var builder = new StringBuilder();
+            builder.AppendLine("passed: " + passed);
+            var failures = ExtractStringArray(json, "humanReadableFailures");
+            if (failures.Count > 0)
+            {
+                builder.AppendLine("failures:");
+                foreach (var failure in failures)
+                {
+                    builder.AppendLine("- " + failure);
+                }
+            }
+
+            return builder.ToString();
         }
 
         private static string FindProjectRoot()
@@ -686,6 +894,67 @@ namespace ConfigSheetForge.Unity.Editor
 
             return "";
         }
+
+        private static List<string> ExtractStringArray(string json, string propertyName)
+        {
+            var values = new List<string>();
+            var property = "\"" + propertyName + "\"";
+            var propertyIndex = json.IndexOf(property, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return values;
+            }
+
+            var arrayStart = json.IndexOf('[', propertyIndex);
+            var arrayEnd = json.IndexOf(']', arrayStart < 0 ? propertyIndex : arrayStart);
+            if (arrayStart < 0 || arrayEnd < 0)
+            {
+                return values;
+            }
+
+            for (var i = arrayStart + 1; i < arrayEnd; i++)
+            {
+                if (json[i] != '"')
+                {
+                    continue;
+                }
+
+                var builder = new StringBuilder();
+                var escaped = false;
+                for (var j = i + 1; j < arrayEnd; j++)
+                {
+                    var c = json[j];
+                    if (escaped)
+                    {
+                        builder.Append(c);
+                        escaped = false;
+                        continue;
+                    }
+
+                    if (c == '\\')
+                    {
+                        escaped = true;
+                        continue;
+                    }
+
+                    if (c == '"')
+                    {
+                        values.Add(builder.ToString());
+                        i = j;
+                        break;
+                    }
+
+                    builder.Append(c);
+                }
+            }
+
+            return values;
+        }
+
+        private static string EscapeJson(string value)
+        {
+            return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n");
+        }
     }
 
     public static class ConfigSheetForgeEditorApi
@@ -737,5 +1006,13 @@ namespace ConfigSheetForge.Unity.Editor
 
             return builder.ToString();
         }
+    }
+
+    internal sealed class ProjectFieldInput
+    {
+        public string Key { get; set; } = "";
+        public string DisplayName { get; set; } = "";
+        public string ValueKind { get; set; } = "string";
+        public string Description { get; set; } = "";
     }
 }

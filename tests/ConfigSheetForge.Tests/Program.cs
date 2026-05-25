@@ -22,6 +22,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
     ("excel to so updater appends json settings", () => RunSync(ExcelToSoUpdaterAppendsJsonSettings)),
     ("project config probe reads lifecycle summary", () => RunSync(ProjectConfigProbeReadsLifecycleSummary)),
+    ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
     ("portable subset blocks unsupported structures", () => RunSync(PortableSubsetBlocksUnsupportedStructures)),
     ("triangulation passes and fails with readable diffs", () => RunSync(TriangulationPassesAndFailsWithReadableDiffs)),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
@@ -326,7 +327,7 @@ static void ProjectConfigProbeReadsLifecycleSummary()
     {
       "schemaVersion": "example.config-source/v1",
       "lifecycleApplyMode": "dry-run-only",
-      "gateReportPath": "Temp/ConfigSheetForge/pr-gate-report.json",
+      "toolkit": { "defaultGateReportPath": "Temp/ConfigSheetForge/pr-gate-report.json" },
       "adapterScript": "tools/config_bridge.py",
       "contractArgs": ["--config", "{projectConfig}", "--operation", "{operation}", "--out", "{request}"],
       "gitBranch": "feature/config",
@@ -350,6 +351,56 @@ static void ProjectConfigProbeReadsLifecycleSummary()
     AssertEqual("tools/config_bridge.py", summary.AdapterScript, "adapter script should be read.");
     AssertEqual("6", summary.ContractArguments.Count.ToString(), "contract args should be read.");
     AssertTrue(summary.HasLifecycleAdapter, "adapterScript should enable project lifecycle mode.");
+}
+
+static async Task ApplyContractPrGateReportWritesStandardReport()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-pr-gate-lifecycle-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        Directory.SetCurrentDirectory(root);
+        var requestPath = Path.Combine(root, "request.json");
+        var resultPath = Path.Combine(root, "Temp", "ConfigSheetForge", "unity-lifecycle", "pr-gate-report.result.json");
+        var gateReportPath = Path.Combine("Temp", "ConfigSheetForge", "pr-gate-report.json");
+        var request = new LifecycleContractRequest
+        {
+            Operation = "pr-gate-report",
+            GateReportPath = gateReportPath,
+            GateReport = new PrGateReport
+            {
+                GitHead = "abc123",
+                Branch = "feature/config",
+                MergeReview = new GateReviewState { Status = "approved" },
+                PortableSubset = new GateCheckState { Passed = true },
+                Triangulation = new GateCheckState { Passed = true },
+                SchemaReview = new GateReviewState { Status = "approved" }
+            }
+        };
+        File.WriteAllText(requestPath, JsonSerializer.Serialize(request));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "apply-contract", "--request", requestPath, "--out", resultPath });
+        AssertEqual("0", exitCode.ToString(), "pr-gate-report lifecycle should pass.");
+
+        var finalGateReport = Path.Combine(root, gateReportPath);
+        AssertTrue(File.Exists(finalGateReport), "apply-contract should write the standard gate report path.");
+        var gateJson = File.ReadAllText(finalGateReport);
+        AssertTrue(gateJson.Contains("\"gitHead\""), "standard gate report should be a PrGateReport JSON object.");
+        AssertTrue(!gateJson.Contains("\"prGateReport\""), "standard gate report should not wrap LifecycleContractResult.");
+
+        var resultJson = File.ReadAllText(resultPath);
+        AssertTrue(resultJson.Contains("\"prGateReport\""), "lifecycle result should still contain the nested report.");
+        AssertTrue(resultJson.Contains("\"gateReportPath\""), "lifecycle result should record the final report path.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, true);
+        }
+    }
 }
 
 static void PortableSubsetBlocksUnsupportedStructures()

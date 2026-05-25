@@ -59,6 +59,7 @@ if ($portableStructures -notmatch "#if !UNITY_5_3_OR_NEWER") {
 }
 
 $window = Get-Content -Raw packages/unity/Editor/ConfigSheetForgeWindow.cs
+$editorSources = (Get-ChildItem packages/unity/Editor -Recurse -Filter *.cs | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n"
 $requiredMenus = @(
   'MenuItem("Tools/Config Sheet Forge"',
   'MenuItem("Tools/Config Sheet Forge/打开同步窗口"',
@@ -81,6 +82,12 @@ $requiredApis = @(
 foreach ($api in $requiredApis) {
   if ($window -notmatch "public static void\s+$api\s*\(") {
     throw "Missing stable Unity Editor API: $api"
+  }
+}
+
+foreach ($requiredText in @("BuildLifecycleInputsJson", "--inputs", "gateReportPath", "Final gate report")) {
+  if ($editorSources -notlike "*$requiredText*") {
+    throw "Unity project lifecycle UI is missing expected text: $requiredText"
   }
 }
 

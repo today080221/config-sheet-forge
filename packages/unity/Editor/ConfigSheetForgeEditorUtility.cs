@@ -153,6 +153,7 @@ namespace ConfigSheetForge.Unity.Editor
             string projectRoot,
             string operation,
             string requestPath,
+            string inputsPath,
             bool dryRun)
         {
             if (summary == null || !summary.HasLifecycleAdapter)
@@ -164,11 +165,11 @@ namespace ConfigSheetForge.Unity.Editor
             var adapterScript = ResolveProjectPath(projectRoot, summary.AdapterScript);
             if (!string.IsNullOrWhiteSpace(summary.ContractCommand))
             {
-                command.Executable = ResolveCommandExecutable(projectRoot, ExpandToken(summary.ContractCommand, projectRoot, summary, operation, requestPath, dryRun));
+                command.Executable = ResolveCommandExecutable(projectRoot, ExpandToken(summary.ContractCommand, projectRoot, summary, operation, requestPath, inputsPath, dryRun));
             }
             else if (!string.IsNullOrWhiteSpace(summary.AdapterInterpreter))
             {
-                command.Executable = ExpandToken(summary.AdapterInterpreter, projectRoot, summary, operation, requestPath, dryRun);
+                command.Executable = ExpandToken(summary.AdapterInterpreter, projectRoot, summary, operation, requestPath, inputsPath, dryRun);
                 command.Arguments.Add(adapterScript);
             }
             else if (adapterScript.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
@@ -192,9 +193,22 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (summary.ContractArguments.Count > 0)
             {
+                var hasInputs = false;
                 foreach (var arg in summary.ContractArguments)
                 {
-                    command.Arguments.Add(ExpandToken(arg, projectRoot, summary, operation, requestPath, dryRun));
+                    if (string.Equals(arg, "--inputs", StringComparison.OrdinalIgnoreCase) ||
+                        arg.IndexOf("{inputs}", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        hasInputs = true;
+                    }
+
+                    command.Arguments.Add(ExpandToken(arg, projectRoot, summary, operation, requestPath, inputsPath, dryRun));
+                }
+
+                if (!hasInputs)
+                {
+                    command.Arguments.Add("--inputs");
+                    command.Arguments.Add(inputsPath);
                 }
             }
             else
@@ -207,6 +221,8 @@ namespace ConfigSheetForge.Unity.Editor
                 command.Arguments.Add(operation);
                 command.Arguments.Add("--out");
                 command.Arguments.Add(requestPath);
+                command.Arguments.Add("--inputs");
+                command.Arguments.Add(inputsPath);
                 if (dryRun)
                 {
                     command.Arguments.Add("--dry-run");
@@ -238,7 +254,7 @@ namespace ConfigSheetForge.Unity.Editor
                 : value;
         }
 
-        public static string ExpandToken(string value, string projectRoot, ProjectConfigSummary summary, string operation, string requestPath, bool dryRun)
+        public static string ExpandToken(string value, string projectRoot, ProjectConfigSummary summary, string operation, string requestPath, string inputsPath, bool dryRun)
         {
             summary = summary ?? new ProjectConfigSummary();
             return (value ?? "")
@@ -247,6 +263,7 @@ namespace ConfigSheetForge.Unity.Editor
                 .Replace("{operation}", operation ?? "")
                 .Replace("{request}", requestPath ?? "")
                 .Replace("{out}", requestPath ?? "")
+                .Replace("{inputs}", inputsPath ?? "")
                 .Replace("{dryRun}", dryRun ? "true" : "false");
         }
 

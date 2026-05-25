@@ -49,6 +49,8 @@ https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.3.
 
 安装后打开 `Tools > Config Sheet Forge` 或 `Tools > Config Sheet Forge > 打开同步窗口`。下游 Unity 项目推荐只保留薄菜单 adapter 和 `ProjectSettings/*ConfigSheetForge*.json` 项目配置，通用窗口、向导、contract 执行、三方比较和 gate UI 都由本包维护。
 
+Unity 项目 adapter 模式会通过 `Temp/ConfigSheetForge/unity-lifecycle/<operation>.inputs.json` 传窗口输入，并生成标准 `Temp/ConfigSheetForge/pr-gate-report.json` 给项目 gate wrapper / CI 使用。
+
 Unity UPM 重新 resolve `packages-lock.json` 时，可能顺带刷新其它 git dependency 的 hash；接入 PR 里应单独核对 manifest/lock diff。
 
 ## 类型行约定

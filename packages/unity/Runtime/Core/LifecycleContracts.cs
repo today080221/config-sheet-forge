@@ -19,6 +19,8 @@ namespace ConfigSheetForge.Core
         public UnityExcelToSoContract UnityExcelToSo { get; set; } = new UnityExcelToSoContract();
         public MergePolicyContract MergePolicy { get; set; } = new MergePolicyContract();
         public PrGateReport GateReport { get; set; } = new PrGateReport();
+        public string GateReportPath { get; set; } = "";
+        public string ReportPath { get; set; } = "";
         public List<BranchBindingContract> BranchBindings { get; set; } = new List<BranchBindingContract>();
         public Dictionary<string, string> DocumentationLinks { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
@@ -115,6 +117,7 @@ namespace ConfigSheetForge.Core
         public List<string> HumanReadableFailures { get; set; } = new List<string>();
         public Dictionary<string, string> DocumentationTargets { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public PrGateReport PrGateReport { get; set; } = new PrGateReport();
+        public string GateReportPath { get; set; } = "";
 
         public void AddFailure(string message)
         {
