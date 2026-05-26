@@ -319,7 +319,7 @@ public static class Program
                     var hash = SemanticHasher.ComputeHash(result.Workbook);
                     var cacheWrite = await WriteCacheIfChangedAsync(workspace.Paths.CacheDirectory, table.Id, result.Workbook, hash, xlsxPath);
                     Console.WriteLine(table.Id + ": " + hash);
-                    Console.WriteLine(cacheWrite ? "  cache updated" : "  cache unchanged");
+                    Console.WriteLine(cacheWrite ? "  cache updated" : "  无变化，未重写 cache");
                     continue;
                 }
             }
@@ -441,7 +441,7 @@ public static class Program
                 var hash = SemanticHasher.ComputeHash(result.Workbook);
                 var cacheWrite = await WriteCacheIfChangedAsync(cacheDirectory, table.Id, result.Workbook, hash, xlsxPath, excelCacheDirectory);
                 Console.WriteLine(table.Id + ": " + hash);
-                Console.WriteLine(cacheWrite ? "  cache updated" : "  cache unchanged");
+                Console.WriteLine(cacheWrite ? "  cache updated" : "  无变化，未重写 cache");
             }
         }
 

@@ -145,7 +145,12 @@ namespace ConfigSheetForge.Unity.Editor
 
         public static ProjectConfigSummary LoadProjectConfigSummary(string projectRoot)
         {
-            return ProjectConfigProbe.ProbeFile(FindProjectConfigPath(projectRoot));
+            return LoadProjectConfigSummary(projectRoot, "");
+        }
+
+        public static ProjectConfigSummary LoadProjectConfigSummary(string projectRoot, string currentGitBranch)
+        {
+            return ProjectConfigProbe.ProbeFile(FindProjectConfigPath(projectRoot), currentGitBranch);
         }
 
         public static ConfigSheetForgeCommandSpec CreateProjectLifecycleCommand(

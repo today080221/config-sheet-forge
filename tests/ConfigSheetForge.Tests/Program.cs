@@ -37,6 +37,9 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("excel to so updater preserves json schema and encoding", () => RunSync(ExcelToSoUpdaterPreservesJsonSchemaAndEncoding)),
     ("project config upsert writes nested feishu node", () => RunSync(ProjectConfigUpsertWritesNestedFeishuNode)),
     ("project config probe reads lifecycle summary", () => RunSync(ProjectConfigProbeReadsLifecycleSummary)),
+    ("project config probe skips registry base table ids", () => RunSync(ProjectConfigProbeSkipsRegistryBaseTableIds)),
+    ("project config probe derives branch workspace names", () => RunSync(ProjectConfigProbeDerivesBranchWorkspaceNames)),
+    ("project config probe ignores local state registry", () => RunSync(ProjectConfigProbeIgnoresLocalStateRegistry)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
     ("seed dry-run plans xlsx migration without writes", SeedDryRunPlansXlsxMigrationWithoutWrites),
     ("seed manifest does not treat cache excelPath as source", SeedManifestDoesNotTreatCacheExcelPathAsSource),
@@ -866,6 +869,106 @@ static void ProjectConfigProbeReadsLifecycleSummary()
     AssertEqual("tools/config_bridge.py", summary.AdapterScript, "adapter script should be read.");
     AssertEqual("6", summary.ContractArguments.Count.ToString(), "contract args should be read.");
     AssertTrue(summary.HasLifecycleAdapter, "adapterScript should enable project lifecycle mode.");
+}
+
+static void ProjectConfigProbeSkipsRegistryBaseTableIds()
+{
+    var json = """
+    {
+      "feishu": {
+        "registryBase": {
+          "tables": {
+            "BranchBindings": "tbl_branch",
+            "ConfigSheets": "tbl_config"
+          }
+        }
+      },
+      "tables": [
+        { "id": "ItemsData", "displayName": "道具" },
+        { "id": "SkillsData", "displayName": "技能" },
+        { "id": "MonstersData", "displayName": "怪物" }
+      ]
+    }
+    """;
+
+    var summary = ProjectConfigProbe.ProbeJson("ProjectSettings/Example.ConfigSheetForge.json", json, "feature/config");
+
+    AssertEqual("3", summary.TableCount.ToString(), "top-level tables array should win over feishu.registryBase.tables object.");
+    AssertEqual("3", summary.CurrentBranchTableCount.ToString(), "current branch table count should use the shared top-level table list when no live ConfigSheets are present.");
+}
+
+static void ProjectConfigProbeDerivesBranchWorkspaceNames()
+{
+    var json = """
+    {
+      "branchWorkspace": {
+        "rootWikiUrl": "https://example.feishu.cn/wiki/root_node",
+        "profileNameTemplate": "{gitBranch}",
+        "branchNodeTitleTemplate": "branch-{slug}"
+      },
+      "branchBindings": [
+        {
+          "gitBranch": "codex/config-sheet-seed-feishu-main",
+          "profile": "codex/config-sheet-seed-feishu-main",
+          "wikiNodeToken": "BuIEwbzcNiEYIfkj3Aac2kfOnvc"
+        }
+      ],
+      "tables": [
+        { "id": "ItemsData" }
+      ]
+    }
+    """;
+
+    var summary = ProjectConfigProbe.ProbeJson("ProjectSettings/Example.ConfigSheetForge.json", json, "codex/config-sheet-seed-feishu-main");
+
+    AssertEqual("codex/config-sheet-seed-feishu-main", summary.Profile, "profile template should use the current git branch.");
+    AssertEqual("branch-codex-config-sheet-seed-feishu-main", summary.BranchWikiNodeTitle, "branch node title should use the slug template.");
+    AssertEqual("BuIEwbzcNiEYIfkj3Aac2kfOnvc", summary.BranchWikiNodeToken, "matching BranchBindings token should hydrate the branch node.");
+    AssertEqual("https://example.feishu.cn/wiki/BuIEwbzcNiEYIfkj3Aac2kfOnvc", summary.BranchWikiNodeUrl, "wiki token should render as a URL when a root wiki URL provides the host.");
+}
+
+static void ProjectConfigProbeIgnoresLocalStateRegistry()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-probe-local-state-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var projectSettings = Path.Combine(root, "ProjectSettings");
+        Directory.CreateDirectory(projectSettings);
+        Directory.CreateDirectory(Path.Combine(root, ".config-sheet-forge"));
+        var config = Path.Combine(projectSettings, "Example.ConfigSheetForge.json");
+        File.WriteAllText(config, """
+        {
+          "branchWorkspace": {
+            "profileNameTemplate": "{gitBranch}",
+            "branchNodeTitleTemplate": "branch-{slug}"
+          },
+          "tables": [
+            { "id": "ItemsData" },
+            { "id": "SkillsData" }
+          ]
+        }
+        """);
+        File.WriteAllText(Path.Combine(root, ".config-sheet-forge", "registry.json"), """
+        {
+          "tables": [
+            { "id": "old_smoke_table" }
+          ]
+        }
+        """);
+
+        var summary = ProjectConfigProbe.ProbeFile(config, "feature/live");
+
+        AssertEqual("2", summary.TableCount.ToString(), "local ignored registry must not affect project table count.");
+        AssertEqual("feature/live", summary.Profile, "local ignored registry must not affect derived profile.");
+        AssertTrue(!summary.CurrentBranchTables.Any(t => t.TableId == "old_smoke_table"), "local ignored registry tables must not appear in current branch list.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }
 
 static async Task ApplyContractPrGateReportWritesStandardReport()

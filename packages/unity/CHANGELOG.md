@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.6
+
+- Unity 状态页改为工作流摘要：优先展示当前 Git 分支、Feishu profile、Wiki branch 节点、当前 branch 表数量、cache 状态与最近 PR gate 摘要。
+- `ProjectConfigProbe` 改用结构化轻量 JSON DOM 解析，避免把 `feishu.registryBase.tables` 这类表 ID 映射误当成项目配表清单。
+- 当前 branch 表列表展示 TableId、显示名称、在线 Sheet 链接、cache 状态、semantic hash、更新时间、schema 状态与负责人角色。
+- `.config-sheet-forge` 改为高级诊断中的“本地状态/cache，可忽略、可重建”，不再参与共享项目状态摘要。
+- `sync-cache` 无变化时输出“无变化，未重写 cache”。
+
 ## 0.4.5
 
 - 修复 lark-cli 1.0.40 `base +table-list` 不支持 `--format` 的 argv 兼容问题。
