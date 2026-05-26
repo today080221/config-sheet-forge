@@ -14,7 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.13";
+        private const string PackageVersion = "v0.4.14";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -27,6 +27,7 @@ namespace ConfigSheetForge.Unity.Editor
         private const float CollapsedOutputBarHeight = 34f;
         private const float MinBottomDrawerHeight = 220f;
         private const float DefaultBottomDrawerHeight = 260f;
+        private const double MergeProbeCacheSeconds = 30;
 
         private enum WorkflowStatusKind
         {
@@ -108,6 +109,10 @@ namespace ConfigSheetForge.Unity.Editor
         private Vector2 _targetBranchScroll;
         private GitHubPreflightSummary _githubPreflight = GitHubPreflightSummary.Unknown();
         private Task<MergeContextProbeResult> _mergeContextTask;
+        private MergeContextProbeResult _cachedMergeContextProbe;
+        private string _mergeContextProbeKey = "";
+        private string _cachedMergeContextProbeKey = "";
+        private DateTime _cachedMergeContextProbeUtc;
         private bool _writeBackToMain;
         private bool _confirmWriteMain;
         private bool _confirmSeedApply;
@@ -984,6 +989,20 @@ namespace ConfigSheetForge.Unity.Editor
             _cliPath = EditorGUILayout.TextField(new GUIContent("CLI", "CLI 可执行文件或绝对路径；默认会先看项目配置声明的环境变量。"), _cliPath);
             _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
             DrawReadonlyRow("CLI 来源", _cliInvocation.CanLaunch ? _cliInvocation.SourceDescription : "未找到：" + _cliInvocation.SourceDescription, "CLI 来自环境变量、源码 checkout、PATH 或窗口 CLI 字段。");
+            var larkCli = ConfigSheetForgeEditorUtility.ResolveLarkCliForDisplay(_projectConfig);
+            DrawReadonlyRow("lark-cli", larkCli.Found ? larkCli.DisplayPath : "未找到", "用于读取飞书 Base / Sheet。Unity 子进程会补齐 npm global PATH。来源：" + larkCli.Source);
+            DrawReadonlyRow("lark-cli 环境变量", FirstNonEmpty(_projectConfig.LarkCliEnvironmentVariable, "CONFIG_SHEET_FORGE_LARK_CLI"), "可设置该变量或 toolkit.larkCliPath 指向 lark-cli。");
+            DrawWrappedReadonlyBlock("Unity 子进程 PATH", ConfigSheetForgeEditorUtility.DescribeUnityPathForDiagnostics(), "已经补齐 npm global bin 的 PATH；用于 adapter、apply-contract 和 lark-cli。");
+            if (_projectConfig.AllowUserFallback)
+            {
+                EditorGUILayout.HelpBox(_projectConfig.AllowUserFallbackForHardGate
+                    ? "项目允许 user fallback，并声明可用于 hard gate。请确认这是项目治理策略。"
+                    : "项目允许 user fallback，但默认不应把 user 身份结果当作 CI hard gate 通过依据。", MessageType.Warning);
+            }
+            else
+            {
+                EditorGUILayout.LabelField("飞书身份策略：strict bot，PR hard gate / sync apply / seed apply 不会静默切换到 user。", EditorStyles.wordWrappedMiniLabel);
+            }
             DrawReadonlyRow("目标分支默认值", FirstNonEmpty(_projectConfig.DefaultTargetBranch, "main"), "合并页默认 target branch。");
             DrawReadonlyRow("GitHub repo", FirstNonEmpty(_projectConfig.GithubRepository, _githubRepository, "未声明/待从 remote 推导"), "用于 PR 自动识别。");
             DrawReadonlyRow("PR 自动识别", _projectConfig.AllowPrAutoDetect ? "启用" : "关闭", "allowPrAutoDetect。");
@@ -3210,7 +3229,7 @@ namespace ConfigSheetForge.Unity.Editor
         private void RefreshReadonlyStatus()
         {
             var projectRoot = FindProjectRoot();
-            _currentGitBranch = TryRunReadOnlyGit("branch", "--show-current");
+            _currentGitBranch = TryReadGitBranch(projectRoot);
             _projectConfig = ConfigSheetForgeEditorUtility.LoadProjectConfigSummary(projectRoot, _currentGitBranch);
             EnsureNewTableDefaults();
             _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
@@ -3241,25 +3260,42 @@ namespace ConfigSheetForge.Unity.Editor
 
             _githubRepository = FirstNonEmpty(_projectConfig.GithubRepository, TryReadGithubRepository(projectRoot));
             _allowPrAutoDetect = _projectConfig.AllowPrAutoDetect && !_manualTargetBranchOverride;
-            _githubPreflight = ProbeGitHubPreflight(projectRoot, _githubRepository, _allowPrAutoDetect, _projectConfig.GithubInstallHelpUrl);
             if (_manualTargetBranchOverride)
             {
                 _githubPreflight.Status = "GitHub PR 识别：已手动覆盖目标分支";
                 _githubPreflight.NextStep = "当前使用手动目标分支；如需跟随 PR base，请点“恢复 PR 自动识别”。";
             }
-            _targetBranchOptions = ReadRemoteBranchOptions(projectRoot, !string.IsNullOrWhiteSpace(_prNumber) ? _targetBranch : "", _defaultTargetBranch, _targetBranch);
+            else if (_cachedMergeContextProbe == null)
+            {
+                _githubPreflight = GitHubPreflightSummary.Pending();
+            }
+
+            if (_targetBranchOptions.Count == 0)
+            {
+                _targetBranchOptions = BuildRemoteBranchOptionsFromRefs(projectRoot, !string.IsNullOrWhiteSpace(_prNumber) ? _targetBranch : "", _defaultTargetBranch, _targetBranch);
+            }
 
             _mergeBase = "正在计算";
             _mergeContextStatus = "已按当前分支和目标分支推导合并上下文；不需要手动选择 base/ours/theirs 文件。";
-            if (_mergeContextTask == null)
+            var probeKey = BuildMergeContextProbeKey(projectRoot, _mergeSourceBranch, _targetBranch, _allowPrAutoDetect, _githubRepository, _manualTargetBranchOverride);
+            if (TryApplyCachedMergeContextProbe(probeKey))
+            {
+                return;
+            }
+
+            if (_mergeContextTask == null || !string.Equals(_mergeContextProbeKey, probeKey, StringComparison.Ordinal))
             {
                 var source = _mergeSourceBranch;
                 var target = _targetBranch;
                 var allowPr = _allowPrAutoDetect;
-                _mergeContextTask = Task.Run(() => ProbeMergeContext(projectRoot, source, target, allowPr));
+                var repository = _githubRepository;
+                var defaultTarget = _defaultTargetBranch;
+                var installHelpUrl = _projectConfig.GithubInstallHelpUrl;
+                _mergeContextProbeKey = probeKey;
+                _mergeContextTask = Task.Run(() => ProbeMergeContext(projectRoot, source, target, allowPr, repository, defaultTarget, installHelpUrl));
                 _mergeContextStatus = allowPr
-                    ? "正在尝试识别当前分支的 GitHub PR 并计算 merge-base；gh 不可用时会使用目标分支 fallback。"
-                    : "正在按目标分支计算 merge-base。";
+                    ? "已开始后台识别 GitHub PR、目标分支列表和 merge-base；gh 不可用时会使用目标分支 fallback。"
+                    : "已开始后台读取目标分支列表并计算 merge-base。";
             }
         }
 
@@ -3273,23 +3309,10 @@ namespace ConfigSheetForge.Unity.Editor
             try
             {
                 var result = _mergeContextTask.Result;
-                if (result != null && result.Found)
-                {
-                    _manualTargetBranchOverride = false;
-                    _prNumber = result.Number;
-                    _prUrl = result.Url;
-                    _targetBranch = FirstNonEmpty(result.BaseBranch, _targetBranch, _defaultTargetBranch);
-                    _mergeBase = FirstNonEmpty(result.MergeBase, "未计算到共同祖先");
-                    UpdateMergeInputPaths();
-                    UpdateMergeWorkspaceContext();
-                    _targetBranchOptions = ReadRemoteBranchOptions(FindProjectRoot(), _targetBranch, _defaultTargetBranch, _targetBranch);
-                    _mergeContextStatus = "已识别 GitHub PR #" + _prNumber + "，目标分支来自 PR：" + _targetBranch + "。";
-                }
-                else if (result != null && !string.IsNullOrWhiteSpace(result.Message))
-                {
-                    _mergeBase = FirstNonEmpty(result.MergeBase, "未计算到共同祖先");
-                    _mergeContextStatus = result.Message + "；使用目标分支 fallback。";
-                }
+                _cachedMergeContextProbe = result;
+                _cachedMergeContextProbeKey = _mergeContextProbeKey;
+                _cachedMergeContextProbeUtc = DateTime.UtcNow;
+                ApplyMergeContextProbeResult(result);
             }
             catch (Exception ex)
             {
@@ -3302,6 +3325,68 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return true;
+        }
+
+        private bool TryApplyCachedMergeContextProbe(string probeKey)
+        {
+            if (_cachedMergeContextProbe == null ||
+                string.IsNullOrWhiteSpace(probeKey) ||
+                !string.Equals(_cachedMergeContextProbeKey, probeKey, StringComparison.Ordinal) ||
+                (DateTime.UtcNow - _cachedMergeContextProbeUtc).TotalSeconds > MergeProbeCacheSeconds)
+            {
+                return false;
+            }
+
+            ApplyMergeContextProbeResult(_cachedMergeContextProbe);
+            return true;
+        }
+
+        private void ApplyMergeContextProbeResult(MergeContextProbeResult result)
+        {
+            if (result == null)
+            {
+                return;
+            }
+
+            if (result.Preflight != null)
+            {
+                _githubPreflight = result.Preflight;
+            }
+
+            if (result.BranchOptions != null && result.BranchOptions.Count > 0)
+            {
+                _targetBranchOptions = result.BranchOptions;
+            }
+
+            if (result.Found)
+            {
+                _manualTargetBranchOverride = false;
+                _prNumber = result.Number;
+                _prUrl = result.Url;
+                _targetBranch = FirstNonEmpty(result.BaseBranch, _targetBranch, _defaultTargetBranch);
+                _mergeBase = FirstNonEmpty(result.MergeBase, "未计算到共同祖先");
+                UpdateMergeInputPaths();
+                UpdateMergeWorkspaceContext();
+                _mergeContextStatus = "已识别 GitHub PR #" + _prNumber + "，目标分支来自 PR：" + _targetBranch + "。";
+            }
+            else if (!string.IsNullOrWhiteSpace(result.Message))
+            {
+                _mergeBase = FirstNonEmpty(result.MergeBase, "未计算到共同祖先");
+                _mergeContextStatus = result.Message + "；使用目标分支 fallback。";
+            }
+        }
+
+        private static string BuildMergeContextProbeKey(string projectRoot, string sourceBranch, string targetBranch, bool allowPrAutoDetect, string repository, bool manualOverride)
+        {
+            return string.Join("\n", new[]
+            {
+                projectRoot ?? "",
+                sourceBranch ?? "",
+                targetBranch ?? "",
+                allowPrAutoDetect ? "pr" : "no-pr",
+                repository ?? "",
+                manualOverride ? "manual" : "auto"
+            });
         }
 
         private void UpdateMergeInputPaths()
@@ -4049,6 +4134,27 @@ namespace ConfigSheetForge.Unity.Editor
             AddOrUpdateBranchOption(branches, prBaseBranch, "", "GitHub PR");
             AddOrUpdateBranchOption(branches, defaultTargetBranch, "", "project default");
             AddOrUpdateBranchOption(branches, selectedBranch, "", "current selection");
+            MarkAndSortBranchOptions(branches, prBaseBranch, defaultTargetBranch);
+            return branches;
+        }
+
+        private static List<TargetBranchOption> BuildRemoteBranchOptionsFromRefs(string projectRoot, string prBaseBranch, string defaultTargetBranch, string selectedBranch)
+        {
+            var branches = new List<TargetBranchOption>();
+            foreach (var name in ReadRemoteBranchNamesFromRefs(projectRoot))
+            {
+                AddOrUpdateBranchOption(branches, name, "", "refs");
+            }
+
+            AddOrUpdateBranchOption(branches, prBaseBranch, "", "GitHub PR");
+            AddOrUpdateBranchOption(branches, defaultTargetBranch, "", "project default");
+            AddOrUpdateBranchOption(branches, selectedBranch, "", "current selection");
+            MarkAndSortBranchOptions(branches, prBaseBranch, defaultTargetBranch);
+            return branches;
+        }
+
+        private static void MarkAndSortBranchOptions(List<TargetBranchOption> branches, string prBaseBranch, string defaultTargetBranch)
+        {
             for (var i = 0; i < branches.Count; i++)
             {
                 branches[i].IsPrBase = !string.IsNullOrWhiteSpace(prBaseBranch) && string.Equals(branches[i].Name, prBaseBranch, StringComparison.OrdinalIgnoreCase);
@@ -4056,7 +4162,6 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             branches.Sort(CompareTargetBranchOptions);
-            return branches;
         }
 
         private static List<string> ReadRemoteBranchNamesFromRefs(string projectRoot)
@@ -4226,9 +4331,11 @@ namespace ConfigSheetForge.Unity.Editor
             return summary;
         }
 
-        private static MergeContextProbeResult ProbeMergeContext(string projectRoot, string sourceBranch, string targetBranch, bool allowPrAutoDetect)
+        private static MergeContextProbeResult ProbeMergeContext(string projectRoot, string sourceBranch, string targetBranch, bool allowPrAutoDetect, string repository, string defaultTargetBranch, string installHelpUrl)
         {
             var result = new MergeContextProbeResult();
+            result.Preflight = ProbeGitHubPreflight(projectRoot, repository, allowPrAutoDetect, installHelpUrl);
+            result.BranchOptions = ReadRemoteBranchOptions(projectRoot, "", defaultTargetBranch, targetBranch);
             if (allowPrAutoDetect)
             {
                 var gh = TryRunTool(projectRoot, "gh", new[] { "pr", "view", "--json", "number,url,baseRefName,headRefName" }, 4500);
@@ -4240,6 +4347,7 @@ namespace ConfigSheetForge.Unity.Editor
                     result.HeadBranch = ExtractJsonString(gh.Stdout, "headRefName");
                     result.Found = !string.IsNullOrWhiteSpace(result.Number) || !string.IsNullOrWhiteSpace(result.Url);
                     targetBranch = FirstNonEmpty(result.BaseBranch, targetBranch);
+                    result.BranchOptions = ReadRemoteBranchOptions(projectRoot, result.BaseBranch, defaultTargetBranch, targetBranch);
                 }
                 else
                 {
@@ -4643,6 +4751,28 @@ namespace ConfigSheetForge.Unity.Editor
         public static GateFailureView FromMessage(string message)
         {
             message = message ?? "";
+            var mentionsLarkCli = ContainsAny(message, "lark-cli", "CONFIG_SHEET_FORGE_LARK_CLI", "LARK_CLI_PATH", "ApplicationName='lark-cli'");
+            var looksMissingTool = ContainsAny(message, "没有找到", "找不到", "无法运行", "not found", "not recognized", "No such file", "The system cannot find", "系统找不到");
+            if (mentionsLarkCli && looksMissingTool)
+            {
+                return new GateFailureView
+                {
+                    Reason = "本机没有找到 lark-cli，无法用 bot 身份读取飞书注册中心",
+                    NextStep = "请重启 Unity，或配置 toolkit.larkCliPath / CONFIG_SHEET_FORGE_LARK_CLI；也可以确认 %APPDATA%\\npm 下已安装 lark-cli。",
+                    Priority = 5
+                };
+            }
+
+            if (ContainsAny(message, "doctor failed", "lark-cli doctor", "doctor 失败"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "lark-cli doctor 未通过",
+                    NextStep = "请在终端运行 lark-cli doctor 和 lark-cli auth status，按提示修复登录、token 或版本问题后重试。",
+                    Priority = 6
+                };
+            }
+
             if (ContainsAny(message, "MergeReviews", "merge review", "合并审查", "合并预览"))
             {
                 return new GateFailureView
@@ -4673,13 +4803,33 @@ namespace ConfigSheetForge.Unity.Editor
                 };
             }
 
-            if (ContainsAny(message, "permission", "forbidden", "权限", "scope", "bot"))
+            if (ContainsAny(message, "missing_scope", "missing scope", "scope", "scopes", "缺少 scope"))
             {
                 return new GateFailureView
                 {
-                    Reason = "权限不足，无法读取在线注册中心或表格",
-                    NextStep = "请确认 bot / lark-cli 权限和 Base、Wiki、Sheet 资源授权后重新运行 PR 检查。",
+                    Reason = "bot 缺少读取飞书数据所需的 scope",
+                    NextStep = "请让管理员给飞书应用补充 Base/Sheet/Wiki 相关 scope，并重新运行 lark-cli doctor 后再跑 PR 检查。",
                     Priority = 40
+                };
+            }
+
+            if (ContainsAny(message, "user fallback", "allow-user-fallback", "严格模式", "strict bot"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "当前是 strict bot 模式，不会用 user 身份绕过 hard gate",
+                    NextStep = "请修复 bot 的 scope 或资源授权；如只想本地诊断，可在高级诊断里用 user 身份单独排查，但结果不能直接作为 CI gate 通过依据。",
+                    Priority = 42
+                };
+            }
+
+            if (ContainsAny(message, "permission", "forbidden", "权限", "resource", "not shared", "未共享", "无权", "access denied"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "bot 有命令可用，但 Base/Sheet/Wiki 资源没有授权给 bot",
+                    NextStep = "请把在线注册中心、Wiki 节点或 Sheet 共享给飞书应用/bot，然后重新运行 PR 检查。",
+                    Priority = 45
                 };
             }
 
@@ -4757,6 +4907,15 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 failures.Add(GateFailureView.FromMessage(failure));
             }
+            if (ExtractBoolean(json, "canReadRegistry") == false)
+            {
+                AddFailureIfMissing(failures, ExtractString(json, "registryMessage"));
+            }
+
+            if (ExtractBoolean(json, "canReadSheets") == false)
+            {
+                AddFailureIfMissing(failures, ExtractString(json, "sheetsMessage"));
+            }
             failures.Sort((left, right) => left.Priority.CompareTo(right.Priority));
 
             var builder = new StringBuilder();
@@ -4787,6 +4946,25 @@ namespace ConfigSheetForge.Unity.Editor
             };
             view.Failures.AddRange(failures);
             return view;
+        }
+
+        private static void AddFailureIfMissing(List<GateFailureView> failures, string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return;
+            }
+
+            var view = GateFailureView.FromMessage(message);
+            for (var i = 0; i < failures.Count; i++)
+            {
+                if (string.Equals(failures[i].Reason, view.Reason, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
+            failures.Add(view);
         }
 
         private static string BuildShortText(bool? passed, List<GateFailureView> failures)
@@ -4873,6 +5051,36 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return values;
+        }
+
+        private static string ExtractString(string json, string propertyName)
+        {
+            var property = "\"" + propertyName + "\"";
+            var propertyIndex = json.IndexOf(property, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return "";
+            }
+
+            var colon = json.IndexOf(':', propertyIndex + property.Length);
+            if (colon < 0)
+            {
+                return "";
+            }
+
+            var quote = colon + 1;
+            while (quote < json.Length && char.IsWhiteSpace(json[quote]))
+            {
+                quote++;
+            }
+
+            if (quote >= json.Length || json[quote] != '"')
+            {
+                return "";
+            }
+
+            int stringEnd;
+            return ParseJsonString(json, quote, out stringEnd);
         }
 
         private static int FindArrayEnd(string json, int start)
@@ -5038,7 +5246,8 @@ namespace ConfigSheetForge.Unity.Editor
                     arguments,
                     workingDirectory,
                     commandLine,
-                    "正在运行 " + operation).ConfigureAwait(false);
+                    "正在运行 " + operation,
+                    projectConfig).ConfigureAwait(false);
                 self.Success = result.ExitCode == 0;
                 self.SetStatus(self.Success ? "完成" : "失败");
                 self.FinalSummary = BuildSummaryFromResult(
@@ -5089,7 +5298,8 @@ namespace ConfigSheetForge.Unity.Editor
                     adapterArguments,
                     projectRoot,
                     adapterCommandLine,
-                    "正在生成 contract").ConfigureAwait(false);
+                    "正在生成 contract",
+                    projectConfig).ConfigureAwait(false);
                 if (adapterResult.ExitCode != 0)
                 {
                     self.Success = false;
@@ -5114,7 +5324,8 @@ namespace ConfigSheetForge.Unity.Editor
                     cliArguments,
                     projectRoot,
                     cliCommandLine,
-                    "正在运行 apply-contract").ConfigureAwait(false);
+                    "正在运行 apply-contract",
+                    projectConfig).ConfigureAwait(false);
 
                 var resultJson = File.Exists(resultPath) ? File.ReadAllText(resultPath) : "";
                 if (!string.IsNullOrWhiteSpace(resultJson))
@@ -5251,7 +5462,8 @@ namespace ConfigSheetForge.Unity.Editor
             string[] arguments,
             string workingDirectory,
             string commandLine,
-            string runningStatus)
+            string runningStatus,
+            ProjectConfigSummary projectConfig)
         {
             _cancellation.Token.ThrowIfCancellationRequested();
             SetStatus(runningStatus);
@@ -5276,6 +5488,7 @@ namespace ConfigSheetForge.Unity.Editor
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8
             };
+            ConfigSheetForgeEditorUtility.ConfigureToolProcessEnvironment(startInfo, projectConfig);
 
             using (var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true })
             {
@@ -5873,10 +6086,21 @@ namespace ConfigSheetForge.Unity.Editor
                 NextStep = "刷新合并上下文后会检查 git、gh 和当前仓库 remote。"
             };
         }
+
+        public static GitHubPreflightSummary Pending()
+        {
+            return new GitHubPreflightSummary
+            {
+                Status = "GitHub PR 识别：后台检查中",
+                NextStep = "可以继续切换页面或编辑；检查完成后会自动更新目标分支来源。"
+            };
+        }
     }
 
     internal sealed class MergeContextProbeResult
     {
+        public GitHubPreflightSummary Preflight { get; set; } = GitHubPreflightSummary.Unknown();
+        public List<TargetBranchOption> BranchOptions { get; set; } = new List<TargetBranchOption>();
         public bool Found { get; set; }
         public string Number { get; set; } = "";
         public string Url { get; set; } = "";

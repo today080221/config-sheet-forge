@@ -1,7 +1,7 @@
 {
   "name": "dev.config-sheet-forge.unity",
   "displayName": "Config Sheet Forge",
-  "version": "0.4.13",
+  "version": "0.4.14",
   "unity": "2021.3",
   "description": "Unity Editor tooling for Config Sheet Forge. Shares the same semantic workbook core used by the cross-platform CLI.",
   "license": "Apache-2.0",

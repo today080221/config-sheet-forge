@@ -223,6 +223,12 @@ foreach ($requiredV413Marker in @("DrawTargetBranchPicker", "GitHub PR 识别", 
   }
 }
 
+foreach ($requiredV414Marker in @("ConfigureToolProcessEnvironment", "CONFIG_SHEET_FORGE_LARK_CLI", "源码 fallback，首次启动较慢", "本机没有找到 lark-cli", "BuildRemoteBranchOptionsFromRefs")) {
+  if ($editorSources -notlike "*$requiredV414Marker*") {
+    throw "Unity v0.4.14 resolver/nonblocking source marker is missing: $requiredV414Marker"
+  }
+}
+
 if ($window -like "*EditorGUILayout.Popup(selected, _targetBranchOptions.ToArray())*") {
   throw "Target branch selector must not regress to a non-searchable Popup."
 }
@@ -268,6 +274,25 @@ foreach ($retiredLayoutText in @("GUILayout.MaxHeight(contentHeight)", "return 5
 
 if ($editorSources -notlike "*new UTF8Encoding(false)*") {
   throw "Unity lifecycle inputs JSON must be written as UTF-8 without BOM."
+}
+
+$refreshMergeMatch = [regex]::Match($window, "private void RefreshMergeContext\(\)(?<body>[\s\S]*?)\r?\n        private bool ApplyMergeContextProbeIfDone")
+if (-not $refreshMergeMatch.Success) {
+  throw "Could not inspect RefreshMergeContext implementation."
+}
+$refreshMergeBody = $refreshMergeMatch.Groups["body"].Value
+foreach ($forbiddenRefreshCall in @("TryRunTool(", "ProbeGitHubPreflight(", "ReadRemoteBranchOptions(")) {
+  if ($refreshMergeBody -like "*$forbiddenRefreshCall*") {
+    throw "RefreshMergeContext must not synchronously launch external tools on the IMGUI thread: $forbiddenRefreshCall"
+  }
+}
+
+$applyMergeMatch = [regex]::Match($window, "private bool ApplyMergeContextProbeIfDone\(\)(?<body>[\s\S]*?)\r?\n        private bool TryApplyCachedMergeContextProbe")
+if (-not $applyMergeMatch.Success) {
+  throw "Could not inspect ApplyMergeContextProbeIfDone implementation."
+}
+if ($applyMergeMatch.Groups["body"].Value -like "*ReadRemoteBranchOptions(*") {
+  throw "ApplyMergeContextProbeIfDone must use the background probe result instead of synchronously rereading remote branches."
 }
 
 Invoke-UnityEditorCompileSmoke

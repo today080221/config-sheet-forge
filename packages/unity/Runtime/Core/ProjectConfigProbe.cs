@@ -36,6 +36,10 @@ namespace ConfigSheetForge.Core
         public string CoreCliEnvironmentVariable { get; set; } = "";
         public string SourceCheckoutEnvironmentVariable { get; set; } = "";
         public string SourceCliProjectRelativePath { get; set; } = "";
+        public string LarkCliPath { get; set; } = "";
+        public string LarkCliEnvironmentVariable { get; set; } = "";
+        public bool AllowUserFallback { get; set; }
+        public bool AllowUserFallbackForHardGate { get; set; }
         public string DefaultTargetBranch { get; set; } = "";
         public string GithubRepository { get; set; } = "";
         public bool AllowPrAutoDetect { get; set; } = true;
@@ -247,6 +251,21 @@ namespace ConfigSheetForge.Core
                 GetString(root, "sourceCliProjectRelativePath", "cliProjectRelativePath"),
                 FindStringDeep(root, "sourceCliProjectRelativePath", "cliProjectRelativePath"),
                 Path.Combine("src", "cli", "ConfigSheetForge.Cli"));
+            summary.LarkCliPath = FirstNonEmpty(
+                GetString(root, "larkCliPath", "larkCliExecutable"),
+                GetString(toolkit, "larkCliPath", "larkCliExecutable"),
+                FindStringDeep(root, "larkCliPath", "larkCliExecutable"));
+            summary.LarkCliEnvironmentVariable = FirstNonEmpty(
+                GetString(root, "larkCliEnvironmentVariable", "larkCliEnv"),
+                GetString(toolkit, "larkCliEnvironmentVariable", "larkCliEnv"),
+                FindStringDeep(root, "larkCliEnvironmentVariable", "larkCliEnv"),
+                "CONFIG_SHEET_FORGE_LARK_CLI");
+            summary.AllowUserFallback = GetBoolean(root, "allowUserFallback", "larkAllowUserFallback") ??
+                                        GetBoolean(toolkit, "allowUserFallback", "larkAllowUserFallback") ??
+                                        false;
+            summary.AllowUserFallbackForHardGate = GetBoolean(root, "allowUserFallbackForHardGate", "allowUserFallbackForGate") ??
+                                                   GetBoolean(toolkit, "allowUserFallbackForHardGate", "allowUserFallbackForGate") ??
+                                                   false;
             summary.DefaultTargetBranch = FirstNonEmpty(
                 GetString(root, "defaultTargetBranch", "targetBranch", "mainBranch"),
                 GetString(toolkit, "defaultTargetBranch", "targetBranch", "mainBranch"),

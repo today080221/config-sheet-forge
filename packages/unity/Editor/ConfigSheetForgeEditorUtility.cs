@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using ConfigSheetForge.Core;
@@ -90,7 +91,7 @@ namespace ConfigSheetForge.Unity.Editor
                 return executable;
             }
 
-            var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+            var path = BuildAugmentedToolPath(Environment.GetEnvironmentVariable("PATH") ?? "");
             var extensions = Application.platform == RuntimePlatform.WindowsEditor
                 ? (Environment.GetEnvironmentVariable("PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").Split(';')
                 : new[] { "" };
@@ -130,6 +131,12 @@ namespace ConfigSheetForge.Unity.Editor
                 return ConfigSheetForgeCliInvocation.ForExecutable(cliFieldValue, "窗口 CLI 字段", "");
             }
 
+            var pathCli = ConfigSheetForgeCliInvocation.ForExecutable(FirstNonEmpty(cliFieldValue, "config-sheet-forge"), "PATH 或窗口 CLI 字段", "");
+            if (pathCli.CanLaunch)
+            {
+                return pathCli;
+            }
+
             var checkoutEnvName = FirstNonEmpty(summary.SourceCheckoutEnvironmentVariable, "CONFIG_SHEET_FORGE_ROOT");
             var checkoutRoot = Environment.GetEnvironmentVariable(checkoutEnvName);
             if (!string.IsNullOrWhiteSpace(checkoutRoot))
@@ -143,7 +150,7 @@ namespace ConfigSheetForge.Unity.Editor
                     dotnet.PrefixArguments.Add("--project");
                     dotnet.PrefixArguments.Add(projectPath);
                     dotnet.PrefixArguments.Add("--");
-                    dotnet.SourceDescription = "源码 checkout: " + checkoutEnvName + " -> " + projectPath;
+                    dotnet.SourceDescription = "源码 fallback，首次启动较慢: " + checkoutEnvName + " -> " + projectPath;
                     return dotnet;
                 }
 
@@ -156,7 +163,194 @@ namespace ConfigSheetForge.Unity.Editor
                     reason);
             }
 
-            return ConfigSheetForgeCliInvocation.ForExecutable(FirstNonEmpty(cliFieldValue, "config-sheet-forge"), "PATH 或窗口 CLI 字段", "");
+            return pathCli;
+        }
+
+        public static LarkCliEditorResolution ResolveLarkCliForDisplay(ProjectConfigSummary summary)
+        {
+            summary = summary ?? new ProjectConfigSummary();
+            var envName = FirstNonEmpty(summary.LarkCliEnvironmentVariable, "CONFIG_SHEET_FORGE_LARK_CLI");
+            var configured = FirstNonEmpty(
+                summary.LarkCliPath,
+                Environment.GetEnvironmentVariable(envName),
+                Environment.GetEnvironmentVariable("CONFIG_SHEET_FORGE_LARK_CLI"),
+                Environment.GetEnvironmentVariable("LARK_CLI_PATH"));
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                var resolved = ResolveExecutable(configured);
+                return new LarkCliEditorResolution
+                {
+                    DisplayPath = resolved,
+                    Source = string.Equals(configured, summary.LarkCliPath, StringComparison.OrdinalIgnoreCase)
+                        ? "项目配置 toolkit.larkCliPath"
+                        : "环境变量",
+                    Found = File.Exists(resolved) || !string.Equals(resolved, configured, StringComparison.OrdinalIgnoreCase)
+                };
+            }
+
+            foreach (var candidate in BuildLarkCliCandidates())
+            {
+                if (File.Exists(candidate.Path))
+                {
+                    return new LarkCliEditorResolution
+                    {
+                        DisplayPath = candidate.Path,
+                        Source = candidate.Source,
+                        Found = true
+                    };
+                }
+            }
+
+            return new LarkCliEditorResolution
+            {
+                DisplayPath = "未找到 lark-cli",
+                Source = "PATH / %APPDATA%\\npm / node_modules fallback",
+                Found = false
+            };
+        }
+
+        public static void ConfigureToolProcessEnvironment(ProcessStartInfo startInfo, ProjectConfigSummary summary)
+        {
+            if (startInfo == null)
+            {
+                return;
+            }
+
+            summary = summary ?? new ProjectConfigSummary();
+            var currentPath = "";
+            try
+            {
+                currentPath = startInfo.Environment.ContainsKey("PATH")
+                    ? startInfo.Environment["PATH"]
+                    : Environment.GetEnvironmentVariable("PATH") ?? "";
+            }
+            catch
+            {
+                currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
+            }
+
+            startInfo.Environment["PATH"] = BuildAugmentedToolPath(currentPath);
+
+            var envName = FirstNonEmpty(summary.LarkCliEnvironmentVariable, "CONFIG_SHEET_FORGE_LARK_CLI");
+            var explicitLarkCli = FirstNonEmpty(
+                summary.LarkCliPath,
+                Environment.GetEnvironmentVariable(envName),
+                Environment.GetEnvironmentVariable("CONFIG_SHEET_FORGE_LARK_CLI"),
+                Environment.GetEnvironmentVariable("LARK_CLI_PATH"));
+            if (!string.IsNullOrWhiteSpace(explicitLarkCli))
+            {
+                startInfo.Environment[envName] = explicitLarkCli;
+                startInfo.Environment["CONFIG_SHEET_FORGE_LARK_CLI"] = explicitLarkCli;
+                if (!startInfo.Environment.ContainsKey("LARK_CLI_PATH"))
+                {
+                    startInfo.Environment["LARK_CLI_PATH"] = explicitLarkCli;
+                }
+            }
+        }
+
+        public static string BuildAugmentedToolPath(string currentPath)
+        {
+            var parts = new List<string>();
+            foreach (var part in (currentPath ?? "").Split(Path.PathSeparator))
+            {
+                AddPathPart(parts, part);
+            }
+
+            foreach (var directory in KnownNpmBinDirectories())
+            {
+                AddPathPart(parts, directory);
+            }
+
+            return string.Join(Path.PathSeparator.ToString(), parts.ToArray());
+        }
+
+        public static string DescribeUnityPathForDiagnostics()
+        {
+            return BuildAugmentedToolPath(Environment.GetEnvironmentVariable("PATH") ?? "");
+        }
+
+        private static IEnumerable<LarkCliCandidate> BuildLarkCliCandidates()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var directory in BuildAugmentedToolPath(Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+            {
+                var clean = (directory ?? "").Trim().Trim('"');
+                if (string.IsNullOrWhiteSpace(clean))
+                {
+                    continue;
+                }
+
+                foreach (var extension in LarkCliExtensions())
+                {
+                    var candidate = Path.Combine(clean, "lark-cli" + extension);
+                    if (seen.Add(candidate))
+                    {
+                        yield return new LarkCliCandidate { Path = candidate, Source = clean };
+                    }
+                }
+            }
+
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            if (!string.IsNullOrWhiteSpace(appData))
+            {
+                var runJs = Path.Combine(appData, "npm", "node_modules", "@larksuite", "cli", "scripts", "run.js");
+                if (seen.Add(runJs))
+                {
+                    yield return new LarkCliCandidate { Path = runJs, Source = "%APPDATA%\\npm node_modules fallback" };
+                }
+            }
+        }
+
+        private static IEnumerable<string> KnownNpmBinDirectories()
+        {
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            if (!string.IsNullOrWhiteSpace(appData))
+            {
+                yield return Path.Combine(appData, "npm");
+            }
+
+            var npmPrefix = Environment.GetEnvironmentVariable("NPM_CONFIG_PREFIX");
+            if (!string.IsNullOrWhiteSpace(npmPrefix))
+            {
+                yield return npmPrefix;
+                yield return Path.Combine(npmPrefix, "bin");
+            }
+        }
+
+        private static IEnumerable<string> LarkCliExtensions()
+        {
+            if (Application.platform == RuntimePlatform.WindowsEditor)
+            {
+                yield return ".ps1";
+                yield return ".cmd";
+                yield return ".exe";
+                yield return ".bat";
+                yield return ".com";
+                yield return "";
+            }
+            else
+            {
+                yield return "";
+            }
+        }
+
+        private static void AddPathPart(List<string> parts, string part)
+        {
+            var clean = (part ?? "").Trim().Trim('"');
+            if (string.IsNullOrWhiteSpace(clean))
+            {
+                return;
+            }
+
+            for (var i = 0; i < parts.Count; i++)
+            {
+                if (string.Equals(parts[i], clean, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
+            parts.Add(clean);
         }
 
         public static string FormatCliLaunchFailure(string command, string reason)
@@ -406,6 +600,19 @@ namespace ConfigSheetForge.Unity.Editor
 
             return "";
         }
+    }
+
+    public sealed class LarkCliEditorResolution
+    {
+        public bool Found { get; set; }
+        public string DisplayPath { get; set; } = "";
+        public string Source { get; set; } = "";
+    }
+
+    internal sealed class LarkCliCandidate
+    {
+        public string Path { get; set; } = "";
+        public string Source { get; set; } = "";
     }
 
     public sealed class ConfigSheetForgeCliInvocation

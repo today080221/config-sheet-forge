@@ -36,6 +36,7 @@ public sealed class LarkCliGateway
         {
             startInfo.WorkingDirectory = workingDirectory;
         }
+        LarkCliDiscovery.ConfigureProcessEnvironment(startInfo);
 
         foreach (var arg in resolved.PrefixArguments)
         {
@@ -71,6 +72,7 @@ public sealed class LarkCliGateway
 public static class LarkCliDiscovery
 {
     private static readonly string[] WindowsExecutableExtensions = { ".ps1", ".exe", ".cmd", ".bat", ".com" };
+    private const string ConfigSheetForgeLarkCliEnv = "CONFIG_SHEET_FORGE_LARK_CLI";
 
     public static LarkCliResolvedCommand Resolve(string? requestedExecutable = null)
     {
@@ -87,6 +89,40 @@ public static class LarkCliDiscovery
         return new LarkCliResolvedCommand(requested, Array.Empty<string>(), requested, "unresolved");
     }
 
+    public static void ConfigureProcessEnvironment(ProcessStartInfo startInfo)
+    {
+        var currentPath = startInfo.Environment.TryGetValue("PATH", out var processPath)
+            ? processPath
+            : Environment.GetEnvironmentVariable("PATH") ?? "";
+        startInfo.Environment["PATH"] = BuildAugmentedPath(currentPath);
+
+        var explicitPath = Environment.GetEnvironmentVariable(ConfigSheetForgeLarkCliEnv);
+        if (!string.IsNullOrWhiteSpace(explicitPath))
+        {
+            startInfo.Environment[ConfigSheetForgeLarkCliEnv] = explicitPath;
+            if (!startInfo.Environment.ContainsKey("LARK_CLI_PATH"))
+            {
+                startInfo.Environment["LARK_CLI_PATH"] = explicitPath;
+            }
+        }
+    }
+
+    public static string BuildAugmentedPath(string? currentPath)
+    {
+        var parts = new List<string>();
+        foreach (var part in (currentPath ?? "").Split(Path.PathSeparator))
+        {
+            AddPathPart(parts, part);
+        }
+
+        foreach (var directory in KnownNpmBinDirectories())
+        {
+            AddPathPart(parts, directory);
+        }
+
+        return string.Join(Path.PathSeparator.ToString(), parts);
+    }
+
     private static IEnumerable<LarkCliResolvedCommand> BuildCandidateCommands(string requested)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -96,6 +132,18 @@ public static class LarkCliDiscovery
             if (seen.Add(candidate.Fingerprint))
             {
                 yield return candidate;
+            }
+        }
+
+        var configSheetForgeEnv = Environment.GetEnvironmentVariable(ConfigSheetForgeLarkCliEnv);
+        if (!string.IsNullOrWhiteSpace(configSheetForgeEnv) && !string.Equals(configSheetForgeEnv.Trim(), requested, StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var candidate in FromExplicitValue(configSheetForgeEnv.Trim(), "env:" + ConfigSheetForgeLarkCliEnv))
+            {
+                if (seen.Add(candidate.Fingerprint))
+                {
+                    yield return candidate;
+                }
             }
         }
 
@@ -154,7 +202,7 @@ public static class LarkCliDiscovery
 
     private static IEnumerable<LarkCliResolvedCommand> FromPath(string command, string source)
     {
-        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        var path = BuildAugmentedPath(Environment.GetEnvironmentVariable("PATH") ?? "");
         foreach (var directory in path.Split(Path.PathSeparator).Select(p => p.Trim().Trim('"')).Where(p => !string.IsNullOrWhiteSpace(p)))
         {
             if (IsWindows())
@@ -206,6 +254,12 @@ public static class LarkCliDiscovery
         if (!string.IsNullOrWhiteSpace(appData))
         {
             yield return Path.Combine(appData, "npm", "node_modules", "@larksuite", "cli", "scripts", "run.js");
+        }
+
+        var npmPrefix = TryRunSimpleCommand("npm", "prefix", "-g");
+        if (!string.IsNullOrWhiteSpace(npmPrefix))
+        {
+            yield return Path.Combine(npmPrefix.Trim(), "node_modules", "@larksuite", "cli", "scripts", "run.js");
         }
 
         var npmRoot = TryRunSimpleCommand("npm", "root", "-g");
@@ -261,7 +315,7 @@ public static class LarkCliDiscovery
             return File.Exists(command) ? command : null;
         }
 
-        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        var path = BuildAugmentedPath(Environment.GetEnvironmentVariable("PATH") ?? "");
         var extensions = IsWindows() ? new[] { ".exe", ".cmd", ".bat", ".com" } : new[] { "" };
         foreach (var directory in path.Split(Path.PathSeparator).Select(p => p.Trim().Trim('"')).Where(p => !string.IsNullOrWhiteSpace(p)))
         {
@@ -331,6 +385,7 @@ public static class LarkCliDiscovery
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8
             };
+            ConfigureProcessEnvironment(startInfo);
 
             foreach (var prefix in command.PrefixArguments)
             {
@@ -369,6 +424,43 @@ public static class LarkCliDiscovery
         {
             return null;
         }
+    }
+
+    private static IEnumerable<string> KnownNpmBinDirectories()
+    {
+        if (!IsWindows())
+        {
+            yield break;
+        }
+
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        if (!string.IsNullOrWhiteSpace(appData))
+        {
+            yield return Path.Combine(appData, "npm");
+        }
+
+        var npmPrefix = Environment.GetEnvironmentVariable("NPM_CONFIG_PREFIX");
+        if (!string.IsNullOrWhiteSpace(npmPrefix))
+        {
+            yield return npmPrefix;
+            yield return Path.Combine(npmPrefix, "bin");
+        }
+    }
+
+    private static void AddPathPart(List<string> parts, string? part)
+    {
+        var clean = (part ?? "").Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(clean))
+        {
+            return;
+        }
+
+        if (parts.Any(existing => string.Equals(existing, clean, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        parts.Add(clean);
     }
 
     private static bool IsBareCommand(string value)

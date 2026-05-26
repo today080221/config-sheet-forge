@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.14
+
+- Unity 合并页的 GitHub PR preflight 和远端分支读取改为后台 probe + TTL 缓存；打开窗口、切 tab、刷新合并上下文不再在 IMGUI/Repaint 链路同步等待 `git` / `gh`。
+- Unity lifecycle 子进程会补齐 npm global bin 到 `PATH`，并支持 `toolkit.larkCliPath` / `CONFIG_SHEET_FORGE_LARK_CLI` / `LARK_CLI_PATH`，避免 Unity 进程没继承终端 PATH 时找不到 `lark-cli`。
+- Lark provider discovery 新增 `CONFIG_SHEET_FORGE_LARK_CLI`，并在运行 `lark-cli` / `npm` / `node` fallback 时使用增强后的 PATH；Windows 下继续优先识别 npm `.ps1` shim。
+- PR 检查失败文案区分 `lark-cli` 缺失、doctor 失败、bot scope 缺失、资源未共享给 bot、strict bot 不允许 user fallback，不再把“本机没有找到 lark-cli”误报成“权限不足”。
+- 高级诊断显示 Unity 子进程 PATH、最终识别到的 `lark-cli` 来源，以及 strict bot / user fallback 策略，便于主程定位本机环境问题。
+- CLI 在 lark-cli 缺失时输出可操作中文错误，提示设置 `CONFIG_SHEET_FORGE_LARK_CLI` / `LARK_CLI_PATH` 或确认 `%APPDATA%\npm`。
+- Unity package smoke 增加 v0.4.14 源码断言，防止合并页 preflight 回退到 UI 线程同步外部命令，防止 lark-cli resolver/PATH 注入回退。
+
 ## 0.4.13
 
 - 合并页目标分支改为可搜索列表，支持按分支名过滤；识别到 GitHub PR 时主界面固定使用 PR base branch，手动覆盖只放在高级选项。

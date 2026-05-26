@@ -1369,6 +1369,20 @@ public static class Program
         var category = LarkCommandCategory(commandArgs);
         var summary = SanitizeLarkCommand(commandArgs);
         var raw = Trim(result.Stderr + "\n" + result.Stdout);
+        if (LooksLikeMissingLarkCli(result, raw))
+        {
+            var missingMessage = "本机没有找到 lark-cli，无法用 " + identity + " 身份执行飞书操作：" + category +
+                                 "。请重启 Unity，或设置 CONFIG_SHEET_FORGE_LARK_CLI / LARK_CLI_PATH 指向 lark-cli，也可以确认 %APPDATA%\\npm 已在 PATH 中。";
+            var missingDetail = "category=" + category + Environment.NewLine +
+                                "identity=" + identity + Environment.NewLine +
+                                "command=" + summary + Environment.NewLine +
+                                "exitCode=" + result.ExitCode.ToString(CultureInfo.InvariantCulture) + Environment.NewLine +
+                                "resolved=" + result.ResolvedCommand.DisplayPath + Environment.NewLine +
+                                "source=" + result.ResolvedCommand.Source + Environment.NewLine +
+                                "stderr/stdout=" + raw;
+            return new CliException(missingMessage, 1, missingDetail);
+        }
+
         var strict = string.Equals(identity, "bot", StringComparison.OrdinalIgnoreCase) && !allowUserFallback
             ? "当前是 bot 严格模式，不会静默切换到 user。"
             : "当前执行身份：" + identity + "。";
@@ -1383,6 +1397,24 @@ public static class Program
                      "resolved=" + result.ResolvedCommand.DisplayPath + Environment.NewLine +
                      "stderr/stdout=" + raw;
         return new CliException(message, 1, detail);
+    }
+
+    private static bool LooksLikeMissingLarkCli(LarkCliResult result, string raw)
+    {
+        if (result.ResolvedCommand.Source.Equals("unresolved", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        raw ??= "";
+        return raw.Contains("ApplicationName='lark-cli'", StringComparison.OrdinalIgnoreCase) ||
+               raw.Contains("lark-cli", StringComparison.OrdinalIgnoreCase) &&
+               (raw.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+                raw.Contains("not recognized", StringComparison.OrdinalIgnoreCase) ||
+                raw.Contains("No such file", StringComparison.OrdinalIgnoreCase) ||
+                raw.Contains("The system cannot find", StringComparison.OrdinalIgnoreCase) ||
+                raw.Contains("系统找不到", StringComparison.OrdinalIgnoreCase) ||
+                raw.Contains("找不到", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string LarkCommandCategory(IReadOnlyList<string> args)

@@ -15,13 +15,16 @@ provider 使用进程参数数组调用命令，不拼接 shell 字符串。
 
 ## CLI 发现顺序
 
-1. 本地 config 中的 `larkCliPath`。
-2. 环境变量 `LARK_CLI_PATH`。
-3. `PATH` 和 Windows `PATHEXT`，优先 npm-safe launcher，例如 `lark-cli.cmd`。
-4. Windows npm 全局目录，例如 `%APPDATA%\npm`。
-5. 缺少 shim 但已安装 npm 包时，fallback 到 `node <global @larksuite/cli>/scripts/run.js`。
+1. 显式路径，例如本地 config / 项目 config 中的 `larkCliPath`。
+2. 环境变量 `CONFIG_SHEET_FORGE_LARK_CLI`。
+3. 环境变量 `LARK_CLI_PATH`。
+4. `PATH` 和 Windows `PATHEXT`，优先 npm-safe launcher，例如 `lark-cli.ps1` / `lark-cli.cmd`。
+5. Windows npm 全局目录，例如 `%APPDATA%\npm`。
+6. 缺少 shim 但已安装 npm 包时，fallback 到 `node <global @larksuite/cli>/scripts/run.js`。
 
 `doctor --details` 会显示解析来源和路径，方便排查环境问题。
+
+Unity Editor 可能早于 npm 安装或 PATH 更新启动，所以 Unity 包在启动 adapter / `apply-contract` 子进程时会额外把 npm global bin 补进 PATH。普通终端能找到 `lark-cli`、Unity 找不到时，优先重启 Unity；仍不行就设置 `CONFIG_SHEET_FORGE_LARK_CLI` 或项目 `toolkit.larkCliPath`。
 
 ## 身份策略
 

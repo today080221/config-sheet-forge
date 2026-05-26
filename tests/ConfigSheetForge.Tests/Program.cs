@@ -13,6 +13,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("three-way merge detects real conflicts", () => RunSync(MergeDetectsConflicts)),
     ("core model round-trips through json", () => RunSync(CoreModelRoundTripsThroughJson)),
     ("lark cli discovery prefers windows ps1 shim", () => RunSync(LarkCliDiscoveryPrefersWindowsPs1Shim)),
+    ("lark cli discovery accepts config sheet forge env", () => RunSync(LarkCliDiscoveryAcceptsConfigSheetForgeEnv)),
     ("type row import normalizes semantic values", () => RunSync(TypeRowImportNormalizesSemanticValues)),
     ("enum option drift is reported", () => RunSync(EnumOptionDriftIsReported)),
     ("lark read parser accepts wrapped values", () => RunSync(LarkReadParserAcceptsWrappedValues)),
@@ -146,9 +147,11 @@ static void LarkCliDiscoveryPrefersWindowsPs1Shim()
 
     var oldPath = Environment.GetEnvironmentVariable("PATH");
     var oldEnv = Environment.GetEnvironmentVariable("LARK_CLI_PATH");
+    var oldForgeEnv = Environment.GetEnvironmentVariable("CONFIG_SHEET_FORGE_LARK_CLI");
     try
     {
         Environment.SetEnvironmentVariable("LARK_CLI_PATH", null);
+        Environment.SetEnvironmentVariable("CONFIG_SHEET_FORGE_LARK_CLI", null);
         Environment.SetEnvironmentVariable("PATH", temp + Path.PathSeparator + oldPath);
         var resolved = LarkCliDiscovery.Resolve("lark-cli");
         AssertEqual(Path.GetFullPath(ps1Shim), Path.GetFullPath(resolved.DisplayPath), "Discovery should prefer the .ps1 shim on Windows.");
@@ -158,6 +161,37 @@ static void LarkCliDiscoveryPrefersWindowsPs1Shim()
     {
         Environment.SetEnvironmentVariable("PATH", oldPath);
         Environment.SetEnvironmentVariable("LARK_CLI_PATH", oldEnv);
+        Environment.SetEnvironmentVariable("CONFIG_SHEET_FORGE_LARK_CLI", oldForgeEnv);
+        Directory.Delete(temp, recursive: true);
+    }
+}
+
+static void LarkCliDiscoveryAcceptsConfigSheetForgeEnv()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-lark-env-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    var ps1Shim = Path.Combine(temp, "lark-cli.ps1");
+    File.WriteAllText(ps1Shim, "exit 0\r\n");
+
+    var oldEnv = Environment.GetEnvironmentVariable("CONFIG_SHEET_FORGE_LARK_CLI");
+    var oldLarkEnv = Environment.GetEnvironmentVariable("LARK_CLI_PATH");
+    try
+    {
+        Environment.SetEnvironmentVariable("CONFIG_SHEET_FORGE_LARK_CLI", ps1Shim);
+        Environment.SetEnvironmentVariable("LARK_CLI_PATH", null);
+        var resolved = LarkCliDiscovery.Resolve("lark-cli");
+        AssertEqual(Path.GetFullPath(ps1Shim), Path.GetFullPath(resolved.DisplayPath), "Discovery should honor CONFIG_SHEET_FORGE_LARK_CLI.");
+        AssertTrue(resolved.Source.Contains("CONFIG_SHEET_FORGE_LARK_CLI"), "Discovery should report the config-sheet-forge env source.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("CONFIG_SHEET_FORGE_LARK_CLI", oldEnv);
+        Environment.SetEnvironmentVariable("LARK_CLI_PATH", oldLarkEnv);
         Directory.Delete(temp, recursive: true);
     }
 }
@@ -853,6 +887,9 @@ static void ProjectConfigProbeReadsLifecycleSummary()
         "coreCliEnvironmentVariable": "CONFIG_SHEET_FORGE_CLI",
         "sourceCheckoutEnvironmentVariable": "CONFIG_SHEET_FORGE_ROOT",
         "sourceCliProjectRelativePath": "src/cli/ConfigSheetForge.Cli",
+        "larkCliPath": "C:/Users/dev/AppData/Roaming/npm/lark-cli.ps1",
+        "larkCliEnvironmentVariable": "CONFIG_SHEET_FORGE_LARK_CLI",
+        "allowUserFallback": false,
         "defaultTargetBranch": "main",
         "githubRepository": "today080221/config-sheet-forge",
         "allowPrAutoDetect": true
@@ -881,6 +918,9 @@ static void ProjectConfigProbeReadsLifecycleSummary()
     AssertEqual("CONFIG_SHEET_FORGE_CLI", summary.CoreCliEnvironmentVariable, "CLI env var should be read.");
     AssertEqual("CONFIG_SHEET_FORGE_ROOT", summary.SourceCheckoutEnvironmentVariable, "source checkout env var should be read.");
     AssertEqual("src/cli/ConfigSheetForge.Cli", summary.SourceCliProjectRelativePath, "source CLI project path should be read.");
+    AssertEqual("C:/Users/dev/AppData/Roaming/npm/lark-cli.ps1", summary.LarkCliPath, "lark-cli path should be read.");
+    AssertEqual("CONFIG_SHEET_FORGE_LARK_CLI", summary.LarkCliEnvironmentVariable, "lark-cli env var should be read.");
+    AssertTrue(!summary.AllowUserFallback, "strict bot should be the default project setting.");
     AssertEqual("main", summary.DefaultTargetBranch, "default target branch should be read.");
     AssertEqual("today080221/config-sheet-forge", summary.GithubRepository, "GitHub repository should be read.");
     AssertTrue(summary.AllowPrAutoDetect, "PR auto detect should be read.");
