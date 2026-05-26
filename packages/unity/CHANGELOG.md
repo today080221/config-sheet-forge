@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.16
+
+- `compare-merge` dry-run 不再返回空成功：会解析 source/target 分支工作区、表范围、base/ours/theirs 路径、merge report/merged path，并在 actions details 中输出 tableCount、source/target wiki 和缺失表信息。
+- 如果目标分支 BranchBindings、ConfigSheets 或在线 Sheet 定位信息缺失，`compare-merge` 现在返回 `success=false` 和中文修复建议，避免误导用户继续跑 PR 检查。
+- `apply-contract compare-merge` 会从 live registry hydrate source 与 target 分支，支持同一 TableId 在不同 profile 下各保留一条 ConfigSheets 定位记录。
+- Unity 窗口刷新状态增加节流，后台任务完成后才强制刷新；合并 PR/branch probe 继续走后台缓存，减少点击按钮后的 Repaint 卡顿体感。
+- Unity 输出日志改为有上限的 StringBuilder buffer，长日志不再用字符串反复累加；源码 fallback 会显示“首次运行可能较慢”状态。
+- Unity 标题统一为“配表 Source of Truth”，并对旧的空 compare-merge 成功结果做 UI 侧保护：没有有效 `merge.inputs.prepare` 时不会视为可继续 PR 检查。
+- Unity package smoke 增加 v0.4.16 源码断言，防止 compare-merge 空预览、刷新节流和日志缓冲回退。
+
 ## 0.4.15
 
 - Unity 顶部显示模式从“高级模式”拆为 `策划视图 / 程序视图`：策划视图默认使用人话摘要，程序视图补充内部 key、canonical 类型、路径和命令摘要。

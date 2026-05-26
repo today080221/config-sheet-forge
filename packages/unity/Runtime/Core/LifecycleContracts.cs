@@ -19,6 +19,7 @@ namespace ConfigSheetForge.Core
         public ContractGitSpec Git { get; set; } = new ContractGitSpec();
         public UnityExcelToSoContract UnityExcelToSo { get; set; } = new UnityExcelToSoContract();
         public MergePolicyContract MergePolicy { get; set; } = new MergePolicyContract();
+        public MergeInputsContract MergeInputs { get; set; } = new MergeInputsContract();
         public PrGateReport GateReport { get; set; } = new PrGateReport();
         public SeedFromLocalXlsxContract SeedFromLocalXlsx { get; set; } = new SeedFromLocalXlsxContract();
         public SyncCacheContract SyncCache { get; set; } = new SyncCacheContract();
@@ -105,6 +106,29 @@ namespace ConfigSheetForge.Core
         public bool ConfirmWriteMain { get; set; }
         public string ApprovalRecordId { get; set; } = "";
         public string ApprovedByRole { get; set; } = "";
+    }
+
+    public sealed class MergeInputsContract
+    {
+        public string BasePath { get; set; } = "";
+        public string OursPath { get; set; } = "";
+        public string TheirsPath { get; set; } = "";
+        public string SourceBranch { get; set; } = "";
+        public string TargetBranch { get; set; } = "";
+        public string TargetFeishuProfile { get; set; } = "";
+        public string TargetBranchWikiNodeTitle { get; set; } = "";
+        public string TargetBranchWikiNodeUrl { get; set; } = "";
+        public string TargetBranchWikiNodeToken { get; set; } = "";
+        public string MergeBase { get; set; } = "";
+        public string GithubRepository { get; set; } = "";
+        public string PrNumber { get; set; } = "";
+        public string PrUrl { get; set; } = "";
+        public bool AllowPrAutoDetect { get; set; }
+        public string MergeReportPath { get; set; } = "";
+        public string MergedPath { get; set; } = "";
+        public bool WriteBackToMain { get; set; }
+        public bool ConfirmWriteMain { get; set; }
+        public string TableId { get; set; } = "";
     }
 
     public sealed class BranchBindingContract
@@ -843,28 +867,268 @@ namespace ConfigSheetForge.Core
 
         private static void ApplyMergePolicy(LifecycleContractRequest request, LifecycleContractResult result)
         {
+            request.MergeInputs = request.MergeInputs ?? new MergeInputsContract();
+            request.MergePolicy = request.MergePolicy ?? new MergePolicyContract();
+
             var branchWorkspace = BranchWorkspaceResolver.Resolve(request);
             result.BranchWorkspace = branchWorkspace;
             BranchWorkspaceResolver.ValidateOneToOne(request, branchWorkspace, result);
-            result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, "ready", "compare-merge 将按 branch/profile 定位 main/base 与当前分支在线 Sheet。"));
+            result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, request.DryRun ? "planned" : "ready", "预览：解析当前分支工作区，用于生成可审查的合并计划。"));
+
+            var targetRequest = BuildTargetMergeRequest(request);
+            var targetWorkspace = BranchWorkspaceResolver.Resolve(targetRequest);
+            var targetAction = BranchWorkspaceResolver.BuildAction(targetWorkspace, request.DryRun ? "planned" : "ready", "预览：解析目标分支工作区，用于定位 main/base 在线表。");
+            targetAction.Action = "target_branch_workspace.resolve";
+            targetAction.Details["targetBranch"] = targetWorkspace.GitBranch;
+            targetAction.Details["targetProfile"] = FirstNonEmpty(targetWorkspace.Profile, targetWorkspace.FeishuBranch);
+            targetAction.Details["targetWikiNodeToken"] = targetWorkspace.WikiNodeToken;
+            targetAction.Details["targetWikiNodeUrl"] = targetWorkspace.WikiNodeUrl;
+            result.Actions.Add(targetAction);
+
             if (!result.Success)
             {
                 return;
             }
 
-            if (request.MergePolicy.LowRisk && !request.MergePolicy.ConfirmWriteMain)
+            var sourceProfile = FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch);
+            var targetProfile = FirstNonEmpty(targetWorkspace.Profile, targetWorkspace.FeishuBranch);
+            if (string.IsNullOrWhiteSpace(branchWorkspace.WikiNodeToken))
             {
-                result.AddAction("merge.preview", "planned", "低风险合并默认只生成预览。写回 main 前必须显式确认。");
+                result.AddFailure("合并预览需要先定位当前分支工作区，但 BranchBindings 中找不到 GitBranch “" + branchWorkspace.GitBranch + "” + Profile “" + sourceProfile + "” 的 Wiki 节点。请先运行“预览同步计划”，确认当前分支已经 Seed/绑定。");
+            }
+
+            if (string.IsNullOrWhiteSpace(targetWorkspace.WikiNodeToken))
+            {
+                result.AddFailure("合并预览需要定位目标分支 “" + targetWorkspace.GitBranch + "” 的工作区，但 BranchBindings 中没有可用 Wiki 节点。请确认目标分支已经登记 BranchBindings，或在合并页高级诊断里检查目标分支。");
+            }
+
+            var selectedTable = FirstNonEmpty(request.MergeInputs.TableId, request.SyncCache != null ? request.SyncCache.TableId : "", request.Table != null ? request.Table.TableId : "");
+            var sourceRows = FindMergeTableRows(request, sourceProfile, selectedTable);
+            var targetRows = FindMergeTableRows(request, targetProfile, selectedTable);
+            var tableIds = BuildMergeTableScope(sourceRows, targetRows, selectedTable);
+            var missingSourceTables = new List<string>();
+            var missingTargetTables = new List<string>();
+            var missingSourceLocators = new List<string>();
+            var missingTargetLocators = new List<string>();
+            foreach (var tableId in tableIds)
+            {
+                var source = sourceRows.FirstOrDefault(t => string.Equals(t.TableId, tableId, StringComparison.OrdinalIgnoreCase));
+                var target = targetRows.FirstOrDefault(t => string.Equals(t.TableId, tableId, StringComparison.OrdinalIgnoreCase));
+                if (source == null)
+                {
+                    missingSourceTables.Add(tableId);
+                }
+                else if (!HasOnlineSheetLocator(source))
+                {
+                    missingSourceLocators.Add(tableId);
+                }
+
+                if (target == null)
+                {
+                    missingTargetTables.Add(tableId);
+                }
+                else if (!HasOnlineSheetLocator(target))
+                {
+                    missingTargetLocators.Add(tableId);
+                }
+            }
+
+            if (tableIds.Count == 0)
+            {
+                result.AddFailure("合并预览没有找到可比较的在线表范围。请确认当前分支和目标分支的 ConfigSheets 都已登记 TableId、Branch/Profile、在线表 Token 和 SheetId。");
+            }
+
+            if (missingSourceTables.Count > 0)
+            {
+                result.AddFailure("当前分支 “" + branchWorkspace.GitBranch + "” 缺少这些 ConfigSheets 记录：" + string.Join(", ", missingSourceTables) + "。请先同步/Seed 当前分支，或检查 Branch/Profile 是否匹配。");
+            }
+
+            if (missingTargetTables.Count > 0)
+            {
+                result.AddFailure("目标分支 “" + targetWorkspace.GitBranch + "” 缺少这些 ConfigSheets 记录：" + string.Join(", ", missingTargetTables) + "。请确认 main/目标分支在线表已经登记，或重新 hydrate live registry。");
+            }
+
+            if (missingSourceLocators.Count > 0)
+            {
+                result.AddFailure("当前分支这些表缺少在线 Sheet 定位信息（SpreadsheetToken/SheetId）：" + string.Join(", ", missingSourceLocators) + "。请在 ConfigSheets 补齐在线表 Token 和工作表 ID。");
+            }
+
+            if (missingTargetLocators.Count > 0)
+            {
+                result.AddFailure("目标分支这些表缺少在线 Sheet 定位信息（SpreadsheetToken/SheetId）：" + string.Join(", ", missingTargetLocators) + "。请在目标分支 ConfigSheets 补齐在线表 Token 和工作表 ID。");
+            }
+
+            var prepareAction = result.AddAction("merge.inputs.prepare", result.Success ? "planned" : "blocked", result.Success ? "预览：准备 base/ours/theirs semantic 输入，默认比较当前分支全部在线表。" : "合并输入不足，无法生成有效合并预览。");
+            AddMergePlanDetails(prepareAction, request, branchWorkspace, targetWorkspace, tableIds, missingSourceTables, missingTargetTables, missingSourceLocators, missingTargetLocators);
+
+            var compareAction = result.AddAction("merge.compare", result.Success ? "planned" : "blocked", result.Success ? "预览：执行三方一致性/冲突检查，并生成合并报告。" : "在线表定位或表范围未就绪，已阻断三方比较。");
+            AddMergePlanDetails(compareAction, request, branchWorkspace, targetWorkspace, tableIds, missingSourceTables, missingTargetTables, missingSourceLocators, missingTargetLocators);
+
+            result.DocumentationTargets["sourceWikiNodeUrl"] = branchWorkspace.WikiNodeUrl;
+            result.DocumentationTargets["targetWikiNodeUrl"] = FirstNonEmpty(targetWorkspace.WikiNodeUrl, request.MergeInputs.TargetBranchWikiNodeUrl);
+            result.DocumentationTargets["mergeReportPath"] = FirstNonEmpty(request.MergeInputs.MergeReportPath, "Temp/ConfigSheetForge/merge-report.md");
+            result.DocumentationTargets["mergedPath"] = FirstNonEmpty(request.MergeInputs.MergedPath, "Temp/ConfigSheetForge/merged.semantic.json");
+
+            if (!result.Success)
+            {
                 return;
             }
 
-            if (request.MergePolicy.ConfirmWriteMain && !string.Equals(request.MergePolicy.ApprovedByRole, "configOwner", StringComparison.OrdinalIgnoreCase))
+            var writeBackRequested = request.MergeInputs.WriteBackToMain || request.MergePolicy.ConfirmWriteMain;
+            var confirmWriteMain = request.MergeInputs.ConfirmWriteMain || request.MergePolicy.ConfirmWriteMain;
+            if (writeBackRequested && !confirmWriteMain)
+            {
+                result.AddFailure("写回 main 是高风险操作，必须先生成合并预览，并在 Unity 窗口中勾选确认写回。");
+                return;
+            }
+
+            if (confirmWriteMain && !string.Equals(request.MergePolicy.ApprovedByRole, "configOwner", StringComparison.OrdinalIgnoreCase))
             {
                 result.AddFailure("写回 main 需要配置负责人批准。请让配置负责人完成审批后再重试。");
                 return;
             }
 
-            result.AddAction("merge.write_main", request.MergePolicy.ConfirmWriteMain ? "ready" : "planned", request.MergePolicy.ConfirmWriteMain ? "已确认写回 main。" : "仅生成合并预览。");
+            var preview = result.AddAction("merge.preview", request.DryRun ? "planned" : "ready", request.DryRun ? "已生成可审查的合并预览计划；不会写回 main。" : "合并预览有效，准备执行已确认的写入流程。");
+            AddMergePlanDetails(preview, request, branchWorkspace, targetWorkspace, tableIds, missingSourceTables, missingTargetTables, missingSourceLocators, missingTargetLocators);
+
+            if (confirmWriteMain)
+            {
+                var write = result.AddAction("merge.write_main", "ready", "已确认写回 main；执行前仍需通过冲突检查、Schema review 和 MergeReviews。");
+                AddMergePlanDetails(write, request, branchWorkspace, targetWorkspace, tableIds, missingSourceTables, missingTargetTables, missingSourceLocators, missingTargetLocators);
+            }
+        }
+
+        private static LifecycleContractRequest BuildTargetMergeRequest(LifecycleContractRequest sourceRequest)
+        {
+            var inputs = sourceRequest.MergeInputs ?? new MergeInputsContract();
+            var sourceWorkspaceContract = BranchWorkspaceResolver.NormalizeContract(sourceRequest);
+            var targetBranch = FirstNonEmpty(inputs.TargetBranch, sourceWorkspaceContract.MainGitBranch, "main");
+            var targetProfile = FirstNonEmpty(inputs.TargetFeishuProfile, string.Equals(targetBranch, FirstNonEmpty(sourceWorkspaceContract.MainGitBranch, "main"), StringComparison.OrdinalIgnoreCase) ? FirstNonEmpty(sourceWorkspaceContract.MainFeishuBranch, "main") : "");
+            return new LifecycleContractRequest
+            {
+                Operation = sourceRequest.Operation,
+                Locale = sourceRequest.Locale,
+                DryRun = sourceRequest.DryRun,
+                Registry = sourceRequest.Registry,
+                Table = sourceRequest.Table,
+                Git = new ContractGitSpec
+                {
+                    Branch = targetBranch,
+                    FeishuBranch = targetProfile,
+                    Profile = targetProfile,
+                    Head = sourceRequest.Git != null ? sourceRequest.Git.Head : ""
+                },
+                SeedFromLocalXlsx = sourceRequest.SeedFromLocalXlsx,
+                SyncCache = sourceRequest.SyncCache,
+                MergePolicy = sourceRequest.MergePolicy,
+                MergeInputs = sourceRequest.MergeInputs,
+                BranchWorkspace = new BranchWorkspaceContract
+                {
+                    Mode = sourceWorkspaceContract.Mode,
+                    RootWikiToken = sourceWorkspaceContract.RootWikiToken,
+                    RootWikiUrl = sourceWorkspaceContract.RootWikiUrl,
+                    RootWikiTitle = sourceWorkspaceContract.RootWikiTitle,
+                    GitBranch = targetBranch,
+                    FeishuBranch = targetProfile,
+                    Profile = targetProfile,
+                    MainGitBranch = sourceWorkspaceContract.MainGitBranch,
+                    MainFeishuBranch = sourceWorkspaceContract.MainFeishuBranch,
+                    ProfileNameTemplate = sourceWorkspaceContract.ProfileNameTemplate,
+                    BranchNodeTitleTemplate = sourceWorkspaceContract.BranchNodeTitleTemplate,
+                    MainNodeTitle = sourceWorkspaceContract.MainNodeTitle,
+                    CreateIfMissing = sourceWorkspaceContract.CreateIfMissing,
+                    RequireOneToOneBinding = sourceWorkspaceContract.RequireOneToOneBinding,
+                    BindingRegistryTable = sourceWorkspaceContract.BindingRegistryTable,
+                    OwnerRole = sourceWorkspaceContract.OwnerRole,
+                    CreatedBy = sourceWorkspaceContract.CreatedBy,
+                    ExistingWikiNodeToken = inputs.TargetBranchWikiNodeToken,
+                    ExistingWikiNodeUrl = inputs.TargetBranchWikiNodeUrl
+                },
+                BranchBindings = sourceRequest.BranchBindings ?? new List<BranchBindingContract>(),
+                DocumentationLinks = sourceRequest.DocumentationLinks
+            };
+        }
+
+        private static List<SeedTableContract> FindMergeTableRows(LifecycleContractRequest request, string profile, string selectedTable)
+        {
+            var seed = request.SeedFromLocalXlsx ?? new SeedFromLocalXlsxContract();
+            return seed.Tables
+                .Where(t => !string.IsNullOrWhiteSpace(t.TableId))
+                .Where(t => string.IsNullOrWhiteSpace(selectedTable) || string.Equals(t.TableId, selectedTable, StringComparison.OrdinalIgnoreCase))
+                .Where(t => string.Equals(FirstNonEmpty(t.Profile, t.Branch), profile, StringComparison.OrdinalIgnoreCase))
+                .GroupBy(t => t.TableId, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(t => t.TableId, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static List<string> BuildMergeTableScope(List<SeedTableContract> sourceRows, List<SeedTableContract> targetRows, string selectedTable)
+        {
+            var tableIds = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(selectedTable))
+            {
+                tableIds.Add(selectedTable);
+            }
+
+            foreach (var table in sourceRows)
+            {
+                tableIds.Add(table.TableId);
+            }
+
+            foreach (var table in targetRows)
+            {
+                tableIds.Add(table.TableId);
+            }
+
+            return tableIds.ToList();
+        }
+
+        private static bool HasOnlineSheetLocator(SeedTableContract table)
+        {
+            if (table == null)
+            {
+                return false;
+            }
+
+            return !string.IsNullOrWhiteSpace(FirstNonEmpty(table.SpreadsheetToken, table.SpreadsheetUrl)) &&
+                   !string.IsNullOrWhiteSpace(table.SheetId);
+        }
+
+        private static void AddMergePlanDetails(
+            LifecycleActionResult action,
+            LifecycleContractRequest request,
+            BranchWorkspaceResolution sourceWorkspace,
+            BranchWorkspaceResolution targetWorkspace,
+            List<string> tableIds,
+            List<string> missingSourceTables,
+            List<string> missingTargetTables,
+            List<string> missingSourceLocators,
+            List<string> missingTargetLocators)
+        {
+            var inputs = request.MergeInputs ?? new MergeInputsContract();
+            action.Details["sourceBranch"] = sourceWorkspace.GitBranch;
+            action.Details["sourceProfile"] = FirstNonEmpty(sourceWorkspace.Profile, sourceWorkspace.FeishuBranch);
+            action.Details["sourceWikiNodeToken"] = sourceWorkspace.WikiNodeToken;
+            action.Details["sourceWikiNodeUrl"] = sourceWorkspace.WikiNodeUrl;
+            action.Details["targetBranch"] = targetWorkspace.GitBranch;
+            action.Details["targetProfile"] = FirstNonEmpty(targetWorkspace.Profile, targetWorkspace.FeishuBranch);
+            action.Details["targetWikiNodeToken"] = FirstNonEmpty(targetWorkspace.WikiNodeToken, inputs.TargetBranchWikiNodeToken);
+            action.Details["targetWikiNodeUrl"] = FirstNonEmpty(targetWorkspace.WikiNodeUrl, inputs.TargetBranchWikiNodeUrl);
+            action.Details["tableCount"] = tableIds.Count.ToString(CultureInfo.InvariantCulture);
+            action.Details["tableIds"] = string.Join(", ", tableIds);
+            action.Details["missingSourceTables"] = string.Join(", ", missingSourceTables);
+            action.Details["missingTargetTables"] = string.Join(", ", missingTargetTables);
+            action.Details["missingSourceLocators"] = string.Join(", ", missingSourceLocators);
+            action.Details["missingTargetLocators"] = string.Join(", ", missingTargetLocators);
+            action.Details["basePath"] = inputs.BasePath;
+            action.Details["oursPath"] = inputs.OursPath;
+            action.Details["theirsPath"] = inputs.TheirsPath;
+            action.Details["mergeBase"] = inputs.MergeBase;
+            action.Details["prNumber"] = inputs.PrNumber;
+            action.Details["prUrl"] = inputs.PrUrl;
+            action.Details["mergeReportPath"] = FirstNonEmpty(inputs.MergeReportPath, "Temp/ConfigSheetForge/merge-report.md");
+            action.Details["mergedPath"] = FirstNonEmpty(inputs.MergedPath, "Temp/ConfigSheetForge/merged.semantic.json");
+            action.Details["writeBackToMain"] = inputs.WriteBackToMain.ToString().ToLowerInvariant();
         }
 
         private static void ApplySyncCachePlan(LifecycleContractRequest request, LifecycleContractResult result)

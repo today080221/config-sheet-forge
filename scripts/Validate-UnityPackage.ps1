@@ -229,6 +229,19 @@ foreach ($requiredV415Marker in @("ProgramViewPrefKey", "RiskModePrefKey", "策�
   }
 }
 
+$coreContracts = Get-Content -Raw packages/unity/Runtime/Core/LifecycleContracts.cs
+foreach ($requiredV416Marker in @("MergeInputsContract", "merge.inputs.prepare", "merge.compare", "target_branch_workspace.resolve", "missingTargetTables", "tableCount")) {
+  if ($coreContracts -notlike "*$requiredV416Marker*") {
+    throw "Unity v0.4.16 compare-merge source marker is missing: $requiredV416Marker"
+  }
+}
+
+foreach ($requiredV416UiMarker in @("ReadonlyRefreshThrottleSeconds", "MaxOutputCharacters", "SetOutputText", "BuildCliStartStatus", "ResultJsonDeclaresFailure(operation")) {
+  if ($window -notlike "*$requiredV416UiMarker*") {
+    throw "Unity v0.4.16 responsiveness source marker is missing: $requiredV416UiMarker"
+  }
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

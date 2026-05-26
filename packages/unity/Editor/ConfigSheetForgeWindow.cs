@@ -14,7 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.15";
+        private const string PackageVersion = "v0.4.16";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -30,6 +30,8 @@ namespace ConfigSheetForge.Unity.Editor
         private const float MinBottomDrawerHeight = 220f;
         private const float DefaultBottomDrawerHeight = 260f;
         private const double MergeProbeCacheSeconds = 30;
+        private const double ReadonlyRefreshThrottleSeconds = 1.5;
+        private const int MaxOutputCharacters = 120000;
 
         private enum WorkflowStatusKind
         {
@@ -135,6 +137,7 @@ namespace ConfigSheetForge.Unity.Editor
         private bool _isResizingOutputPanel;
         private float _bottomOutputHeight = 260f;
         private string _output = "";
+        private readonly StringBuilder _outputBuilder = new StringBuilder();
         private string _resultSummary = "";
         private string _lastCommand = "";
         private string _lastResultPath = "";
@@ -154,6 +157,7 @@ namespace ConfigSheetForge.Unity.Editor
         private string _activeJobStatus = "";
         private Vector2 _mainScroll;
         private Vector2 _outputScroll;
+        private DateTime _lastReadonlyRefreshUtc;
 
         [MenuItem("Tools/Config Sheet Forge", false, 1000)]
         public static void OpenStatusWindow()
@@ -200,14 +204,16 @@ namespace ConfigSheetForge.Unity.Editor
         private static void OpenTab(int tab)
         {
             var window = GetWindow<ConfigSheetForgeWindow>("配表 Source of Truth");
+            window.titleContent = new GUIContent("配表 Source of Truth");
             window.minSize = new Vector2(640, 520);
             window._selectedTab = tab;
-            window.RefreshReadonlyStatus();
+            window.RefreshReadonlyStatus(force: true);
             window.Show();
         }
 
         private void OnEnable()
         {
+            titleContent = new GUIContent("配表 Source of Truth");
             EditorApplication.update -= OnEditorUpdate;
             EditorApplication.update += OnEditorUpdate;
             _showBottomOutput = EditorPrefs.GetBool(BottomOutputExpandedPrefKey, false);
@@ -215,12 +221,12 @@ namespace ConfigSheetForge.Unity.Editor
             _showOnboarding = !EditorPrefs.GetBool(OnboardingDismissedPrefKey, false);
             _programView = EditorPrefs.GetBool(ProgramViewPrefKey, EditorPrefs.GetBool(LegacyAdvancedModePrefKey, false));
             _riskModeUnlocked = EditorPrefs.GetBool(RiskModePrefKey, false);
-            RefreshReadonlyStatus();
+            RefreshReadonlyStatus(force: true);
             EnsureNewTableDefaults();
             _resultSummary = "配表 Source of Truth 窗口已打开。" + Environment.NewLine +
                              "这里只刷新本地状态，不会下载、不导出、不改文件。" + Environment.NewLine +
                              "主流程只保留刷新状态、预览同步计划、运行 PR 检查。";
-            _output = "";
+            SetOutputText("");
         }
 
         private void OnDisable()
@@ -846,6 +852,16 @@ namespace ConfigSheetForge.Unity.Editor
 
         private string BuildRecommendationText(string projectRoot)
         {
+            if (LastPreviewPassed("compare-merge"))
+            {
+                return "最近一次合并预览有效，下一步可以运行 PR 检查；如果缺 MergeReviews，请找配置负责人补审查记录。";
+            }
+
+            if (LastPreviewPassed("sync-cache") && !CacheLooksFresh(projectRoot))
+            {
+                return "最近一次同步预览已通过；如果确认要更新本地 cache，请去“配表”页勾选确认后执行写入。";
+            }
+
             var next = BuildNextStepText(projectRoot);
             if (string.Equals(next, "预览同步计划", StringComparison.OrdinalIgnoreCase))
             {
@@ -867,6 +883,24 @@ namespace ConfigSheetForge.Unity.Editor
 
         private DashboardAction BuildPrimaryDashboardAction(string projectRoot)
         {
+            if (LastPreviewPassed("compare-merge"))
+            {
+                return new DashboardAction(
+                    "运行 PR 检查",
+                    "合并预览有效后生成 pr-gate-report。",
+                    "安全：只生成检查报告，不写飞书、不改本地 cache。",
+                    RunPrGateReport);
+            }
+
+            if (LastPreviewPassed("sync-cache") && !CacheLooksFresh(projectRoot))
+            {
+                return new DashboardAction(
+                    "去写入本地 cache",
+                    "跳到配表页；写入前仍需要勾选确认。",
+                    "中风险：会更新本地 cache，必须勾选确认且预览通过。",
+                    () => { _selectedTab = TablesTab; _showSyncSection = true; });
+            }
+
             var next = BuildNextStepText(projectRoot);
             if (string.Equals(next, "运行 PR 检查", StringComparison.OrdinalIgnoreCase))
             {
@@ -925,7 +959,7 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void RefreshStatusAction()
         {
-            RefreshReadonlyStatus();
+            RefreshReadonlyStatus(force: true);
             _lastCommand = "只读刷新状态";
             SetImmediateOutput("已刷新状态。没有下载、导出或写入任何文件。", "");
         }
@@ -984,10 +1018,10 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button(new GUIContent("刷新状态", "只重新读取 ProjectSettings、git branch、最近 gate report 和本地 cache 文件状态。"), GUILayout.Height(32)))
             {
-                RefreshReadonlyStatus();
+                RefreshReadonlyStatus(force: true);
                 _lastCommand = "只读刷新状态";
                 _resultSummary = "已刷新状态。没有下载、导出或写入任何文件。";
-                _output = "";
+                SetOutputText("");
             }
 
             if (DrawJobButton(new GUIContent("预览同步计划", "等同于同步页 dry-run；不会写飞书，也不会改本地 cache。"), GUILayout.Height(32)))
@@ -2395,7 +2429,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("清空", "清空输出面板。"), GUILayout.Width(72)))
             {
-                _output = "";
+                SetOutputText("");
                 _resultSummary = "";
             }
             EditorGUILayout.EndHorizontal();
@@ -2545,7 +2579,7 @@ namespace ConfigSheetForge.Unity.Editor
         private void SetImmediateOutput(string summary, string details)
         {
             _resultSummary = summary ?? "";
-            _output = details ?? "";
+            SetOutputText(details ?? "");
             SetBottomOutputExpanded(false, persist: false);
             _showDetailedLogs = false;
             Repaint();
@@ -2657,7 +2691,7 @@ namespace ConfigSheetForge.Unity.Editor
                 _activeJob = null;
                 if (refresh)
                 {
-                    RefreshReadonlyStatus();
+                    RefreshReadonlyStatus(force: true);
                 }
                 changed = true;
             }
@@ -2692,24 +2726,54 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void AppendOutputLine(string line)
         {
-            if (string.IsNullOrEmpty(_output))
+            if (_outputBuilder.Length > 0 && !BuilderEndsWithNewLine(_outputBuilder))
             {
-                _output = line ?? "";
-            }
-            else
-            {
-                if (!_output.EndsWith(Environment.NewLine, StringComparison.Ordinal))
-                {
-                    _output += Environment.NewLine;
-                }
-
-                _output += line ?? "";
+                _outputBuilder.AppendLine();
             }
 
-            if (!_output.EndsWith(Environment.NewLine, StringComparison.Ordinal))
+            _outputBuilder.Append(line ?? "");
+            if (!BuilderEndsWithNewLine(_outputBuilder))
             {
-                _output += Environment.NewLine;
+                _outputBuilder.AppendLine();
             }
+
+            TrimOutputBuffer();
+            _output = _outputBuilder.ToString();
+        }
+
+        private void SetOutputText(string value)
+        {
+            _outputBuilder.Length = 0;
+            if (!string.IsNullOrEmpty(value))
+            {
+                _outputBuilder.Append(value);
+            }
+
+            TrimOutputBuffer();
+            _output = _outputBuilder.ToString();
+        }
+
+        private static bool BuilderEndsWithNewLine(StringBuilder builder)
+        {
+            return builder != null && builder.Length > 0 && (builder[builder.Length - 1] == '\n' || builder[builder.Length - 1] == '\r');
+        }
+
+        private void TrimOutputBuffer()
+        {
+            if (_outputBuilder.Length <= MaxOutputCharacters)
+            {
+                return;
+            }
+
+            var removeCount = _outputBuilder.Length - MaxOutputCharacters;
+            var text = _outputBuilder.ToString();
+            var newline = text.IndexOf('\n', removeCount);
+            if (newline > removeCount && newline < removeCount + 4096)
+            {
+                removeCount = newline + 1;
+            }
+
+            _outputBuilder.Remove(0, Math.Min(removeCount, _outputBuilder.Length));
         }
 
         private void StartBackgroundJob(ConfigSheetForgeBackgroundJob job)
@@ -2734,11 +2798,11 @@ namespace ConfigSheetForge.Unity.Editor
             job.InputFingerprint = BuildOperationFingerprint(job.Operation);
             _outputScroll = Vector2.zero;
             _resultSummary = job.BuildLiveSummary();
-            _output = job.StartOutput;
+            SetOutputText(job.StartOutput);
             SetBottomOutputExpanded(false, persist: false);
             _showDetailedLogs = false;
-            job.Start();
             Repaint();
+            job.Start();
         }
 
         private void CancelActiveJob()
@@ -3149,8 +3213,6 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 RunCliInternal(true, "gate", "--details", "--report", ResolveGateReportPath(FindProjectRoot()));
             }
-
-            RefreshReadonlyStatus();
         }
 
         private void RunProjectLifecycle(string operation, bool dryRun)
@@ -3289,8 +3351,14 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUIUtility.systemCopyBuffer = adapter.ToCommandLine();
         }
 
-        private void RefreshReadonlyStatus()
+        private void RefreshReadonlyStatus(bool force = false)
         {
+            if (!force && (DateTime.UtcNow - _lastReadonlyRefreshUtc).TotalSeconds < ReadonlyRefreshThrottleSeconds)
+            {
+                return;
+            }
+
+            _lastReadonlyRefreshUtc = DateTime.UtcNow;
             var projectRoot = FindProjectRoot();
             _currentGitBranch = TryReadGitBranch(projectRoot);
             _projectConfig = ConfigSheetForgeEditorUtility.LoadProjectConfigSummary(projectRoot, _currentGitBranch);
@@ -3818,7 +3886,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (string.Equals(next, "可以提交 PR", StringComparison.OrdinalIgnoreCase))
             {
-                RefreshReadonlyStatus();
+                RefreshReadonlyStatus(force: true);
                 SetImmediateOutput("已刷新状态。当前看起来可以提交 PR。", "");
                 return;
             }
@@ -5303,7 +5371,7 @@ namespace ConfigSheetForge.Unity.Editor
         {
             var job = new ConfigSheetForgeBackgroundJob(async self =>
             {
-                self.SetStatus("正在启动 config-sheet-forge CLI");
+                self.SetStatus(BuildCliStartStatus(commandLine));
                 var result = await self.RunProcessAsync(
                     executable,
                     arguments,
@@ -5381,7 +5449,7 @@ namespace ConfigSheetForge.Unity.Editor
                 }
 
                 self.AppendLine("Contract request: " + requestPath);
-                self.SetStatus("正在启动 config-sheet-forge CLI");
+                self.SetStatus(BuildCliStartStatus(cliCommandLine));
                 var applyResult = await self.RunProcessAsync(
                     cliExecutable,
                     cliArguments,
@@ -5406,7 +5474,7 @@ namespace ConfigSheetForge.Unity.Editor
                     }
                 }
 
-                self.Success = applyResult.ExitCode == 0 && !ResultJsonDeclaresFailure(resultJson);
+                self.Success = applyResult.ExitCode == 0 && !ResultJsonDeclaresFailure(operation, resultJson);
                 self.SetStatus(self.Success ? "完成" : "失败");
                 self.FinalSummary = BuildSummaryFromResult(
                     operation,
@@ -5734,6 +5802,18 @@ namespace ConfigSheetForge.Unity.Editor
             return builder.ToString();
         }
 
+        private static string BuildCliStartStatus(string commandLine)
+        {
+            commandLine = commandLine ?? "";
+            if (commandLine.IndexOf("dotnet run", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                commandLine.IndexOf(" --project ", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "正在启动 config-sheet-forge CLI（源码 fallback，首次运行可能较慢）";
+            }
+
+            return "正在启动 config-sheet-forge CLI";
+        }
+
         private static string BuildSummaryFromResult(string operation, bool dryRun, string resultPath, string resultJson, string processOutput, string branchFallback, int exitCode, bool wasCancelled)
         {
             if (wasCancelled)
@@ -5750,6 +5830,15 @@ namespace ConfigSheetForge.Unity.Editor
                 ExtractString(resultJson, "nodeTitle"),
                 branchFallback);
             var failures = ExtractStringArray(resultJson, "humanReadableFailures");
+            if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase) &&
+                finalSuccess &&
+                !string.IsNullOrWhiteSpace(resultJson) &&
+                resultJson.IndexOf("\"merge.inputs.prepare\"", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                finalSuccess = false;
+                failures.Add("合并预览没有生成可审查的表范围、source/target 工作区和 merge report 路径。请重新生成合并预览；如果仍失败，请检查在线注册中心的 BranchBindings/ConfigSheets。");
+            }
+
             var builder = new StringBuilder();
             builder.AppendLine(finalSuccess ? "成功" : "失败");
             builder.AppendLine("操作: " + operation);
@@ -5810,10 +5899,19 @@ namespace ConfigSheetForge.Unity.Editor
             return "请展开详细日志确认";
         }
 
-        private static bool ResultJsonDeclaresFailure(string resultJson)
+        private static bool ResultJsonDeclaresFailure(string operation, string resultJson)
         {
             var success = ExtractBoolean(resultJson, "success");
-            return success.HasValue && !success.Value;
+            if (success.HasValue && !success.Value)
+            {
+                return true;
+            }
+
+            return string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase) &&
+                   success.HasValue &&
+                   success.Value &&
+                   !string.IsNullOrWhiteSpace(resultJson) &&
+                   resultJson.IndexOf("\"merge.inputs.prepare\"", StringComparison.OrdinalIgnoreCase) < 0;
         }
 
         private static string BuildBranchNodeFallback(ProjectConfigSummary projectConfig)

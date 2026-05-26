@@ -30,6 +30,8 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("branch binding one-to-one conflict blocks lifecycle", BranchBindingOneToOneConflictBlocksLifecycle),
     ("duplicate branch bindings block lifecycle with record ids", DuplicateBranchBindingsBlockLifecycleWithRecordIds),
     ("sync-cache hydrates branch workspace from registry snapshot", SyncCacheHydratesBranchWorkspaceFromRegistrySnapshot),
+    ("compare-merge dry-run hydrates workspaces and table scope", CompareMergeDryRunHydratesWorkspacesAndTableScope),
+    ("compare-merge dry-run fails without target workspace", CompareMergeDryRunFailsWithoutTargetWorkspace),
     ("seed registry lookup reuses existing branch binding record", () => RunSync(SeedRegistryLookupReusesExistingBranchBindingRecord)),
     ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
@@ -695,6 +697,151 @@ static async Task SyncCacheHydratesBranchWorkspaceFromRegistrySnapshot()
     AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.export_xlsx" && a.Status == "planned"), "sync-cache dry-run should plan export.");
     AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.triangulation_compare" && a.Status == "planned"), "sync-cache dry-run should plan triangulation.");
     AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.cache_hash_gate" && a.Status == "planned"), "sync-cache dry-run should plan hash gate.");
+}
+
+static async Task CompareMergeDryRunHydratesWorkspacesAndTableScope()
+{
+    var request = SampleCompareMergeRequest();
+    var snapshot = SampleCompareMergeRegistrySnapshot(includeTarget: true);
+    ConfigSheetForge.Cli.Program.HydrateCompareMergeRequestFromRegistrySnapshot(request, snapshot, "");
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+
+    AssertTrue(result.Success, "compare-merge dry-run should succeed when source/target workspaces and table locators are hydrated.");
+    AssertTrue(result.Actions.Any(a => a.Action == "merge.inputs.prepare" && a.Details.TryGetValue("tableCount", out var count) && count == "2"), "compare-merge should expose tableCount in merge.inputs.prepare details.");
+    AssertTrue(result.Actions.Any(a => a.Action == "merge.compare" && a.Details.TryGetValue("targetWikiNodeToken", out var token) && token == "wik_main"), "compare-merge should expose target workspace details.");
+    AssertTrue(result.Actions.Any(a => a.Action == "merge.preview" && a.Details.TryGetValue("mergeReportPath", out var path) && path.Contains("merge-report.md")), "compare-merge should include merge report path.");
+    AssertTrue(result.Actions.Any(a => a.Action == "merge.preview" && a.Details.TryGetValue("tableIds", out var tables) && tables.Contains("ItemsData") && tables.Contains("SkillsData")), "compare-merge preview should list compared tables.");
+}
+
+static async Task CompareMergeDryRunFailsWithoutTargetWorkspace()
+{
+    var request = SampleCompareMergeRequest();
+    var snapshot = SampleCompareMergeRegistrySnapshot(includeTarget: false);
+    ConfigSheetForge.Cli.Program.HydrateCompareMergeRequestFromRegistrySnapshot(request, snapshot, "");
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+
+    AssertTrue(!result.Success, "compare-merge dry-run must not report success when target workspace/table locators are missing.");
+    AssertTrue(result.Actions.Any(a => a.Action == "merge.inputs.prepare" && a.Status == "blocked"), "blocked compare-merge should still show the missing input plan action.");
+    AssertTrue(result.HumanReadableFailures.Any(f => f.Contains("目标分支") && (f.Contains("BranchBindings") || f.Contains("ConfigSheets"))), "failure should explain that target branch registry data is missing.");
+}
+
+static LifecycleContractRequest SampleCompareMergeRequest()
+{
+    return new LifecycleContractRequest
+    {
+        Operation = "compare-merge",
+        DryRun = true,
+        Locale = "zh-Hans",
+        Registry = new RegistryContract { BaseToken = "base_mock" },
+        Git = new ContractGitSpec { Branch = "feature/config", Profile = "feature-config" },
+        BranchWorkspace = new BranchWorkspaceContract
+        {
+            RequireOneToOneBinding = true,
+            MainGitBranch = "main",
+            MainFeishuBranch = "main",
+            ProfileNameTemplate = "{gitBranch}",
+            BranchNodeTitleTemplate = "branch-{slug}"
+        },
+        MergeInputs = new MergeInputsContract
+        {
+            SourceBranch = "feature/config",
+            TargetBranch = "main",
+            TargetFeishuProfile = "main",
+            BasePath = "Temp/ConfigSheetForge/merge-inputs/main_base.semantic.json",
+            OursPath = "Temp/ConfigSheetForge/merge-inputs/feature-config_ours.semantic.json",
+            TheirsPath = "Temp/ConfigSheetForge/merge-inputs/main_theirs.semantic.json",
+            MergeReportPath = "Temp/ConfigSheetForge/merge-report.md",
+            MergedPath = "Temp/ConfigSheetForge/merged.semantic.json",
+            PrNumber = "480",
+            PrUrl = "https://github.example/pull/480"
+        },
+        MergePolicy = new MergePolicyContract { LowRisk = true }
+    };
+}
+
+static RegistrySnapshot SampleCompareMergeRegistrySnapshot(bool includeTarget)
+{
+    var snapshot = new RegistrySnapshot();
+    var branchTable = new RegistryTableSnapshot
+    {
+        MachineKey = "BranchBindings",
+        TableId = "tbl_branch",
+        DisplayName = "分支绑定"
+    };
+    branchTable.Records.Add(new RegistryRecordSnapshot
+    {
+        RecordId = "rec_feature",
+        Values =
+        {
+            ["Git分支"] = "feature/config",
+            ["配置Profile"] = "feature-config",
+            ["Wiki节点Token"] = "wik_feature",
+            ["Wiki节点链接"] = "https://example.feishu.cn/wiki/wik_feature",
+            ["状态"] = "active"
+        }
+    });
+    if (includeTarget)
+    {
+        branchTable.Records.Add(new RegistryRecordSnapshot
+        {
+            RecordId = "rec_main",
+            Values =
+            {
+                ["Git分支"] = "main",
+                ["配置Profile"] = "main",
+                ["Wiki节点Token"] = "wik_main",
+                ["Wiki节点链接"] = "https://example.feishu.cn/wiki/wik_main",
+                ["状态"] = "active"
+            }
+        });
+    }
+
+    snapshot.Tables.Add(branchTable);
+    var configTable = new RegistryTableSnapshot
+    {
+        MachineKey = "ConfigSheets",
+        TableId = "tbl_config",
+        DisplayName = "配表清单"
+    };
+    foreach (var tableId in new[] { "ItemsData", "SkillsData" })
+    {
+        configTable.Records.Add(new RegistryRecordSnapshot
+        {
+            RecordId = "rec_" + tableId + "_feature",
+            Values =
+            {
+                ["配表ID"] = tableId,
+                ["显示名称"] = tableId.Replace("Data", ""),
+                ["配置Profile"] = "feature-config",
+                ["在线表Token"] = "sht_" + tableId + "_feature",
+                ["工作表ID"] = "sheet_" + tableId + "_feature",
+                ["在线表链接"] = "https://example.feishu.cn/sheets/" + tableId + "_feature",
+                ["Wiki节点Token"] = "wik_feature"
+            }
+        });
+        if (includeTarget)
+        {
+            configTable.Records.Add(new RegistryRecordSnapshot
+            {
+                RecordId = "rec_" + tableId + "_main",
+                Values =
+                {
+                    ["配表ID"] = tableId,
+                    ["显示名称"] = tableId.Replace("Data", ""),
+                    ["配置Profile"] = "main",
+                    ["在线表Token"] = "sht_" + tableId + "_main",
+                    ["工作表ID"] = "sheet_" + tableId + "_main",
+                    ["在线表链接"] = "https://example.feishu.cn/sheets/" + tableId + "_main",
+                    ["Wiki节点Token"] = "wik_main"
+                }
+            });
+        }
+    }
+
+    snapshot.Tables.Add(configTable);
+    return snapshot;
 }
 
 static void SeedRegistryLookupReusesExistingBranchBindingRecord()

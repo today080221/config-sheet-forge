@@ -628,6 +628,107 @@ public static class Program
         HydrateSyncCacheRequestFromRegistrySnapshot(request, snapshot, selectedTable);
     }
 
+    private static async Task HydrateCompareMergeRequestFromRegistryAsync(LifecycleContractRequest request, ParsedArgs args, string selectedTable)
+    {
+        if (request == null || request.Registry == null || string.IsNullOrWhiteSpace(request.Registry.BaseToken))
+        {
+            return;
+        }
+
+        var gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
+        var snapshot = await LoadRegistrySnapshotFromLarkAsync(gateway, request.Registry.BaseToken, request.Locale, args);
+        HydrateCompareMergeRequestFromRegistrySnapshot(request, snapshot, selectedTable);
+    }
+
+    public static void HydrateCompareMergeRequestFromRegistrySnapshot(LifecycleContractRequest request, RegistrySnapshot snapshot, string selectedTable)
+    {
+        if (request == null || snapshot == null)
+        {
+            return;
+        }
+
+        request.MergeInputs ??= new MergeInputsContract();
+        HydrateSyncCacheRequestFromRegistrySnapshot(request, snapshot, selectedTable);
+
+        var originalGit = request.Git ?? new ContractGitSpec();
+        var originalWorkspace = request.BranchWorkspace ?? new BranchWorkspaceContract();
+        var sourceGit = new ContractGitSpec
+        {
+            Branch = originalGit.Branch,
+            FeishuBranch = originalGit.FeishuBranch,
+            Profile = originalGit.Profile,
+            Head = originalGit.Head
+        };
+        var sourceWorkspace = new BranchWorkspaceContract
+        {
+            Mode = originalWorkspace.Mode,
+            RootWikiToken = originalWorkspace.RootWikiToken,
+            RootWikiUrl = originalWorkspace.RootWikiUrl,
+            RootWikiTitle = originalWorkspace.RootWikiTitle,
+            GitBranch = originalWorkspace.GitBranch,
+            FeishuBranch = originalWorkspace.FeishuBranch,
+            Profile = originalWorkspace.Profile,
+            MainGitBranch = originalWorkspace.MainGitBranch,
+            MainFeishuBranch = originalWorkspace.MainFeishuBranch,
+            ProfileNameTemplate = originalWorkspace.ProfileNameTemplate,
+            BranchNodeTitleTemplate = originalWorkspace.BranchNodeTitleTemplate,
+            MainNodeTitle = originalWorkspace.MainNodeTitle,
+            CreateIfMissing = originalWorkspace.CreateIfMissing,
+            RequireOneToOneBinding = originalWorkspace.RequireOneToOneBinding,
+            BindingRegistryTable = originalWorkspace.BindingRegistryTable,
+            OwnerRole = originalWorkspace.OwnerRole,
+            CreatedBy = originalWorkspace.CreatedBy,
+            ExistingWikiNodeToken = originalWorkspace.ExistingWikiNodeToken,
+            ExistingWikiNodeUrl = originalWorkspace.ExistingWikiNodeUrl
+        };
+
+        try
+        {
+            var normalized = BranchWorkspaceResolver.NormalizeContract(request);
+            var targetBranch = FirstNonEmpty(request.MergeInputs.TargetBranch, normalized.MainGitBranch, "main");
+            var targetProfile = FirstNonEmpty(
+                request.MergeInputs.TargetFeishuProfile,
+                string.Equals(targetBranch, FirstNonEmpty(normalized.MainGitBranch, "main"), StringComparison.OrdinalIgnoreCase)
+                    ? FirstNonEmpty(normalized.MainFeishuBranch, "main")
+                    : "");
+            request.Git = new ContractGitSpec
+            {
+                Branch = targetBranch,
+                FeishuBranch = targetProfile,
+                Profile = targetProfile,
+                Head = sourceGit.Head
+            };
+            request.BranchWorkspace = new BranchWorkspaceContract
+            {
+                Mode = normalized.Mode,
+                RootWikiToken = normalized.RootWikiToken,
+                RootWikiUrl = normalized.RootWikiUrl,
+                RootWikiTitle = normalized.RootWikiTitle,
+                GitBranch = targetBranch,
+                FeishuBranch = targetProfile,
+                Profile = targetProfile,
+                MainGitBranch = normalized.MainGitBranch,
+                MainFeishuBranch = normalized.MainFeishuBranch,
+                ProfileNameTemplate = normalized.ProfileNameTemplate,
+                BranchNodeTitleTemplate = normalized.BranchNodeTitleTemplate,
+                MainNodeTitle = normalized.MainNodeTitle,
+                CreateIfMissing = normalized.CreateIfMissing,
+                RequireOneToOneBinding = normalized.RequireOneToOneBinding,
+                BindingRegistryTable = normalized.BindingRegistryTable,
+                OwnerRole = normalized.OwnerRole,
+                CreatedBy = normalized.CreatedBy,
+                ExistingWikiNodeToken = request.MergeInputs.TargetBranchWikiNodeToken,
+                ExistingWikiNodeUrl = request.MergeInputs.TargetBranchWikiNodeUrl
+            };
+            HydrateSyncCacheRequestFromRegistrySnapshot(request, snapshot, selectedTable);
+        }
+        finally
+        {
+            request.Git = sourceGit;
+            request.BranchWorkspace = sourceWorkspace;
+        }
+    }
+
     public static void HydrateSyncCacheRequestFromRegistrySnapshot(LifecycleContractRequest request, RegistrySnapshot snapshot, string selectedTable)
     {
         if (request == null || snapshot == null)
@@ -732,7 +833,20 @@ public static class Program
             return;
         }
 
-        var table = seed.Tables.FirstOrDefault(t => string.Equals(t.TableId, tableId, StringComparison.OrdinalIgnoreCase));
+        var recordProfile = FirstNonEmpty(
+            GetRegistryRecordValue(record, "Profile", locale, registry),
+            GetRegistryRecordValue(record, "Branch", locale, registry),
+            GetRegistryRecordValue(record, "FeishuBranch", locale, registry));
+        var table = seed.Tables.FirstOrDefault(t =>
+            string.Equals(t.TableId, tableId, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(FirstNonEmpty(t.Profile, t.Branch), recordProfile, StringComparison.OrdinalIgnoreCase));
+        if (table == null)
+        {
+            table = seed.Tables.FirstOrDefault(t =>
+                string.Equals(t.TableId, tableId, StringComparison.OrdinalIgnoreCase) &&
+                string.IsNullOrWhiteSpace(FirstNonEmpty(t.Profile, t.Branch)));
+        }
+
         if (table == null)
         {
             table = new SeedTableContract { TableId = tableId };
@@ -1137,12 +1251,29 @@ public static class Program
             await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
         }
 
+        if (CompareMergeOperationRequested(request.Operation))
+        {
+            request.MergeInputs ??= new MergeInputsContract();
+            request.MergePolicy ??= new MergePolicyContract();
+            request.MergePolicy.ConfirmWriteMain = request.MergePolicy.ConfirmWriteMain ||
+                                                   request.MergeInputs.ConfirmWriteMain ||
+                                                   args.HasFlag("yes") ||
+                                                   args.HasFlag("confirm");
+            if (!request.DryRun && !request.MergePolicy.ConfirmWriteMain)
+            {
+                throw new CliException("compare-merge 写回 main 必须先生成预览并显式确认；请传 --yes，或在 contract.mergeInputs.confirmWriteMain=true。", 2);
+            }
+
+            await HydrateCompareMergeRequestFromRegistryAsync(request, args, FirstNonEmpty(request.MergeInputs.TableId, request.SyncCache != null ? request.SyncCache.TableId : "", request.Table != null ? request.Table.TableId : ""));
+        }
+
         ILifecyclePlatform platform = request.DryRun && !SeedOperationRequested(request.Operation)
             ? new PreviewLifecyclePlatform()
             : new CliLifecyclePlatform(args, request);
         var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
         if (SyncCacheOperationRequested(request.Operation) && result.Success && !request.DryRun)
         {
+            request.SyncCache ??= new SyncCacheContract();
             var workspace = await LoadWorkspaceAsync(requireConfig: false);
             var tables = BuildSyncCacheTables(request, request.SyncCache.TableId);
             if (tables.Count == 0)
@@ -2080,6 +2211,11 @@ public static class Program
     {
         return string.Equals(operation, "sync-cache", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(operation, "sync-from-online-sheet", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool CompareMergeOperationRequested(string operation)
+    {
+        return string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool GetJsonBool(JsonElement element, bool fallback, params string[] names)

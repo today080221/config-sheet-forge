@@ -99,7 +99,7 @@ config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.Conf
 通过 Unity Package Manager 安装：
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.15
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.16
 ```
 
 打开 `Tools > Config Sheet Forge`。普通使用者优先看首页的 `推荐下一步` 和 [Unity 配表窗口 5 分钟说明](unity-window.md)。
@@ -116,5 +116,7 @@ https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.
 新建配表时，普通用户不用手写字段模板。窗口会让你逐行填写字段 key、中文名、类型和说明；类型会显示为“文本 / 整数 / 小数 / 是/否 / 日期 / 日期时间 / 枚举 / JSON”。选择枚举时，需要在下面填可选值。
 
 合并 PR 时，如果本机安装并登录了 `gh`，窗口会自动使用当前 PR 的目标分支。没装或没登录时，合并页会提示原因，并提供可搜索的目标分支列表。
+
+生成合并预览时，结果里必须能看到当前分支、目标分支、比较了几张表、报告路径和缺失项。若窗口提示“目标分支缺少 BranchBindings/ConfigSheets”，先修注册中心或重新同步，不要直接继续 PR 检查。
 
 更多 Unity 使用说明见 [Unity 配表窗口 5 分钟说明](unity-window.md)。
