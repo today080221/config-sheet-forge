@@ -20,10 +20,35 @@ namespace ConfigSheetForge.Unity.Editor
         private const int GateTab = 3;
         private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
 
+        private enum WorkflowStatusKind
+        {
+            Neutral,
+            Ok,
+            Warning,
+            Error,
+            Pending
+        }
+
+        private struct WorkflowStatusCard
+        {
+            public string Label;
+            public string Status;
+            public string Detail;
+            public WorkflowStatusKind Kind;
+
+            public WorkflowStatusCard(string label, string status, string detail, WorkflowStatusKind kind)
+            {
+                Label = label;
+                Status = status;
+                Detail = detail;
+                Kind = kind;
+            }
+        }
+
         private string _cliPath = "config-sheet-forge";
         private string _rootQuery = "";
-        private string _tableId = "items";
-        private string _tableName = "Items";
+        private string _tableId = "";
+        private string _tableName = "";
         private string _spreadsheet = "";
         private string _sheetId = "";
         private string _range = "A1:Z500";
@@ -31,7 +56,7 @@ namespace ConfigSheetForge.Unity.Editor
         private string _schemaChangeSummary = "";
         private string _excelPath = "";
         private string _sheetName = "";
-        private string _fieldsText = "id|ID|string|唯一ID" + "\n" + "name|名称|string|显示名称";
+        private string _fieldsText = "id | ID | string | 唯一ID" + "\n" + "name | 名称 | string | 显示名称";
         private string _basePath = "";
         private string _oursPath = "";
         private string _theirsPath = "";
@@ -58,8 +83,14 @@ namespace ConfigSheetForge.Unity.Editor
         private bool _confirmSeedApply;
         private bool _confirmSeedExcelToSo;
         private bool _confirmSyncApply;
+        private bool _confirmNewTableApply;
         private bool _showAdvancedDiagnostics;
-        private bool _showBottomOutput = true;
+        private bool _showSyncSection = true;
+        private bool _showNewTableSection;
+        private bool _showSeedSection;
+        private bool _showMergeAdvancedOptions;
+        private bool _showFieldTemplateEditor;
+        private bool _showBottomOutput;
         private bool _isResizingOutputPanel;
         private float _bottomOutputHeight = 260f;
         private string _output = "";
@@ -67,6 +98,10 @@ namespace ConfigSheetForge.Unity.Editor
         private string _lastCommand = "";
         private string _lastResultPath = "";
         private string _lastLifecycleDir = "";
+        private string _lastCompletedOperation = "";
+        private string _lastCompletedInputFingerprint = "";
+        private bool _lastCompletedDryRun;
+        private bool _lastCompletedSuccess;
         private bool _showRecentCommand;
         private bool _showDetailedLogs;
         private int _selectedTab;
@@ -137,7 +172,7 @@ namespace ConfigSheetForge.Unity.Editor
             RefreshReadonlyStatus();
             _resultSummary = "配表 Source of Truth 窗口已打开。" + Environment.NewLine +
                              "这里只刷新本地状态，不会下载、不导出、不改文件。" + Environment.NewLine +
-                             "主流程只保留刷新状态、生成同步预览、运行 PR 检查。";
+                             "主流程只保留刷新状态、预览同步计划、运行 PR 检查。";
             _output = "";
         }
 
@@ -200,7 +235,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("复制 UPM", "复制通过 Unity Package Manager 安装此包的 Git URL。"), GUILayout.Width(88)))
             {
-                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.10";
+                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.11";
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("飞书在线 Sheet 是 Source of Truth，本地 Excel 只是兼容缓存。", EditorStyles.miniLabel);
@@ -284,6 +319,31 @@ namespace ConfigSheetForge.Unity.Editor
             return _projectConfig.CurrentBranchTables.Count.ToString() + " 张当前分支在线表";
         }
 
+        private string BuildMergeStatusText()
+        {
+            if (!string.IsNullOrWhiteSpace(_prNumber))
+            {
+                return "已识别 PR，目标分支为 " + FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main");
+            }
+
+            if (string.IsNullOrWhiteSpace(_mergeSourceBranch) || string.IsNullOrWhiteSpace(_targetBranch))
+            {
+                return "正在识别分支";
+            }
+
+            return "使用目标分支 fallback";
+        }
+
+        private string BuildMergeNextStepText()
+        {
+            if (_writeBackToMain && _confirmWriteMain)
+            {
+                return LastPreviewPassed("compare-merge") ? "确认写回 main" : "先生成合并预览";
+            }
+
+            return "生成合并预览";
+        }
+
         private string BuildTargetWikiText()
         {
             if (!string.IsNullOrWhiteSpace(_targetBranchWikiNodeTitle))
@@ -309,17 +369,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("当前状态", EditorStyles.boldLabel);
-            EditorGUILayout.BeginHorizontal();
-            DrawStatusMiniCard("当前分支", FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch, "未知"), MessageType.None);
-            DrawStatusMiniCard("Feishu branch/profile", FirstNonEmpty(_projectConfig.BranchProfile, "按当前分支推导中"), MessageType.None);
-            DrawStatusMiniCard("在线表", BuildOnlineTableStatus(), OnlineTablesReadable() ? MessageType.Info : MessageType.Warning);
-            EditorGUILayout.EndHorizontal();
-
-            EditorGUILayout.BeginHorizontal();
-            DrawStatusMiniCard("Cache", BuildCacheOverviewText(projectRoot), CacheLooksFresh(projectRoot) ? MessageType.Info : MessageType.Warning);
-            DrawStatusMiniCard("PR Gate", BuildGateStatusText(), GateLooksPassed() ? MessageType.Info : MessageType.Warning);
-            DrawStatusMiniCard("下一步", BuildNextStepText(projectRoot), MessageType.None);
-            EditorGUILayout.EndHorizontal();
+            DrawStatusCardGrid(BuildWorkflowStatusCards(projectRoot));
 
             EditorGUILayout.BeginHorizontal();
             if (DrawJobButton(new GUIContent(BuildNextStepButtonText(projectRoot), "按当前状态执行推荐动作。"), GUILayout.Height(26)))
@@ -351,7 +401,7 @@ namespace ConfigSheetForge.Unity.Editor
                 _output = "";
             }
 
-            if (DrawJobButton(new GUIContent("生成同步预览", "等同于同步页 dry-run；不会写飞书，也不会改本地 cache。"), GUILayout.Height(32)))
+            if (DrawJobButton(new GUIContent("预览同步计划", "等同于同步页 dry-run；不会写飞书，也不会改本地 cache。"), GUILayout.Height(32)))
             {
                 RunSyncCache(apply: false);
             }
@@ -361,7 +411,7 @@ namespace ConfigSheetForge.Unity.Editor
                 RunPrGateReport();
             }
             EditorGUILayout.EndHorizontal();
-            EditorGUILayout.LabelField("“生成同步预览”等同于 sync-cache dry-run，只生成计划，不写飞书、不改本地 cache、不改 ProjectSettings。", EditorStyles.wordWrappedMiniLabel);
+            EditorGUILayout.LabelField("“预览同步计划”等同于 sync-cache dry-run，只生成计划，不写飞书、不改本地 cache、不改 ProjectSettings。", EditorStyles.wordWrappedMiniLabel);
 
             DrawCurrentBranchTables(compact: true);
             DrawSyncCacheModeCard();
@@ -486,17 +536,30 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (_projectConfig.Exists)
             {
-                DrawCurrentBranchTables(compact: false);
-                DrawSyncCacheModeCard();
-                DrawProjectNewTableInputs();
-                DrawProjectLifecycleCard(
-                    "新建配表向导",
-                    "发现项目配置后，这里走 adapter 生成 new-table lifecycle contract，再交给 core apply-contract dry-run。",
-                    "生成 dry-run 预览",
-                    "new-table",
-                    dryRun: true,
-                    includeNewTableSteps: true);
-                DrawProjectSeedCard();
+                _showSyncSection = EditorGUILayout.Foldout(_showSyncSection, "同步当前分支 cache", true);
+                if (_showSyncSection)
+                {
+                    DrawCurrentBranchTables(compact: false);
+                    DrawSyncCacheModeCard();
+                }
+
+                _showNewTableSection = EditorGUILayout.Foldout(_showNewTableSection, "新建配表", true);
+                if (_showNewTableSection)
+                {
+                    DrawProjectNewTableInputs();
+                    DrawProjectNewTableActions();
+                }
+
+                _showSeedSection = EditorGUILayout.Foldout(_showSeedSection, "本地 Excel Seed（高风险迁移，默认不执行）", true);
+                if (_showSeedSection)
+                {
+                    DrawProjectSeedCard();
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox("Seed 只在展开后手动预览或确认执行；打开窗口和切换页面都不会自动迁移、下载或写项目文件。", MessageType.Info);
+                }
+
                 return;
             }
 
@@ -544,13 +607,18 @@ namespace ConfigSheetForge.Unity.Editor
                 EditorGUILayout.BeginVertical(EditorStyles.helpBox);
                 EditorGUILayout.LabelField("执行", EditorStyles.boldLabel);
                 EditorGUILayout.LabelField("低风险 merge 只生成预览，不写回 main；adapter 会根据 source/target/merge-base 自动准备 base/ours/theirs semantic 输入。", EditorStyles.wordWrappedLabel);
+                var mergeWriteReady = _writeBackToMain && _confirmWriteMain && LastPreviewPassed("compare-merge");
+                if (_writeBackToMain && _confirmWriteMain && !LastPreviewPassed("compare-merge"))
+                {
+                    EditorGUILayout.HelpBox("请先生成合并预览，并确认预览成功后再写回 main。", MessageType.Warning);
+                }
                 EditorGUILayout.BeginHorizontal();
                 if (DrawJobButton(new GUIContent("生成合并预览", "生成 compare-merge dry-run，不写回 main。"), GUILayout.Height(28)))
                 {
                     RunProjectLifecycle("compare-merge", dryRun: true);
                 }
 
-                if (DrawJobButton(new GUIContent("确认写回 main", "危险操作：必须勾选申请写回和确认写回。"), _writeBackToMain && _confirmWriteMain, GUILayout.Height(28)))
+                if (DrawJobButton(new GUIContent("确认写回 main", "危险操作：必须勾选申请写回、确认写回，并且最近一次合并预览成功。"), mergeWriteReady, GUILayout.Height(28)))
                 {
                     if (EditorUtility.DisplayDialog("确认写回 main", "将按项目 adapter 的 compare-merge contract 执行写回。请确认预览已经通过。", "确认执行", "取消"))
                     {
@@ -600,9 +668,50 @@ namespace ConfigSheetForge.Unity.Editor
                 RunCli("gate", "--details");
             }
 
-            EditorGUILayout.LabelField(_gateReportSummary.ShortText, EditorStyles.wordWrappedMiniLabel, GUILayout.MinWidth(220));
+            EditorGUILayout.LabelField(BuildGateStatusText(), EditorStyles.wordWrappedMiniLabel, GUILayout.MinWidth(220));
             EditorGUILayout.EndHorizontal();
-            EditorGUILayout.LabelField(_gateReportSummary.DetailText, EditorStyles.wordWrappedLabel);
+            DrawGateReportCards();
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawGateReportCards()
+        {
+            if (_gateReportSummary == null || !_gateReportSummary.HasReport)
+            {
+                EditorGUILayout.HelpBox("还没有生成 PR 检查报告。点击“生成 PR gate report”后，这里会显示是否可以合并。", MessageType.Info);
+                return;
+            }
+
+            if (GateLooksPassed())
+            {
+                EditorGUILayout.HelpBox("PR 检查通过：当前 cache、合并审查和权限检查看起来可以合并。", MessageType.Info);
+                return;
+            }
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("PR 还不能合并", EditorStyles.boldLabel);
+            var failures = _gateReportSummary.Failures;
+            if (failures.Count == 0)
+            {
+                EditorGUILayout.LabelField("原因：报告没有给出明确失败原因。", EditorStyles.wordWrappedLabel);
+                EditorGUILayout.LabelField("下一步：重新运行 PR 检查；如果仍失败，请展开输出页查看详细日志。", EditorStyles.wordWrappedLabel);
+            }
+            else
+            {
+                for (var i = 0; i < failures.Count; i++)
+                {
+                    DrawGateFailureCard(failures[i]);
+                }
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private static void DrawGateFailureCard(GateFailureView failure)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("原因：" + failure.Reason, EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("下一步：" + failure.NextStep, EditorStyles.wordWrappedLabel);
             EditorGUILayout.EndVertical();
         }
 
@@ -661,16 +770,21 @@ namespace ConfigSheetForge.Unity.Editor
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("同步当前分支 cache", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("生成 dry-run 预览与首页“生成同步预览”等价：只生成计划，不写飞书、不改本地 cache、不改 ProjectSettings。", EditorStyles.wordWrappedLabel);
-            EditorGUILayout.LabelField("apply 只有勾选确认并通过弹窗后才会执行；它会读取在线 Sheet、导出 xlsx、完成三方一致性检查和 hash gate 后，才可能更新本地 cache。", EditorStyles.wordWrappedLabel);
-            _confirmSyncApply = EditorGUILayout.Toggle(new GUIContent("确认执行 apply", "apply 会更新 .config-sheet-forge/cache 和 excel-cache；必须先确认。"), _confirmSyncApply);
+            EditorGUILayout.LabelField("预览同步计划只读取在线注册中心并生成计划，不写飞书、不改本地 cache、不改 ProjectSettings。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("写入本地 cache 只有在预览通过、勾选确认并通过弹窗后才会执行；它会读取在线 Sheet、导出 xlsx、完成三方一致性检查和 hash gate 后更新本地 cache。", EditorStyles.wordWrappedLabel);
+            _confirmSyncApply = EditorGUILayout.Toggle(new GUIContent("确认写入本地 cache", "允许更新 .config-sheet-forge/cache 和 excel-cache；必须先预览通过。"), _confirmSyncApply);
+            var syncApplyReady = _confirmSyncApply && LastPreviewPassed("sync-cache");
+            if (_confirmSyncApply && !LastPreviewPassed("sync-cache"))
+            {
+                EditorGUILayout.HelpBox("请先预览同步计划，并确认预览成功后再写入本地 cache。", MessageType.Warning);
+            }
             EditorGUILayout.BeginHorizontal();
-            if (DrawJobButton(new GUIContent("生成 dry-run 预览", "读取在线注册中心并生成同步计划，不改本地 cache。"), GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("预览同步计划", "读取在线注册中心并生成同步计划，不改本地 cache。"), GUILayout.Height(28)))
             {
                 RunSyncCache(apply: false);
             }
 
-            if (DrawJobButton(new GUIContent("执行 apply", "危险操作：会更新本地 cache；需要先确认。"), _confirmSyncApply, GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("写入本地 cache", "危险操作：会更新本地 cache；需要确认且最近一次同步预览成功。"), syncApplyReady, GUILayout.Height(28)))
             {
                 if (EditorUtility.DisplayDialog("确认同步 cache", "将读取当前 branch/profile 的在线 Sheet，导出 xlsx，三方一致后更新本地 cache。无变化时会显示“无变化，未重写 cache”。", "确认执行", "取消"))
                 {
@@ -685,15 +799,92 @@ namespace ConfigSheetForge.Unity.Editor
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("新表输入", EditorStyles.boldLabel);
-            _tableId = EditorGUILayout.TextField(new GUIContent("配表ID", "会写入 inputs.tableId，并由项目 adapter 转成 contract.table.tableId。"), _tableId);
-            _tableName = EditorGUILayout.TextField(new GUIContent("标题/显示名称", "会同时写入 inputs.title 和 inputs.displayName。"), _tableName);
+            _tableId = EditorGUILayout.TextField(new GUIContent("配表ID", "必填。稳定机器 key，例如 ItemsData 或 MonsterData。"), _tableId);
+            if (string.IsNullOrWhiteSpace(_tableId))
+            {
+                EditorGUILayout.LabelField("例：ItemsData、MonsterData。不要使用临时中文名。", EditorStyles.wordWrappedMiniLabel);
+            }
+
+            _tableName = EditorGUILayout.TextField(new GUIContent("显示名称", "必填。策划在窗口和报告里看到的名称。"), _tableName);
+            if (string.IsNullOrWhiteSpace(_tableName))
+            {
+                EditorGUILayout.LabelField("例：道具表、怪物表。", EditorStyles.wordWrappedMiniLabel);
+            }
+
             _ownerRole = EditorGUILayout.TextField(new GUIContent("负责人角色", "例如 configOwner；为空时由项目 adapter 默认。"), _ownerRole);
             _schemaChangeSummary = EditorGUILayout.TextField(new GUIContent("Schema 变更说明", "写入 inputs.schemaChangeSummary，供 SchemaReviews reason 使用。"), _schemaChangeSummary);
             _excelPath = EditorGUILayout.TextField(new GUIContent("本地 Excel 路径", "可选；写入 inputs.excelPath。"), _excelPath);
             _sheetName = EditorGUILayout.TextField(new GUIContent("工作表名", "可选；写入 inputs.sheetName。"), _sheetName);
-            EditorGUILayout.LabelField(new GUIContent("字段模板", "每行格式：key|displayName|valueKind|description。复杂字段写入 inputs JSON，不走长 inline JSON 参数。"));
-            _fieldsText = EditorGUILayout.TextArea(_fieldsText, GUILayout.MinHeight(72));
+            EditorGUILayout.LabelField(new GUIContent("字段示例（可编辑）", "每行：字段 key | 显示名 | 类型 | 说明。复杂字段写入 inputs JSON，不走长 inline JSON 参数。"));
+            EditorGUILayout.HelpBox("示例含义：id 是唯一 ID 字段，name 是显示名称字段。可以先保留示例做 dry-run，再按项目规范补字段。", MessageType.Info);
+            DrawFieldTemplatePreview();
+            _showFieldTemplateEditor = EditorGUILayout.Foldout(_showFieldTemplateEditor, "编辑字段模板", true);
+            if (_showFieldTemplateEditor)
+            {
+                EditorGUILayout.LabelField("每行一个字段：字段 key | 显示名 | 类型 | 说明。", EditorStyles.wordWrappedMiniLabel);
+                _fieldsText = EditorGUILayout.TextArea(_fieldsText, GUILayout.MinHeight(72));
+            }
             EditorGUILayout.EndVertical();
+        }
+
+        private void DrawFieldTemplatePreview()
+        {
+            var fields = ParseFieldsText();
+            if (fields.Count == 0)
+            {
+                EditorGUILayout.HelpBox("还没有字段模板。至少保留一个稳定 ID 字段，例如 id / ID / string。", MessageType.Warning);
+                return;
+            }
+
+            for (var i = 0; i < fields.Count; i++)
+            {
+                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+                EditorGUILayout.LabelField(FirstNonEmpty(fields[i].Key, "未命名"), EditorStyles.boldLabel, GUILayout.Width(110));
+                EditorGUILayout.LabelField(FirstNonEmpty(fields[i].DisplayName, fields[i].Key, "未命名"), GUILayout.Width(120));
+                EditorGUILayout.LabelField(FirstNonEmpty(fields[i].ValueKind, "string"), GUILayout.Width(72));
+                EditorGUILayout.LabelField(FirstNonEmpty(fields[i].Description, "无说明"), EditorStyles.wordWrappedMiniLabel);
+                EditorGUILayout.EndHorizontal();
+            }
+        }
+
+        private void DrawProjectNewTableActions()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("新建配表操作", EditorStyles.boldLabel);
+            var hasRequiredFields = HasNewTableRequiredFields();
+            if (!hasRequiredFields)
+            {
+                EditorGUILayout.HelpBox("请先填写配表ID和显示名称。", MessageType.Warning);
+            }
+
+            _confirmNewTableApply = EditorGUILayout.Toggle(new GUIContent("确认创建在线表并登记", "允许创建/复用在线 Sheet，并登记到 Base。必须先预览通过。"), _confirmNewTableApply);
+            var applyReady = hasRequiredFields && _confirmNewTableApply && LastPreviewPassed("new-table");
+            if (_confirmNewTableApply && !LastPreviewPassed("new-table"))
+            {
+                EditorGUILayout.HelpBox("请先预览新建配表，并确认预览成功后再创建在线表并登记。", MessageType.Warning);
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            if (DrawJobButton(new GUIContent("预览新建配表", "生成 new-table dry-run，预览创建 Sheet、登记 Base 和 SchemaReviews，不写飞书。"), hasRequiredFields, GUILayout.Height(28)))
+            {
+                RunProjectLifecycle("new-table", dryRun: true);
+            }
+
+            if (DrawJobButton(new GUIContent("创建在线表并登记", "危险操作：创建/复用在线 Sheet，并登记 Base；需要确认且最近一次预览成功。"), applyReady, GUILayout.Height(28)))
+            {
+                if (EditorUtility.DisplayDialog("确认新建配表", "将创建或复用在线 Sheet，并登记 ConfigSheets / SchemaReviews。请确认新建配表预览已经通过。", "确认执行", "取消"))
+                {
+                    RunProjectLifecycle("new-table", dryRun: false);
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.EndVertical();
+        }
+
+        private bool HasNewTableRequiredFields()
+        {
+            return !string.IsNullOrWhiteSpace(_tableId) &&
+                   !string.IsNullOrWhiteSpace(_tableName);
         }
 
         private void DrawProjectMergeInputs()
@@ -702,12 +893,10 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.LabelField("PR 合并上下文", EditorStyles.boldLabel);
             DrawReadonlyRow("当前分支", FirstNonEmpty(_mergeSourceBranch, _currentGitBranch, "未知"), "source/head branch。");
             DrawTargetBranchField();
-            DrawReadonlyRow("目标 Feishu", FirstNonEmpty(_targetFeishuProfile, "按目标分支推导中"), "目标分支对应的 Feishu profile。");
-            DrawReadonlyRow("目标 Wiki", BuildTargetWikiText(), "目标分支对应的 Wiki branch 节点。");
-            DrawReadonlyRow("共同祖先", FirstNonEmpty(_mergeBase, "待推导"), "source/head 与 target/base 的 merge-base。");
             DrawReadonlyRow("GitHub PR", BuildPrText(), "如果 gh 可用且 allowPrAutoDetect=true，会尝试自动识别当前分支的 PR。");
-            DrawReadonlyRow("比较范围", BuildMergeTablesText(), "将比较当前 branch/profile 下可见的在线表。");
-            DrawReadonlyRow("模式", _writeBackToMain && _confirmWriteMain ? "申请写回 main" : "只生成预览", "低风险默认只生成预览。");
+            DrawReadonlyRow("当前状态", BuildMergeStatusText(), "合并预览/写回的当前状态。");
+            DrawReadonlyRow("下一步", BuildMergeNextStepText(), "按当前状态推荐下一步操作。");
+            DrawReadonlyRow("比较范围", BuildMergeTablesText(), "默认比较当前分支所有在线表；单表模式在高级选项中。");
             if (!string.IsNullOrWhiteSpace(_mergeContextStatus))
             {
                 EditorGUILayout.LabelField(_mergeContextStatus, EditorStyles.wordWrappedMiniLabel);
@@ -725,9 +914,16 @@ namespace ConfigSheetForge.Unity.Editor
             }
             EditorGUILayout.EndHorizontal();
 
-            _mergeTableId = EditorGUILayout.TextField(new GUIContent("只比较单表", "可选；留空时 adapter 可比较当前分支所有在线表。"), _mergeTableId);
-            _mergeReportPath = EditorGUILayout.TextField(new GUIContent("报告路径", "写入 inputs.mergeReportPath。"), _mergeReportPath);
-            _mergedPath = EditorGUILayout.TextField(new GUIContent("合并结果路径", "写入 inputs.mergedPath。"), _mergedPath);
+            _showMergeAdvancedOptions = EditorGUILayout.Foldout(_showMergeAdvancedOptions, "高级选项", true);
+            if (_showMergeAdvancedOptions)
+            {
+                DrawReadonlyRow("共同祖先", FirstNonEmpty(_mergeBase, "待推导"), "source/head 与 target/base 的 merge-base。");
+                DrawReadonlyRow("目标 Feishu", FirstNonEmpty(_targetFeishuProfile, "按目标分支推导中"), "目标分支对应的 Feishu profile。");
+                DrawReadonlyRow("目标 Wiki", BuildTargetWikiText(), "目标分支对应的 Wiki branch 节点。");
+                _mergeTableId = EditorGUILayout.TextField(new GUIContent("只比较单表", "可选；留空时 adapter 可比较当前分支所有在线表。"), _mergeTableId);
+                _mergeReportPath = EditorGUILayout.TextField(new GUIContent("报告路径", "写入 inputs.mergeReportPath。"), _mergeReportPath);
+                _mergedPath = EditorGUILayout.TextField(new GUIContent("合并结果路径", "写入 inputs.mergedPath。"), _mergedPath);
+            }
             _writeBackToMain = EditorGUILayout.Toggle(new GUIContent("申请写回 main", "默认关闭；关闭时只生成 merge.preview。"), _writeBackToMain);
             if (_writeBackToMain)
             {
@@ -773,17 +969,22 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("本地 Excel 一次性 Seed", EditorStyles.boldLabel);
             EditorGUILayout.LabelField("把已有 ExcelToSO xlsx 迁移成飞书在线 Sheet Source of Truth。dry-run 只做本地预检和计划展示；apply 会创建/复用在线 Sheet，并在三方一致后回填 cache、项目配置、Base 和 ExcelToSO settings。", EditorStyles.wordWrappedLabel);
-            EditorGUILayout.HelpBox("打开窗口不会自动 seed、不会下载、不会改文件。apply 需要下面两个确认勾选，并且还会弹出确认框。", MessageType.Warning);
-            _confirmSeedApply = EditorGUILayout.Toggle(new GUIContent("确认执行 seed apply", "允许创建/复用在线 Sheet，并回填本地/Base 状态。"), _confirmSeedApply);
+            EditorGUILayout.HelpBox("高风险迁移入口：打开窗口、刷新状态、切换页面都不会自动 seed、下载或改文件。只有手动预览/确认后才会执行。", MessageType.Warning);
+            _confirmSeedApply = EditorGUILayout.Toggle(new GUIContent("确认迁移到在线表并回填", "允许创建/复用在线 Sheet，并回填本地/Base 状态。必须先预览通过。"), _confirmSeedApply);
             _confirmSeedExcelToSo = EditorGUILayout.Toggle(new GUIContent("确认更新 ExcelToSO settings", "允许只追加/更新目标表的 ExcelToSO JSON/YAML settings。"), _confirmSeedExcelToSo);
+            var seedApplyReady = _confirmSeedApply && _confirmSeedExcelToSo && LastPreviewPassed("seed-from-local-xlsx");
+            if ((_confirmSeedApply || _confirmSeedExcelToSo) && !LastPreviewPassed("seed-from-local-xlsx"))
+            {
+                EditorGUILayout.HelpBox("请先预览本地 Excel Seed，并确认预览成功后再执行迁移。", MessageType.Warning);
+            }
 
             EditorGUILayout.BeginHorizontal();
-            if (DrawJobButton(new GUIContent("生成 seed dry-run", "生成 seed-from-local-xlsx contract 并运行 dry-run，不写飞书、不改本地文件。"), GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("预览本地 Excel Seed", "生成 seed-from-local-xlsx dry-run，不写飞书、不改本地文件。"), GUILayout.Height(28)))
             {
                 RunProjectLifecycle("seed-from-local-xlsx", dryRun: true);
             }
 
-            if (DrawJobButton(new GUIContent("执行 seed apply", "危险操作：必须先 dry-run 通过，再显式确认。"), _confirmSeedApply && _confirmSeedExcelToSo, GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("迁移到在线表并回填", "危险操作：创建/复用在线 Sheet，并回填本地 cache、项目配置、Base 和 ExcelToSO settings。"), seedApplyReady, GUILayout.Height(28)))
             {
                 if (EditorUtility.DisplayDialog("确认 seed apply", "将把本地 xlsx 迁移到在线 Sheet，并在三方一致后回填 cache、项目配置、Base 和 ExcelToSO settings。请确认 dry-run 已通过。", "确认执行", "取消"))
                 {
@@ -867,8 +1068,18 @@ namespace ConfigSheetForge.Unity.Editor
                 DrawWrappedReadonlyBlock("", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
             }
 
-            _showDetailedLogs = EditorGUILayout.Foldout(_showDetailedLogs || IsJobRunning, "详细日志", true);
-            if (_showDetailedLogs || IsJobRunning)
+            var showLogs = expanded;
+            if (!expanded)
+            {
+                _showDetailedLogs = EditorGUILayout.Foldout(_showDetailedLogs, "详细日志 / result JSON", true);
+                showLogs = _showDetailedLogs;
+            }
+            else
+            {
+                EditorGUILayout.LabelField("详细日志 / result JSON", EditorStyles.boldLabel);
+            }
+
+            if (showLogs)
             {
                 var outputStyle = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
                 var logHeight = Math.Max(80f, preferredHeight - summaryHeight - (expanded ? 190f : 210f));
@@ -932,7 +1143,8 @@ namespace ConfigSheetForge.Unity.Editor
         {
             _resultSummary = summary ?? "";
             _output = details ?? "";
-            _showDetailedLogs = !string.IsNullOrWhiteSpace(_output);
+            _showBottomOutput = false;
+            _showDetailedLogs = false;
             Repaint();
         }
 
@@ -1019,8 +1231,12 @@ namespace ConfigSheetForge.Unity.Editor
                 changed = DrainActiveJobOutput() || changed;
                 var refresh = _activeJob.RefreshReadonlyStatusOnComplete;
                 _resultSummary = _activeJob.FinalSummary;
-                _showBottomOutput = true;
-                _showDetailedLogs = _activeJob.WasCancelled || !_activeJob.Success;
+                _lastCompletedOperation = _activeJob.Operation;
+                _lastCompletedDryRun = _activeJob.DryRun;
+                _lastCompletedSuccess = _activeJob.Success;
+                _lastCompletedInputFingerprint = _activeJob.InputFingerprint;
+                _showBottomOutput = false;
+                _showDetailedLogs = false;
                 _activeJob = null;
                 if (refresh)
                 {
@@ -1098,10 +1314,11 @@ namespace ConfigSheetForge.Unity.Editor
             _lastCommand = job.CommandLine;
             _lastResultPath = job.ResultPath;
             _lastLifecycleDir = job.LifecycleDirectory;
+            job.InputFingerprint = BuildOperationFingerprint(job.Operation);
             _outputScroll = Vector2.zero;
             _resultSummary = job.BuildLiveSummary();
             _output = job.StartOutput;
-            _showBottomOutput = true;
+            _showBottomOutput = false;
             _showDetailedLogs = false;
             job.Start();
             Repaint();
@@ -1133,6 +1350,50 @@ namespace ConfigSheetForge.Unity.Editor
             return clicked;
         }
 
+        private bool LastPreviewPassed(string operation)
+        {
+            return _lastCompletedSuccess &&
+                   _lastCompletedDryRun &&
+                   string.Equals(_lastCompletedOperation, operation, StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(_lastCompletedInputFingerprint, BuildOperationFingerprint(operation), StringComparison.Ordinal);
+        }
+
+        private string BuildOperationFingerprint(string operation)
+        {
+            var builder = new StringBuilder();
+            builder.Append(operation ?? "").Append('|');
+            builder.Append("branch=").Append(FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch)).Append('|');
+
+            if (string.Equals(operation, "new-table", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.Append("table=").Append(_tableId).Append('|');
+                builder.Append("name=").Append(_tableName).Append('|');
+                builder.Append("owner=").Append(_ownerRole).Append('|');
+                builder.Append("schema=").Append(_schemaChangeSummary).Append('|');
+                builder.Append("excel=").Append(_excelPath).Append('|');
+                builder.Append("sheet=").Append(_sheetName).Append('|');
+                builder.Append("fields=").Append(_fieldsText);
+            }
+            else if (string.Equals(operation, "seed-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.Append("table=").Append(_tableId).Append('|');
+                builder.Append("name=").Append(_tableName).Append('|');
+                builder.Append("excel=").Append(_excelPath).Append('|');
+                builder.Append("sheet=").Append(_sheetName);
+            }
+            else if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.Append("source=").Append(FirstNonEmpty(_mergeSourceBranch, _currentGitBranch)).Append('|');
+                builder.Append("target=").Append(FirstNonEmpty(_targetBranch, _defaultTargetBranch)).Append('|');
+                builder.Append("table=").Append(_mergeTableId).Append('|');
+                builder.Append("report=").Append(_mergeReportPath).Append('|');
+                builder.Append("merged=").Append(_mergedPath);
+            }
+
+            return builder.ToString();
+        }
+
         private bool EffectiveDryRun(string operation, bool defaultDryRun)
         {
             if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
@@ -1154,6 +1415,11 @@ namespace ConfigSheetForge.Unity.Editor
             if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
             {
                 return _writeBackToMain && _confirmWriteMain;
+            }
+
+            if (string.Equals(operation, "new-table", StringComparison.OrdinalIgnoreCase))
+            {
+                return _confirmNewTableApply;
             }
 
             return _confirmSeedApply;
@@ -1212,23 +1478,113 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
         }
 
-        private static void DrawStatusMiniCard(string label, string value, MessageType messageType)
+        private List<WorkflowStatusCard> BuildWorkflowStatusCards(string projectRoot)
         {
-            var oldColor = GUI.color;
-            if (messageType == MessageType.Warning)
+            var cards = new List<WorkflowStatusCard>();
+            var branchBound = BranchLooksBound();
+            var onlineReadable = OnlineTablesReadable();
+            var cacheFresh = CacheLooksFresh(projectRoot);
+            cards.Add(new WorkflowStatusCard(
+                "分支工作区",
+                branchBound ? "已绑定" : "未绑定",
+                branchBound ? "已找到当前分支对应的在线工作区。" : "先预览同步计划，确认 BranchBindings 是否缺失或权限不足。",
+                branchBound ? WorkflowStatusKind.Ok : WorkflowStatusKind.Warning));
+            cards.Add(new WorkflowStatusCard(
+                "在线表",
+                BuildOnlineTableStatus(),
+                BuildOnlineTableStatusDetail(),
+                onlineReadable ? WorkflowStatusKind.Ok : WorkflowStatusKind.Warning));
+            cards.Add(new WorkflowStatusCard(
+                "本地 cache",
+                cacheFresh ? "本地 cache 新鲜" : "待同步",
+                cacheFresh ? "当前分支表已有本地 semantic/hash cache。" : "先预览同步计划；apply 只在确认后写本地 cache。",
+                cacheFresh ? WorkflowStatusKind.Ok : WorkflowStatusKind.Pending));
+            cards.Add(new WorkflowStatusCard(
+                "PR gate",
+                BuildGateStatusText(),
+                BuildGateStatusDetail(),
+                GateLooksPassed() ? WorkflowStatusKind.Ok : (_gateReportSummary.HasReport ? WorkflowStatusKind.Error : WorkflowStatusKind.Pending)));
+            cards.Add(new WorkflowStatusCard(
+                "下一步",
+                BuildNextStepText(projectRoot),
+                "只读刷新不会下载、导出或写入任何项目文件。",
+                WorkflowStatusKind.Neutral));
+            return cards;
+        }
+
+        private static void DrawStatusCardGrid(List<WorkflowStatusCard> cards)
+        {
+            var viewWidth = Math.Max(480f, EditorGUIUtility.currentViewWidth - 36f);
+            var columns = Mathf.Clamp(Mathf.FloorToInt(viewWidth / 210f), 2, 5);
+            if (cards.Count == 5 && columns == 4)
             {
-                GUI.color = new Color(1f, 0.82f, 0.48f);
-            }
-            else if (messageType == MessageType.Info)
-            {
-                GUI.color = new Color(0.65f, 0.92f, 0.7f);
+                columns = 3;
             }
 
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.MinWidth(150), GUILayout.ExpandWidth(true));
-            GUI.color = oldColor;
-            EditorGUILayout.LabelField(label, EditorStyles.miniBoldLabel);
-            EditorGUILayout.LabelField(value, EditorStyles.wordWrappedMiniLabel, GUILayout.MinHeight(EditorGUIUtility.singleLineHeight * 2f));
+            var cardWidth = Math.Max(160f, (viewWidth - (columns - 1) * 6f) / columns);
+            for (var i = 0; i < cards.Count; i += columns)
+            {
+                EditorGUILayout.BeginHorizontal();
+                for (var column = 0; column < columns; column++)
+                {
+                    var index = i + column;
+                    if (index < cards.Count)
+                    {
+                        DrawStatusCard(cards[index], cardWidth);
+                    }
+                    else
+                    {
+                        GUILayout.Space(cardWidth);
+                    }
+                }
+
+                EditorGUILayout.EndHorizontal();
+            }
+        }
+
+        private static void DrawStatusCard(WorkflowStatusCard card, float width)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Width(width), GUILayout.Height(86));
+            var bar = GUILayoutUtility.GetRect(1f, 4f, GUILayout.ExpandWidth(true));
+            EditorGUI.DrawRect(bar, StatusColor(card.Kind));
+            EditorGUILayout.LabelField(card.Label, EditorStyles.miniBoldLabel);
+            EditorGUILayout.LabelField(StatusKindText(card.Kind) + "：" + card.Status, EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(card.Detail, EditorStyles.wordWrappedMiniLabel, GUILayout.Height(EditorGUIUtility.singleLineHeight * 2f));
             EditorGUILayout.EndVertical();
+        }
+
+        private static Color StatusColor(WorkflowStatusKind kind)
+        {
+            switch (kind)
+            {
+                case WorkflowStatusKind.Ok:
+                    return new Color(0.24f, 0.66f, 0.34f);
+                case WorkflowStatusKind.Warning:
+                    return new Color(0.86f, 0.56f, 0.16f);
+                case WorkflowStatusKind.Error:
+                    return new Color(0.78f, 0.25f, 0.22f);
+                case WorkflowStatusKind.Pending:
+                    return new Color(0.24f, 0.47f, 0.78f);
+                default:
+                    return new Color(0.45f, 0.45f, 0.45f);
+            }
+        }
+
+        private static string StatusKindText(WorkflowStatusKind kind)
+        {
+            switch (kind)
+            {
+                case WorkflowStatusKind.Ok:
+                    return "正常";
+                case WorkflowStatusKind.Warning:
+                    return "警告";
+                case WorkflowStatusKind.Error:
+                    return "失败";
+                case WorkflowStatusKind.Pending:
+                    return "待处理";
+                default:
+                    return "状态";
+            }
         }
 
         private static void DrawReadonlyRow(string label, string value, string tooltip)
@@ -1732,6 +2088,13 @@ namespace ConfigSheetForge.Unity.Editor
                     args.Add("--yes");
                 }
             }
+            else if (string.Equals(operation, "new-table", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!dryRun && _confirmNewTableApply)
+                {
+                    args.Add("--yes");
+                }
+            }
 
             return args.ToArray();
         }
@@ -1777,20 +2140,45 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (!BranchLooksBound())
             {
-                return "未绑定";
+                return "未绑定分支";
             }
 
             if (OnlineTablesReadable())
             {
-                return "在线表可读（" + _projectConfig.CurrentBranchTables.Count.ToString() + " 张）";
+                return "在线表可读";
             }
 
             if (_projectConfig.CurrentBranchTables.Count == 0)
             {
-                return "未读到 ConfigSheets";
+                return "未读取到在线表";
             }
 
             return "部分不可读";
+        }
+
+        private string BuildOnlineTableStatusDetail()
+        {
+            if (!_projectConfig.Exists)
+            {
+                return "未找到项目共享配置。";
+            }
+
+            if (!BranchLooksBound())
+            {
+                return "当前分支还没有可用 BranchBindings。";
+            }
+
+            if (OnlineTablesReadable())
+            {
+                return "当前分支可读取 " + _projectConfig.CurrentBranchTables.Count.ToString() + " 张在线表。";
+            }
+
+            if (_projectConfig.CurrentBranchTables.Count == 0)
+            {
+                return "没有从 ConfigSheets 读到当前分支在线表。";
+            }
+
+            return "有表缺少 Sheet token、sheet id 或被权限阻断。";
         }
 
         private bool BranchLooksBound()
@@ -1843,18 +2231,39 @@ namespace ConfigSheetForge.Unity.Editor
         private bool GateLooksPassed()
         {
             return _gateReportSummary != null &&
-                   _gateReportSummary.ShortText.IndexOf("passed=true", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                   _gateReportSummary.ShortText.IndexOf("failures=0", StringComparison.OrdinalIgnoreCase) >= 0;
+                   _gateReportSummary.Passed.HasValue &&
+                   _gateReportSummary.Passed.Value &&
+                   _gateReportSummary.Failures.Count == 0;
         }
 
         private string BuildGateStatusText()
         {
-            if (_gateReportSummary == null || string.IsNullOrWhiteSpace(_gateReportSummary.ShortText) || _gateReportSummary.ShortText == "暂无报告")
+            if (_gateReportSummary == null || !_gateReportSummary.HasReport)
             {
                 return "未生成";
             }
 
             return GateLooksPassed() ? "通过" : _gateReportSummary.ShortText;
+        }
+
+        private string BuildGateStatusDetail()
+        {
+            if (_gateReportSummary == null || !_gateReportSummary.HasReport)
+            {
+                return "还没有最近一次 PR 检查报告。";
+            }
+
+            if (GateLooksPassed())
+            {
+                return "最近一次 PR 检查已通过。";
+            }
+
+            if (_gateReportSummary.Failures.Count > 0)
+            {
+                return _gateReportSummary.Failures[0].NextStep;
+            }
+
+            return "请重新运行 PR 检查查看阻断原因。";
         }
 
         private string BuildNextStepText(string projectRoot)
@@ -1866,12 +2275,12 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (!BranchLooksBound() || !OnlineTablesReadable())
             {
-                return "生成同步预览";
+                return "预览同步计划";
             }
 
             if (!CacheLooksFresh(projectRoot))
             {
-                return "同步 cache";
+                return "预览同步计划";
             }
 
             if (!GateLooksPassed())
@@ -1895,7 +2304,7 @@ namespace ConfigSheetForge.Unity.Editor
                 return "刷新状态";
             }
 
-            return "生成同步预览";
+            return "预览同步计划";
         }
 
         private void RunNextStep(string projectRoot)
@@ -2685,18 +3094,113 @@ namespace ConfigSheetForge.Unity.Editor
         }
     }
 
+    internal sealed class GateFailureView
+    {
+        public string Reason { get; set; } = "";
+        public string NextStep { get; set; } = "";
+        public int Priority { get; set; }
+
+        public static GateFailureView FromMessage(string message)
+        {
+            message = message ?? "";
+            if (ContainsAny(message, "MergeReviews", "merge review", "合并审查", "合并预览"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "缺少 MergeReviews 合并审查记录",
+                    NextStep = "去“合并”页生成合并预览，通过后补审查记录，再重新运行 PR 检查。",
+                    Priority = 10
+                };
+            }
+
+            if (ContainsAny(message, "SchemaReviews", "schema review", "Schema", "结构审查"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "Schema review 未完成",
+                    NextStep = "请负责人完成 SchemaReviews 审查，或补充变更说明后重新运行 PR 检查。",
+                    Priority = 20
+                };
+            }
+
+            if (ContainsAny(message, "waiver", "Waivers", "豁免", "过期"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "waiver 已过期或无效",
+                    NextStep = "请更新豁免记录，或移除豁免后按正常审查流程重新检查。",
+                    Priority = 30
+                };
+            }
+
+            if (ContainsAny(message, "permission", "forbidden", "权限", "scope", "bot"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "权限不足，无法读取在线注册中心或表格",
+                    NextStep = "请确认 bot / lark-cli 权限和 Base、Wiki、Sheet 资源授权后重新运行 PR 检查。",
+                    Priority = 40
+                };
+            }
+
+            if (ContainsAny(message, "BranchBindings", "分支绑定", "profile"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "分支工作区未绑定或绑定冲突",
+                    NextStep = "先预览同步计划，确认当前分支对应的 BranchBindings 记录唯一且有效。",
+                    Priority = 50
+                };
+            }
+
+            if (ContainsAny(message, "ConfigSheets", "Sheet token", "SpreadsheetToken", "在线表"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "未读取到当前分支在线表",
+                    NextStep = "先预览同步计划；如果仍失败，请检查 ConfigSheets 是否缺 Sheet token / sheet id 或权限不足。",
+                    Priority = 60
+                };
+            }
+
+            return new GateFailureView
+            {
+                Reason = string.IsNullOrWhiteSpace(message) ? "PR 检查未通过" : message,
+                NextStep = "按上面的原因修正后重新运行 PR 检查；需要细节时打开“输出”页查看日志。",
+                Priority = 100
+            };
+        }
+
+        private static bool ContainsAny(string value, params string[] needles)
+        {
+            foreach (var needle in needles)
+            {
+                if (value.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     internal sealed class GateReportSummaryView
     {
         public string Path { get; set; } = "";
         public string ShortText { get; set; } = "";
         public string DetailText { get; set; } = "";
+        public bool HasReport { get; set; }
+        public bool? Passed { get; set; }
+        public List<GateFailureView> Failures { get; } = new List<GateFailureView>();
 
         public static GateReportSummaryView NotFound(string path)
         {
             return new GateReportSummaryView
             {
                 Path = path ?? "",
-                ShortText = "暂无报告",
+                HasReport = false,
+                ShortText = "未生成 PR 检查",
                 DetailText = string.IsNullOrWhiteSpace(path)
                     ? "还没有生成 pr-gate-report。"
                     : "还没有找到最近一次 pr-gate-report：" + path
@@ -2707,29 +3211,62 @@ namespace ConfigSheetForge.Unity.Editor
         {
             json = json ?? "";
             var passed = ExtractBoolean(json, "passed");
-            var failures = ExtractStringArray(json, "humanReadableFailures");
+            var failureMessages = ExtractStringArray(json, "humanReadableFailures");
+            var failures = new List<GateFailureView>();
+            foreach (var failure in failureMessages)
+            {
+                failures.Add(GateFailureView.FromMessage(failure));
+            }
+            failures.Sort((left, right) => left.Priority.CompareTo(right.Priority));
+
             var builder = new StringBuilder();
-            builder.AppendLine("passed: " + (passed.HasValue ? passed.Value.ToString().ToLowerInvariant() : "unknown"));
-            builder.AppendLine("failures: " + failures.Count.ToString());
             if (failures.Count > 0)
             {
-                builder.AppendLine("需要处理：");
                 foreach (var failure in failures)
                 {
-                    builder.AppendLine("- " + failure);
+                    builder.AppendLine("原因：" + failure.Reason);
+                    builder.AppendLine("下一步：" + failure.NextStep);
                 }
             }
             else if (passed.HasValue && passed.Value)
             {
                 builder.AppendLine("最近一次 PR gate 已通过。");
             }
+            else
+            {
+                builder.AppendLine("PR gate 未通过，但报告没有给出明确原因。请重新运行 PR 检查或查看详细日志。");
+            }
 
-            return new GateReportSummaryView
+            var view = new GateReportSummaryView
             {
                 Path = path ?? "",
-                ShortText = "passed=" + (passed.HasValue ? passed.Value.ToString().ToLowerInvariant() : "unknown") + "，failures=" + failures.Count.ToString(),
+                HasReport = true,
+                Passed = passed,
+                ShortText = BuildShortText(passed, failures),
                 DetailText = builder.ToString().TrimEnd()
             };
+            view.Failures.AddRange(failures);
+            return view;
+        }
+
+        private static string BuildShortText(bool? passed, List<GateFailureView> failures)
+        {
+            if (passed.HasValue && passed.Value && failures.Count == 0)
+            {
+                return "通过";
+            }
+
+            if (failures.Count > 0)
+            {
+                return "未通过：" + failures[0].Reason;
+            }
+
+            if (passed.HasValue && !passed.Value)
+            {
+                return "未通过：需要查看报告";
+            }
+
+            return "状态未知";
         }
 
         private static bool? ExtractBoolean(string json, string propertyName)
@@ -2918,6 +3455,7 @@ namespace ConfigSheetForge.Unity.Editor
         public string ResultPath { get; private set; } = "";
         public string LifecycleDirectory { get; private set; } = "";
         public string FinalSummary { get; private set; } = "";
+        public string InputFingerprint { get; set; } = "";
         public bool Success { get; private set; }
         public bool WasCancelled { get; private set; }
         public bool RefreshReadonlyStatusOnComplete { get; private set; }
@@ -3391,7 +3929,9 @@ namespace ConfigSheetForge.Unity.Editor
                 builder.AppendLine("需要处理:");
                 foreach (var failure in failures)
                 {
-                    builder.AppendLine("- " + failure);
+                    var view = GateFailureView.FromMessage(failure);
+                    builder.AppendLine("- " + view.Reason);
+                    builder.AppendLine("  下一步: " + view.NextStep);
                 }
             }
             else if (!finalSuccess && string.IsNullOrWhiteSpace(resultJson))

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.11
+
+- Unity 首页状态卡改为策划向人话摘要，不再把 `passed=false`、`failures=1` 这类 raw debug 字段放进主流程；BranchBindings、Wiki token、CLI 来源和路径继续放在“高级诊断”。
+- `配表`页改为“同步当前分支 cache / 新建配表 / 本地 Excel Seed”折叠结构；默认只展开同步，Seed 作为高风险迁移入口默认收起且不会自动执行。
+- 按钮文案区分 `预览同步计划`、`预览新建配表`、`预览本地 Excel Seed`、`生成合并预览`；写入按钮明确目标，并要求确认加最近一次同输入预览通过。
+- 新建配表表单不再默认填 `items / Items`，必填为空时禁用预览并提示填写配表ID和显示名称；字段模板先以可读示例展示，文本编辑入口默认折叠。
+- 合并页按 GitHub PR 心智展示当前分支、目标分支、PR、状态和下一步；merge-base、target profile/wiki、单表比较等收进高级选项。
+- PR 检查页把失败原因映射成人话卡片，例如缺 MergeReviews、Schema review 未完成、waiver 过期、权限不足，并给出下一步。
+- 非输出页底部默认只显示一行最近结果摘要，完整命令、详细日志和 result JSON 默认折叠；输出页保留大日志视图并继续自动换行。
+- Unity package smoke 增加 UI 文案断言，防止“当前工作流 / 合并输入 / passed=false / failures=”等调试文案回流到主 UI。
+
 ## 0.4.10
 
 - 修复 v0.4.9 Unity Editor assembly 编译失败：`ConfigSheetForgeWindow.ExtractJsonString` 现在使用窗口类内可见的 JSON string parser，不再误调用 helper class 私有方法。

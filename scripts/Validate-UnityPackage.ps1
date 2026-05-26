@@ -211,13 +211,13 @@ foreach ($requiredText in @("BuildLifecycleInputsJson", "--inputs", "gateReportP
   }
 }
 
-foreach ($requiredUiText in @("当前状态", "PR 合并上下文", "结果摘要", "详细日志")) {
+foreach ($requiredUiText in @("当前状态", "PR 合并上下文", "结果摘要", "详细日志", "预览同步计划", "预览新建配表", "预览本地 Excel Seed", "PR 还不能合并")) {
   if ($window -notlike "*$requiredUiText*") {
     throw "Unity workflow UI is missing expected user-facing text: $requiredUiText"
   }
 }
 
-foreach ($retiredUiText in @("当前工作流", "合并输入")) {
+foreach ($retiredUiText in @("当前工作流", "合并输入", "passed=false", "failures=")) {
   if ($window -like "*$retiredUiText*") {
     throw "Unity workflow UI still contains retired debug text: $retiredUiText"
   }
