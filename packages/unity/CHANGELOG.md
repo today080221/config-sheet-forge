@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.13
+
+- 合并页目标分支改为可搜索列表，支持按分支名过滤；识别到 GitHub PR 时主界面固定使用 PR base branch，手动覆盖只放在高级选项。
+- 新增 GitHub PR 识别 preflight：明确提示 git、GitHub remote、gh 安装和 gh 登录状态；gh 缺失时不阻断同步/新建/seed，只提示手动选择目标分支。
+- 新建配表页改为结构化表单：负责人角色从项目 `roles` 读取并显示中文名，审批规则只读展示；字段用行编辑器增删、排序、选择类型。
+- 字段类型支持普通视图和高级模式：普通视图显示文本、整数、小数、是/否、日期、日期时间、枚举、JSON；高级模式显示 canonical 类型和内部 key。
+- 枚举字段提供结构化枚举值编辑，并按现有 `enum:a,b,c` 模板写入 contract；字段 key、中文名、说明、类型、枚举值和唯一 ID 都会实时校验。
+- 新建配表本地 Excel cache 路径在普通界面只读自动推导，高级模式才允许覆盖，避免和旧 Excel Seed 混淆。
+- 运行中状态卡增强：显示操作、人话阶段、安全性、已用时间、取消按钮，并在耗时较长时提示可切到输出页查看日志。
+- Project config summary 新增可选读取 `roles`、`newTable.defaultOwnerRole`、`newTable.supportedFieldTypes`、`newTable.defaultFields`、`github.requiredForPrAutoDetect` 和 `github.installHelpUrl`。
+- Unity package smoke 增加 v0.4.13 源码断言，防止目标分支选择器、新建配表表单、运行中状态和旧 debug 文案回退。
+
 ## 0.4.12
 
 - 修复非“输出”页底部“最近结果”收起后仍占大块高度的问题；collapsed 状态现在只绘制 34px 状态条，主工作区会回收高度。

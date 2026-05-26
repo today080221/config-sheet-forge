@@ -40,6 +40,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("project config probe skips registry base table ids", () => RunSync(ProjectConfigProbeSkipsRegistryBaseTableIds)),
     ("project config probe derives branch workspace names", () => RunSync(ProjectConfigProbeDerivesBranchWorkspaceNames)),
     ("project config probe reads documentation targets", () => RunSync(ProjectConfigProbeReadsDocumentationTargets)),
+    ("project config probe reads roles and new table options", () => RunSync(ProjectConfigProbeReadsRolesAndNewTableOptions)),
     ("project config probe ignores local state registry", () => RunSync(ProjectConfigProbeIgnoresLocalStateRegistry)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
     ("apply-contract sync-cache apply requires confirmation", ApplyContractSyncCacheApplyRequiresConfirmation),
@@ -971,6 +972,56 @@ static void ProjectConfigProbeReadsDocumentationTargets()
     AssertEqual("https://example.feishu.cn/wiki/root", summary.DocumentationTargets["Feishu entry"], "feishu doc link should be read.");
     AssertEqual("docs/tooling/designer-flow.md", summary.DocumentationTargets["projectDocs"], "localDocs should become project docs.");
     AssertEqual("docs/tooling/pr-merge.md", summary.DocumentationTargets["PR 合并流程"], "object doc target should use path.");
+}
+
+static void ProjectConfigProbeReadsRolesAndNewTableOptions()
+{
+    var json = """
+    {
+      "roles": {
+        "configOwner": {
+          "displayName": "配置负责人",
+          "canApproveWaiver": true,
+          "canApproveMainWriteBack": true
+        },
+        "schemaReviewer": {
+          "displayName": "Schema 审查人",
+          "canApproveSchemaReview": true
+        },
+        "tableOwner": {
+          "displayName": "配表负责人",
+          "canRequestMerge": true
+        }
+      },
+      "newTable": {
+        "defaultOwnerRole": "tableOwner",
+        "supportedFieldTypes": ["string", "integer", "number", "bool", "date", "datetime", "enum", "json"],
+        "defaultFields": [
+          { "key": "id", "displayName": "ID", "valueKind": "string", "description": "唯一ID", "isPrimary": true },
+          { "key": "name", "displayName": "名称", "valueKind": "string", "description": "显示名称" }
+        ]
+      },
+      "github": {
+        "requiredForPrAutoDetect": false,
+        "installHelpUrl": "https://cli.github.com/"
+      }
+    }
+    """;
+
+    var summary = ProjectConfigProbe.ProbeJson("ProjectSettings/Example.ConfigSheetForge.json", json);
+
+    AssertEqual("3", summary.Roles.Count.ToString(), "roles should be read.");
+    AssertEqual("配表负责人", summary.Roles.First(r => r.Key == "tableOwner").DisplayName, "role display name should be read.");
+    AssertTrue(summary.Roles.First(r => r.Key == "schemaReviewer").CanApproveSchemaReview, "schema reviewer permission should be read.");
+    AssertTrue(summary.Roles.First(r => r.Key == "configOwner").CanApproveWaiver, "waiver permission should be read.");
+    AssertTrue(summary.Roles.First(r => r.Key == "configOwner").CanApproveMainWriteBack, "main write-back permission should be read.");
+    AssertEqual("tableOwner", summary.NewTableDefaultOwnerRole, "default owner role should be read.");
+    AssertEqual("8", summary.NewTableSupportedFieldTypes.Count.ToString(), "supported field types should be read.");
+    AssertEqual("2", summary.NewTableDefaultFields.Count.ToString(), "default fields should be read.");
+    AssertEqual("id", summary.NewTableDefaultFields[0].Key, "first default field key should be read.");
+    AssertTrue(summary.NewTableDefaultFields[0].IsPrimary, "primary default field should be read.");
+    AssertTrue(!summary.GithubRequiredForPrAutoDetect, "github required flag should be read.");
+    AssertEqual("https://cli.github.com/", summary.GithubInstallHelpUrl, "github install help URL should be read.");
 }
 
 static void ProjectConfigProbeIgnoresLocalStateRegistry()

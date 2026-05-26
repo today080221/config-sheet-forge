@@ -14,6 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
+        private const string PackageVersion = "v0.4.13";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -22,6 +23,7 @@ namespace ConfigSheetForge.Unity.Editor
         private const string BottomOutputExpandedPrefKey = "ConfigSheetForge.Unity.BottomOutputExpanded";
         private const string BottomOutputHeightPrefKey = "ConfigSheetForge.Unity.BottomOutputHeight";
         private const string OnboardingDismissedPrefKey = "ConfigSheetForge.Unity.OnboardingDismissed";
+        private const string AdvancedModePrefKey = "ConfigSheetForge.Unity.AdvancedMode";
         private const float CollapsedOutputBarHeight = 34f;
         private const float MinBottomDrawerHeight = 220f;
         private const float DefaultBottomDrawerHeight = 260f;
@@ -79,6 +81,8 @@ namespace ConfigSheetForge.Unity.Editor
         private string _excelPath = "";
         private string _sheetName = "";
         private string _fieldsText = "id | ID | string | 唯一ID" + "\n" + "name | 名称 | string | 显示名称";
+        private readonly List<ProjectFieldInput> _fieldRows = new List<ProjectFieldInput>();
+        private bool _fieldRowsInitialized;
         private string _basePath = "";
         private string _oursPath = "";
         private string _theirsPath = "";
@@ -97,8 +101,12 @@ namespace ConfigSheetForge.Unity.Editor
         private string _targetBranchWikiNodeUrl = "";
         private string _targetBranchWikiNodeToken = "";
         private bool _allowPrAutoDetect = true;
+        private bool _manualTargetBranchOverride;
         private string _mergeContextStatus = "";
-        private List<string> _targetBranchOptions = new List<string>();
+        private string _targetBranchSearch = "";
+        private List<TargetBranchOption> _targetBranchOptions = new List<TargetBranchOption>();
+        private Vector2 _targetBranchScroll;
+        private GitHubPreflightSummary _githubPreflight = GitHubPreflightSummary.Unknown();
         private Task<MergeContextProbeResult> _mergeContextTask;
         private bool _writeBackToMain;
         private bool _confirmWriteMain;
@@ -115,6 +123,7 @@ namespace ConfigSheetForge.Unity.Editor
         private bool _showOnboarding;
         private bool _showWorkflowGuide;
         private bool _showBottomOutput;
+        private bool _advancedMode;
         private bool _isResizingOutputPanel;
         private float _bottomOutputHeight = 260f;
         private string _output = "";
@@ -196,7 +205,9 @@ namespace ConfigSheetForge.Unity.Editor
             _showBottomOutput = EditorPrefs.GetBool(BottomOutputExpandedPrefKey, false);
             _bottomOutputHeight = EditorPrefs.HasKey(BottomOutputHeightPrefKey) ? EditorPrefs.GetFloat(BottomOutputHeightPrefKey, DefaultBottomDrawerHeight) : 0f;
             _showOnboarding = !EditorPrefs.GetBool(OnboardingDismissedPrefKey, false);
+            _advancedMode = EditorPrefs.GetBool(AdvancedModePrefKey, false);
             RefreshReadonlyStatus();
+            EnsureNewTableDefaults();
             _resultSummary = "配表 Source of Truth 窗口已打开。" + Environment.NewLine +
                              "这里只刷新本地状态，不会下载、不导出、不改文件。" + Environment.NewLine +
                              "主流程只保留刷新状态、预览同步计划、运行 PR 检查。";
@@ -260,6 +271,13 @@ namespace ConfigSheetForge.Unity.Editor
             GUILayout.Space(6);
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField("配表 Source of Truth", EditorStyles.boldLabel);
+            var oldAdvanced = _advancedMode;
+            _advancedMode = GUILayout.Toggle(_advancedMode, new GUIContent("高级模式", "显示内部 key、canonical 类型、路径和完整命令。高级区仍默认折叠。"), EditorStyles.toolbarButton, GUILayout.Width(82));
+            if (oldAdvanced != _advancedMode)
+            {
+                EditorPrefs.SetBool(AdvancedModePrefKey, _advancedMode);
+            }
+
             if (GUILayout.Button(new GUIContent("教程", "打开 5 分钟入门、项目文档或飞书入口。"), GUILayout.Width(64)))
             {
                 ShowHelpMenu();
@@ -267,7 +285,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("复制 UPM", "复制通过 Unity Package Manager 安装此包的 Git URL。"), GUILayout.Width(88)))
             {
-                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.12";
+                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#" + PackageVersion;
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("飞书在线 Sheet 是 Source of Truth，本地 Excel 只是兼容缓存。", EditorStyles.miniLabel);
@@ -368,13 +386,27 @@ namespace ConfigSheetForge.Unity.Editor
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField(FirstNonEmpty(_activeJobStatus, "后台任务运行中"), EditorStyles.wordWrappedLabel);
+            var spinner = "|/-\\"[(int)(EditorApplication.timeSinceStartup * 4) % 4].ToString();
+            var elapsed = _activeJob == null ? 0 : _activeJob.ElapsedSeconds;
+            EditorGUILayout.LabelField(spinner + " 正在运行：" + OperationDisplayName(_activeJob == null ? "" : _activeJob.Operation), EditorStyles.boldLabel);
             if (GUILayout.Button(new GUIContent("取消", "终止当前 adapter / CLI / lark-cli 进程树。"), GUILayout.Width(80)))
             {
                 CancelActiveJob();
             }
             EditorGUILayout.EndHorizontal();
-            if (_activeJob != null && _activeJob.DryRun)
+
+            DrawReadonlyRow("当前阶段", FirstNonEmpty(_activeJobStatus, "后台任务运行中"), "后台 job 当前阶段。");
+            DrawReadonlyRow("已用时间", Math.Floor(elapsed).ToString("0") + " 秒", "长时间读取飞书或导出 xlsx 时可能需要等待。");
+            EditorGUILayout.LabelField(BuildJobSafetyText(_activeJob), EditorStyles.wordWrappedMiniLabel);
+            if (elapsed >= 60)
+            {
+                EditorGUILayout.HelpBox("耗时较长，如怀疑卡住可取消后重试；取消不会写入本地 cache。", MessageType.Warning);
+            }
+            else if (elapsed >= 15)
+            {
+                EditorGUILayout.HelpBox("仍在处理。飞书读取/导出可能需要一点时间，可以切到“输出”页看日志。", MessageType.Info);
+            }
+            else if (_activeJob != null && _activeJob.DryRun)
             {
                 EditorGUILayout.HelpBox("dry-run：只生成预览，不写飞书、不改本地 cache、不改 ProjectSettings。", MessageType.Info);
             }
@@ -385,30 +417,214 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndVertical();
         }
 
+        private static string OperationDisplayName(string operation)
+        {
+            if (string.Equals(operation, "sync-cache", StringComparison.OrdinalIgnoreCase))
+            {
+                return "预览同步计划 / 写入本地 cache";
+            }
+
+            if (string.Equals(operation, "new-table", StringComparison.OrdinalIgnoreCase))
+            {
+                return "新建配表";
+            }
+
+            if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
+            {
+                return "合并预览";
+            }
+
+            if (string.Equals(operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
+            {
+                return "PR 检查";
+            }
+
+            if (string.Equals(operation, "seed-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                return "本地 Excel Seed";
+            }
+
+            return FirstNonEmpty(operation, "后台任务");
+        }
+
+        private static string BuildJobSafetyText(ConfigSheetForgeBackgroundJob job)
+        {
+            if (job == null)
+            {
+                return "后台任务运行中，完成后按钮会自动恢复。";
+            }
+
+            if (job.DryRun)
+            {
+                return "安全性：dry-run 只读取和生成预览，不写飞书、不改本地 cache、不改 ProjectSettings。";
+            }
+
+            if (string.Equals(job.Operation, "sync-cache", StringComparison.OrdinalIgnoreCase))
+            {
+                return "安全性：apply 会读取在线 Sheet、导出 xlsx，三方一致后才可能写入本地 cache。";
+            }
+
+            if (string.Equals(job.Operation, "new-table", StringComparison.OrdinalIgnoreCase))
+            {
+                return "安全性：apply 会创建或复用在线 Sheet，并登记到在线注册中心。";
+            }
+
+            if (string.Equals(job.Operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
+            {
+                return "安全性：写回 main 只有在显式确认后才会发生。";
+            }
+
+            return "安全性：后台任务已通过 UI 确认，完成后按钮会自动恢复。";
+        }
+
         private void DrawTargetBranchField()
         {
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField(new GUIContent("目标分支", "target/base branch。没有 PR 时默认 main，可从远端分支列表选择。"), GUILayout.Width(110));
-            var selected = Math.Max(0, _targetBranchOptions.IndexOf(_targetBranch));
-            var previous = _targetBranch;
-            if (_targetBranchOptions.Count > 0)
+            if (!string.IsNullOrWhiteSpace(_prNumber))
             {
-                selected = EditorGUILayout.Popup(selected, _targetBranchOptions.ToArray());
-                _targetBranch = _targetBranchOptions[Mathf.Clamp(selected, 0, _targetBranchOptions.Count - 1)];
+                DrawReadonlyRow("目标分支", FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main"), "来自 GitHub PR base branch。一般不需要手动修改。");
+                EditorGUILayout.LabelField("已识别 GitHub PR #" + _prNumber + "，目标分支来自 PR：" + FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main"), EditorStyles.wordWrappedMiniLabel);
+                return;
+            }
+
+            DrawTargetBranchPicker("目标分支", "没有识别到 PR 时，从远端分支中搜索并选择目标分支。", manualOverride: false);
+        }
+
+        private void DrawTargetBranchPicker(string label, string tooltip, bool manualOverride)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(new GUIContent(label, tooltip), GUILayout.Width(110));
+            var previous = _targetBranch;
+            _targetBranch = EditorGUILayout.TextField(_targetBranch);
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(new GUIContent("搜索分支", "支持子串和简单 fuzzy 搜索。"), GUILayout.Width(110));
+            _targetBranchSearch = EditorGUILayout.TextField(_targetBranchSearch);
+            EditorGUILayout.EndHorizontal();
+
+            if (_targetBranchOptions.Count == 0)
+            {
+                EditorGUILayout.HelpBox("没有读取到远端分支列表。可以先 fetch，或直接在上方输入目标分支。", MessageType.Warning);
             }
             else
             {
-                _targetBranch = EditorGUILayout.TextField(_targetBranch);
+                var matches = BuildFilteredTargetBranchOptions(_targetBranchSearch);
+                var rowCount = Math.Min(Math.Max(matches.Count, 1), 6);
+                _targetBranchScroll = EditorGUILayout.BeginScrollView(_targetBranchScroll, GUILayout.Height(24f * rowCount + 10f));
+                for (var i = 0; i < matches.Count; i++)
+                {
+                    var option = matches[i];
+                    EditorGUILayout.BeginHorizontal();
+                    var selected = string.Equals(option.Name, _targetBranch, StringComparison.OrdinalIgnoreCase);
+                    if (GUILayout.Button(new GUIContent((selected ? "✓ " : "  ") + BuildBranchOptionLabel(option), BuildBranchOptionTooltip(option)), selected ? EditorStyles.miniButtonMid : EditorStyles.miniButton, GUILayout.Height(22)))
+                    {
+                        _targetBranch = option.Name;
+                    }
+
+                    EditorGUILayout.EndHorizontal();
+                }
+
+                if (matches.Count == 0)
+                {
+                    EditorGUILayout.LabelField("没有匹配的远端分支，可直接输入目标分支。", EditorStyles.wordWrappedMiniLabel);
+                }
+
+                EditorGUILayout.EndScrollView();
             }
-            EditorGUILayout.EndHorizontal();
 
             if (!string.Equals(previous, _targetBranch, StringComparison.OrdinalIgnoreCase))
             {
-                _mergeContextTask = null;
-                _prNumber = "";
-                _prUrl = "";
-                RefreshMergeContext();
+                OnTargetBranchChanged(manualOverride);
             }
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private List<TargetBranchOption> BuildFilteredTargetBranchOptions(string query)
+        {
+            var matches = new List<TargetBranchOption>();
+            query = (query ?? "").Trim();
+            for (var i = 0; i < _targetBranchOptions.Count; i++)
+            {
+                var option = _targetBranchOptions[i];
+                if (string.IsNullOrWhiteSpace(query) ||
+                    option.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    IsFuzzyMatch(option.Name, query))
+                {
+                    matches.Add(option);
+                }
+
+                if (string.IsNullOrWhiteSpace(query) && matches.Count >= 80)
+                {
+                    break;
+                }
+            }
+
+            return matches;
+        }
+
+        private static bool IsFuzzyMatch(string text, string query)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return true;
+            }
+
+            var source = (text ?? "").ToLowerInvariant();
+            var pattern = query.ToLowerInvariant();
+            var index = 0;
+            for (var i = 0; i < source.Length && index < pattern.Length; i++)
+            {
+                if (source[i] == pattern[index])
+                {
+                    index++;
+                }
+            }
+
+            return index == pattern.Length;
+        }
+
+        private string BuildBranchOptionLabel(TargetBranchOption option)
+        {
+            var label = option.Name;
+            if (option.IsPrBase)
+            {
+                label += "  [PR 目标]";
+            }
+            else if (option.IsDefault)
+            {
+                label += "  [项目默认]";
+            }
+
+            if (!string.IsNullOrWhiteSpace(option.LastCommitText))
+            {
+                label += "  " + option.LastCommitText;
+            }
+
+            if (_advancedMode && !string.IsNullOrWhiteSpace(option.Source))
+            {
+                label += "  source=" + option.Source;
+            }
+
+            return label;
+        }
+
+        private static string BuildBranchOptionTooltip(TargetBranchOption option)
+        {
+            return "分支：" + option.Name + Environment.NewLine +
+                   (option.IsPrBase ? "来源：GitHub PR base" : option.IsDefault ? "来源：项目默认目标分支" : "来源：远端分支") + Environment.NewLine +
+                   "最近提交：" + FirstNonEmpty(option.LastCommitText, "未读取到");
+        }
+
+        private void OnTargetBranchChanged(bool manualOverride)
+        {
+            _manualTargetBranchOverride = manualOverride;
+            _mergeContextTask = null;
+            _prNumber = "";
+            _prUrl = "";
+            RefreshMergeContext();
         }
 
         private string BuildPrText()
@@ -418,7 +634,33 @@ namespace ConfigSheetForge.Unity.Editor
                 return "#" + _prNumber + " -> " + FirstNonEmpty(_prUrl, "未记录 URL");
             }
 
+            if (_manualTargetBranchOverride)
+            {
+                return "已手动覆盖目标分支：" + FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main");
+            }
+
             return _allowPrAutoDetect ? "未识别到 PR，使用目标分支 fallback" : "项目配置关闭 PR 自动识别";
+        }
+
+        private void DrawGitHubPreflightCard()
+        {
+            if (_githubPreflight == null)
+            {
+                return;
+            }
+
+            var messageType = _githubPreflight.IsReady ? MessageType.Info : MessageType.Warning;
+            EditorGUILayout.HelpBox(_githubPreflight.Status + "\n下一步：" + _githubPreflight.NextStep, messageType);
+            if (!_githubPreflight.IsReady && !_githubPreflight.GhAvailable && GUILayout.Button(new GUIContent("打开 GitHub CLI 安装页", "安装后运行 gh auth login，就能自动识别 PR base branch。"), GUILayout.Height(22)))
+            {
+                Application.OpenURL(FirstNonEmpty(_githubPreflight.InstallHelpUrl, "https://cli.github.com/"));
+            }
+
+            if (_advancedMode)
+            {
+                DrawReadonlyRow("GitHub remote", _githubPreflight.RemoteIsGitHub ? FirstNonEmpty(_githubRepository, "已识别") : "未识别", "来自项目 config 或 git remote。");
+                DrawReadonlyRow("gh", _githubPreflight.GhAvailable ? (_githubPreflight.GhAuthenticated ? "已安装且已登录" : "已安装但未登录") : "未安装/不可用", "用于自动识别 GitHub PR。");
+            }
         }
 
         private string BuildMergeTablesText()
@@ -1095,53 +1337,257 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void DrawProjectNewTableInputs()
         {
+            EnsureNewTableDefaults();
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("新表输入", EditorStyles.boldLabel);
-            _tableId = EditorGUILayout.TextField(new GUIContent("配表ID", "必填。稳定机器 key，例如 ItemsData 或 MonsterData。"), _tableId);
+            _tableId = EditorGUILayout.TextField(new GUIContent("配表ID", "代码和文件使用的英文 ID，例如 SkillExtraData。只能用英文、数字、下划线，不能有空格。"), _tableId);
             if (string.IsNullOrWhiteSpace(_tableId))
             {
-                EditorGUILayout.LabelField("例：ItemsData、MonsterData。不要使用临时中文名。", EditorStyles.wordWrappedMiniLabel);
+                EditorGUILayout.LabelField("例：SkillExtraData、MonsterData。不要使用中文名或空格。", EditorStyles.wordWrappedMiniLabel);
             }
 
-            _tableName = EditorGUILayout.TextField(new GUIContent("显示名称", "必填。策划在窗口和报告里看到的名称。"), _tableName);
+            _tableName = EditorGUILayout.TextField(new GUIContent("显示名称", "给策划看的中文名，例如 技能扩展数据。"), _tableName);
             if (string.IsNullOrWhiteSpace(_tableName))
             {
-                EditorGUILayout.LabelField("例：道具表、怪物表。", EditorStyles.wordWrappedMiniLabel);
+                EditorGUILayout.LabelField("例：技能扩展数据、怪物表。", EditorStyles.wordWrappedMiniLabel);
             }
 
-            _ownerRole = EditorGUILayout.TextField(new GUIContent("负责人角色", "例如 configOwner；为空时由项目 adapter 默认。"), _ownerRole);
-            _schemaChangeSummary = EditorGUILayout.TextField(new GUIContent("Schema 变更说明", "写入 inputs.schemaChangeSummary，供 SchemaReviews reason 使用。"), _schemaChangeSummary);
-            _excelPath = EditorGUILayout.TextField(new GUIContent("本地 Excel 路径", "可选；写入 inputs.excelPath。"), _excelPath);
-            _sheetName = EditorGUILayout.TextField(new GUIContent("工作表名", "可选；写入 inputs.sheetName。"), _sheetName);
-            EditorGUILayout.LabelField(new GUIContent("字段示例（可编辑）", "每行：字段 key | 显示名 | 类型 | 说明。复杂字段写入 inputs JSON，不走长 inline JSON 参数。"));
-            EditorGUILayout.HelpBox("示例含义：id 是唯一 ID 字段，name 是显示名称字段。可以先保留示例做 dry-run，再按项目规范补字段。", MessageType.Info);
-            DrawFieldTemplatePreview();
-            _showFieldTemplateEditor = EditorGUILayout.Foldout(_showFieldTemplateEditor, "编辑字段模板", true);
+            DrawOwnerRolePicker();
+            DrawApprovalRulesCard();
+
+            _schemaChangeSummary = EditorGUILayout.TextField(new GUIContent("Schema 变更说明", "说明为什么要新增或修改字段。只新增新表时可以写：新增 XXX 配表。"), _schemaChangeSummary);
+            if (string.IsNullOrWhiteSpace(_schemaChangeSummary))
+            {
+                EditorGUILayout.LabelField("例：新增技能扩展数据配表。", EditorStyles.wordWrappedMiniLabel);
+            }
+
+            _sheetName = EditorGUILayout.TextField(new GUIContent("工作表名", "普通用户可以不管。留空时默认使用显示名称，显示名称为空时使用配表ID。"), _sheetName);
+            DrawReadonlyRow("本地 Excel cache", EffectiveNewTableExcelPath(), "普通新表自动生成到本地 cache。旧 Excel 迁移请使用“本地 Excel Seed”。");
+            if (_advancedMode)
+            {
+                _excelPath = EditorGUILayout.TextField(new GUIContent("高级：覆盖本地 Excel cache 路径", "普通用户不需要改。仅在项目 cache 路径规则异常时覆盖。"), _excelPath);
+            }
+
+            DrawStructuredFieldEditor();
+            _showFieldTemplateEditor = EditorGUILayout.Foldout(_showFieldTemplateEditor, "高级：编辑原始模板文本", true);
             if (_showFieldTemplateEditor)
             {
-                EditorGUILayout.LabelField("每行一个字段：字段 key | 显示名 | 类型 | 说明。", EditorStyles.wordWrappedMiniLabel);
+                EditorGUILayout.LabelField("每行一个字段：字段 key | 显示名 | 类型 | 说明。枚举类型写 enum:a,b,c。修改后会解析回上面的结构化字段。", EditorStyles.wordWrappedMiniLabel);
+                var previous = _fieldsText;
                 _fieldsText = EditorGUILayout.TextArea(_fieldsText, GUILayout.MinHeight(72));
+                if (!string.Equals(previous, _fieldsText, StringComparison.Ordinal))
+                {
+                    ReplaceFieldRows(ParseFieldsText(_fieldsText));
+                }
             }
             EditorGUILayout.EndVertical();
         }
 
-        private void DrawFieldTemplatePreview()
+        private void DrawOwnerRolePicker()
         {
-            var fields = ParseFieldsText();
-            if (fields.Count == 0)
+            if (_projectConfig.Roles.Count == 0)
             {
-                EditorGUILayout.HelpBox("还没有字段模板。至少保留一个稳定 ID 字段，例如 id / ID / string。", MessageType.Warning);
+                EditorGUILayout.HelpBox("项目未配置角色列表，请联系主程补 roles 配置。这里暂时保留文本输入。", MessageType.Warning);
+                _ownerRole = EditorGUILayout.TextField(new GUIContent("这张表由谁负责", "项目未声明 roles 时，暂时输入内部角色标识。"), _ownerRole);
                 return;
             }
 
-            for (var i = 0; i < fields.Count; i++)
+            EnsureOwnerRoleDefault();
+            var selected = 0;
+            var labels = new string[_projectConfig.Roles.Count];
+            for (var i = 0; i < _projectConfig.Roles.Count; i++)
             {
-                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-                EditorGUILayout.LabelField(FirstNonEmpty(fields[i].Key, "未命名"), EditorStyles.boldLabel, GUILayout.Width(110));
-                EditorGUILayout.LabelField(FirstNonEmpty(fields[i].DisplayName, fields[i].Key, "未命名"), GUILayout.Width(120));
-                EditorGUILayout.LabelField(FirstNonEmpty(fields[i].ValueKind, "string"), GUILayout.Width(72));
-                EditorGUILayout.LabelField(FirstNonEmpty(fields[i].Description, "无说明"), EditorStyles.wordWrappedMiniLabel);
+                var role = _projectConfig.Roles[i];
+                labels[i] = FirstNonEmpty(role.DisplayName, role.Key) + (_advancedMode ? " (" + role.Key + ")" : "");
+                if (string.Equals(role.Key, _ownerRole, StringComparison.OrdinalIgnoreCase))
+                {
+                    selected = i;
+                }
+            }
+
+            var next = EditorGUILayout.Popup(new GUIContent("这张表由谁负责", "选择这张表的日常维护负责人。审批规则由项目配置决定。"), selected, labels);
+            if (next >= 0 && next < _projectConfig.Roles.Count)
+            {
+                _ownerRole = _projectConfig.Roles[next].Key;
+            }
+        }
+
+        private void DrawApprovalRulesCard()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("审批规则（只读）", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("这张表的日常负责人可以选择；Schema 审查、临时放行和写回 main 仍由项目规则决定。", EditorStyles.wordWrappedMiniLabel);
+            DrawReadonlyRow("Schema 审查", BuildRoleListText("schema"), "负责字段结构变化审查。");
+            DrawReadonlyRow("临时放行", BuildRoleListText("waiver"), "可批准临时放行。");
+            DrawReadonlyRow("写回 main", BuildRoleListText("main"), "可批准写回主线工作区。");
+            EditorGUILayout.EndVertical();
+        }
+
+        private string BuildRoleListText(string kind)
+        {
+            var values = new List<string>();
+            for (var i = 0; i < _projectConfig.Roles.Count; i++)
+            {
+                var role = _projectConfig.Roles[i];
+                var include = string.Equals(kind, "schema", StringComparison.OrdinalIgnoreCase) && role.CanApproveSchemaReview ||
+                              string.Equals(kind, "waiver", StringComparison.OrdinalIgnoreCase) && role.CanApproveWaiver ||
+                              string.Equals(kind, "main", StringComparison.OrdinalIgnoreCase) && role.CanApproveMainWriteBack;
+                if (include)
+                {
+                    values.Add(FirstNonEmpty(role.DisplayName, role.Key) + (_advancedMode ? " (" + role.Key + ")" : ""));
+                }
+            }
+
+            return values.Count == 0 ? "由项目 adapter 默认处理" : string.Join("、", values.ToArray());
+        }
+
+        private void DrawStructuredFieldEditor()
+        {
+            EditorGUILayout.LabelField("字段", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(_advancedMode ? "高级模式：显示 canonical 类型；提交时仍写入 lifecycle inputs fields。" : "普通视图：选择字段类型即可，不需要手写模板。", EditorStyles.wordWrappedMiniLabel);
+            var validation = ValidateNewTableInputs();
+            for (var i = 0; i < _fieldRows.Count; i++)
+            {
+                DrawFieldRow(i);
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button(new GUIContent("添加字段", "新增一个空字段行。"), GUILayout.Height(24)))
+            {
+                _fieldRows.Add(new ProjectFieldInput { Key = "field" + (_fieldRows.Count + 1).ToString(), DisplayName = "", ValueKind = "string", Description = "" });
+                SyncFieldTemplateTextFromRows();
+            }
+
+            if (GUILayout.Button(new GUIContent("添加常用字段", "添加描述、图标、排序、备注。"), GUILayout.Height(24)))
+            {
+                AddCommonField("description", "描述", "string", "给策划看的补充说明");
+                AddCommonField("icon", "图标", "string", "图标资源ID或路径");
+                AddCommonField("sortOrder", "排序", "integer", "排序用数字");
+                AddCommonField("note", "备注", "string", "仅用于备注说明");
+                SyncFieldTemplateTextFromRows();
+            }
+
+            if (GUILayout.Button(new GUIContent("重置默认字段", "恢复 id/name 默认字段。"), GUILayout.Height(24)))
+            {
+                _fieldRows.Clear();
+                AddDefaultFieldRows();
+                SyncFieldTemplateTextFromRows();
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (!validation.Valid)
+            {
+                EditorGUILayout.HelpBox(validation.Message, MessageType.Warning);
+            }
+
+            EditorGUILayout.LabelField("只读模板预览", EditorStyles.boldLabel);
+            EditorGUILayout.SelectableLabel(FieldRowsToTemplateText(), EditorStyles.wordWrappedMiniLabel, GUILayout.MinHeight(48));
+        }
+
+        private void DrawFieldRow(int index)
+        {
+            var field = _fieldRows[index];
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.BeginHorizontal();
+            field.Key = EditorGUILayout.TextField(new GUIContent("key", "英文、数字、下划线，不能以数字开头。"), field.Key, GUILayout.MinWidth(110));
+            field.DisplayName = EditorGUILayout.TextField(new GUIContent("中文名", "策划看到的字段名。"), field.DisplayName, GUILayout.MinWidth(110));
+            field.ValueKind = DrawFieldTypePopup(field.ValueKind, GUILayout.Width(_advancedMode ? 120 : 96));
+            if (index == 0)
+            {
+                field.IsPrimary = true;
+                EditorGUILayout.LabelField(new GUIContent("唯一 ID", "第一行默认 ID 字段不可删除，key 可改但仍作为稳定 ID。"), GUILayout.Width(74));
+            }
+            else
+            {
+                field.IsPrimary = EditorGUILayout.ToggleLeft(new GUIContent("唯一 ID", "至少需要一个稳定 ID 字段。"), field.IsPrimary, GUILayout.Width(74));
+            }
+
+            GUI.enabled = index != 0;
+            if (GUILayout.Button(new GUIContent("删除", "第一行默认 ID 字段不可删除。"), GUILayout.Width(48)))
+            {
+                _fieldRows.RemoveAt(index);
+                SyncFieldTemplateTextFromRows();
+                GUI.enabled = true;
                 EditorGUILayout.EndHorizontal();
+                EditorGUILayout.EndVertical();
+                return;
+            }
+            GUI.enabled = true;
+
+            GUI.enabled = index > 1;
+            if (GUILayout.Button("↑", GUILayout.Width(28)))
+            {
+                var previous = _fieldRows[index - 1];
+                _fieldRows[index - 1] = field;
+                _fieldRows[index] = previous;
+            }
+            GUI.enabled = index > 0 && index + 1 < _fieldRows.Count;
+            if (GUILayout.Button("↓", GUILayout.Width(28)))
+            {
+                var next = _fieldRows[index + 1];
+                _fieldRows[index + 1] = field;
+                _fieldRows[index] = next;
+            }
+            GUI.enabled = true;
+            EditorGUILayout.EndHorizontal();
+
+            field.Description = EditorGUILayout.TextField(new GUIContent("说明", "必填。说明这个字段是做什么的。"), field.Description);
+            if (CanonicalFieldKind(field.ValueKind) == "enum")
+            {
+                DrawEnumValuesEditor(field);
+            }
+
+            if (_advancedMode)
+            {
+                EditorGUILayout.LabelField("内部类型：" + ValueKindForContract(field), EditorStyles.miniLabel);
+            }
+
+            EditorGUILayout.EndVertical();
+            SyncFieldTemplateTextFromRows();
+        }
+
+        private string DrawFieldTypePopup(string valueKind, params GUILayoutOption[] options)
+        {
+            var specs = GetSupportedFieldTypes();
+            var canonical = CanonicalFieldKind(valueKind);
+            var selected = 0;
+            var labels = new string[specs.Count];
+            for (var i = 0; i < specs.Count; i++)
+            {
+                labels[i] = _advancedMode ? specs[i].Canonical : specs[i].Label;
+                if (string.Equals(specs[i].Canonical, canonical, StringComparison.OrdinalIgnoreCase))
+                {
+                    selected = i;
+                }
+            }
+
+            var next = EditorGUILayout.Popup(selected, labels, options);
+            return specs[Mathf.Clamp(next, 0, specs.Count - 1)].Canonical;
+        }
+
+        private void DrawEnumValuesEditor(ProjectFieldInput field)
+        {
+            EditorGUILayout.LabelField("枚举值", EditorStyles.boldLabel);
+            for (var i = 0; i < field.EnumValues.Count; i++)
+            {
+                EditorGUILayout.BeginHorizontal();
+                field.EnumValues[i] = EditorGUILayout.TextField(field.EnumValues[i]);
+                if (GUILayout.Button("删除", GUILayout.Width(48)))
+                {
+                    field.EnumValues.RemoveAt(i);
+                    i--;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+
+            if (GUILayout.Button(new GUIContent("添加枚举值", "枚举至少需要一个选项，例如 common / rare。"), GUILayout.Height(22)))
+            {
+                field.EnumValues.Add("");
+            }
+
+            if (field.EnumValues.Count == 0)
+            {
+                EditorGUILayout.HelpBox("枚举类型必须至少填写一个枚举值。", MessageType.Warning);
             }
         }
 
@@ -1149,21 +1595,21 @@ namespace ConfigSheetForge.Unity.Editor
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("新建配表操作", EditorStyles.boldLabel);
-            var hasRequiredFields = HasNewTableRequiredFields();
-            if (!hasRequiredFields)
+            var validation = ValidateNewTableInputs();
+            if (!validation.Valid)
             {
-                EditorGUILayout.HelpBox("请先填写配表ID和显示名称。", MessageType.Warning);
+                EditorGUILayout.HelpBox(validation.Message, MessageType.Warning);
             }
 
             _confirmNewTableApply = EditorGUILayout.Toggle(new GUIContent("确认创建在线表并登记", "允许创建/复用在线 Sheet，并登记到 Base。必须先预览通过。"), _confirmNewTableApply);
-            var applyReady = hasRequiredFields && _confirmNewTableApply && LastPreviewPassed("new-table");
+            var applyReady = validation.Valid && _confirmNewTableApply && LastPreviewPassed("new-table");
             if (_confirmNewTableApply && !LastPreviewPassed("new-table"))
             {
                 EditorGUILayout.HelpBox("请先预览新建配表，并确认预览成功后再创建在线表并登记。", MessageType.Warning);
             }
 
             EditorGUILayout.BeginHorizontal();
-            if (DrawJobButton(new GUIContent("预览新建配表", "生成 new-table dry-run，预览创建 Sheet、登记 Base 和 SchemaReviews，不写飞书。"), hasRequiredFields, GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("预览新建配表", "生成 new-table dry-run，预览创建 Sheet、登记 Base 和 SchemaReviews，不写飞书。"), validation.Valid, GUILayout.Height(28)))
             {
                 RunProjectLifecycle("new-table", dryRun: true);
             }
@@ -1181,8 +1627,489 @@ namespace ConfigSheetForge.Unity.Editor
 
         private bool HasNewTableRequiredFields()
         {
-            return !string.IsNullOrWhiteSpace(_tableId) &&
-                   !string.IsNullOrWhiteSpace(_tableName);
+            return ValidateNewTableInputs().Valid;
+        }
+
+        private void EnsureNewTableDefaults()
+        {
+            EnsureOwnerRoleDefault();
+            if (!_fieldRowsInitialized)
+            {
+                AddDefaultFieldRows();
+                SyncFieldTemplateTextFromRows();
+                _fieldRowsInitialized = true;
+            }
+        }
+
+        private void EnsureOwnerRoleDefault()
+        {
+            if (!string.IsNullOrWhiteSpace(_ownerRole))
+            {
+                return;
+            }
+
+            var configured = FirstNonEmpty(_projectConfig.NewTableDefaultOwnerRole, FindRoleKey("tableOwner"));
+            if (string.IsNullOrWhiteSpace(configured) && _projectConfig.Roles.Count > 0)
+            {
+                configured = _projectConfig.Roles[0].Key;
+            }
+
+            _ownerRole = configured;
+        }
+
+        private string FindRoleKey(string key)
+        {
+            for (var i = 0; i < _projectConfig.Roles.Count; i++)
+            {
+                if (string.Equals(_projectConfig.Roles[i].Key, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    return _projectConfig.Roles[i].Key;
+                }
+            }
+
+            return "";
+        }
+
+        private void AddDefaultFieldRows()
+        {
+            if (_projectConfig.NewTableDefaultFields.Count > 0)
+            {
+                for (var i = 0; i < _projectConfig.NewTableDefaultFields.Count; i++)
+                {
+                    var source = _projectConfig.NewTableDefaultFields[i];
+                    _fieldRows.Add(new ProjectFieldInput
+                    {
+                        Key = source.Key,
+                        DisplayName = FirstNonEmpty(source.DisplayName, source.Key),
+                        ValueKind = CanonicalFieldKind(source.ValueKind),
+                        Description = source.Description,
+                        IsPrimary = source.IsPrimary || i == 0,
+                        EnumValues = ExtractEnumValues(source.ValueKind)
+                    });
+                }
+
+                if (_fieldRows.Count > 0)
+                {
+                    _fieldRows[0].IsPrimary = true;
+                }
+
+                return;
+            }
+
+            _fieldRows.Add(new ProjectFieldInput { Key = "id", DisplayName = "ID", ValueKind = "string", Description = "唯一ID", IsPrimary = true });
+            _fieldRows.Add(new ProjectFieldInput { Key = "name", DisplayName = "名称", ValueKind = "string", Description = "显示名称" });
+        }
+
+        private void ReplaceFieldRows(List<ProjectFieldInput> fields)
+        {
+            _fieldRows.Clear();
+            if (fields != null)
+            {
+                _fieldRows.AddRange(fields);
+            }
+
+            if (_fieldRows.Count == 0)
+            {
+                AddDefaultFieldRows();
+            }
+
+            _fieldRows[0].IsPrimary = true;
+        }
+
+        private void AddCommonField(string key, string displayName, string valueKind, string description)
+        {
+            for (var i = 0; i < _fieldRows.Count; i++)
+            {
+                if (string.Equals(_fieldRows[i].Key, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
+            _fieldRows.Add(new ProjectFieldInput
+            {
+                Key = key,
+                DisplayName = displayName,
+                ValueKind = valueKind,
+                Description = description
+            });
+        }
+
+        private string EffectiveNewTableExcelPath()
+        {
+            if (!string.IsNullOrWhiteSpace(_excelPath))
+            {
+                return _excelPath;
+            }
+
+            return ".config-sheet-forge/excel-cache/" + FirstNonEmpty(_tableId, "<配表ID>") + ".xlsx";
+        }
+
+        private string EffectiveNewTableSheetName()
+        {
+            return FirstNonEmpty(_sheetName, _tableName, _tableId);
+        }
+
+        private NewTableValidationResult ValidateNewTableInputs()
+        {
+            var errors = new List<string>();
+            if (string.IsNullOrWhiteSpace(_tableId) || string.IsNullOrWhiteSpace(_tableName))
+            {
+                errors.Add("请先填写配表ID和显示名称。");
+            }
+
+            if (!string.IsNullOrWhiteSpace(_tableId) && !IsPortableKey(_tableId))
+            {
+                errors.Add("配表ID 只能用英文、数字、下划线，且不能以数字开头。");
+            }
+
+            if (string.IsNullOrWhiteSpace(_ownerRole))
+            {
+                errors.Add("请选择这张表由谁负责。");
+            }
+
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var hasPrimary = false;
+            for (var i = 0; i < _fieldRows.Count; i++)
+            {
+                var field = _fieldRows[i];
+                var prefix = "字段 " + (i + 1).ToString() + "：";
+                if (string.IsNullOrWhiteSpace(field.Key))
+                {
+                    errors.Add(prefix + "key 不能为空。");
+                }
+                else if (!IsPortableKey(field.Key))
+                {
+                    errors.Add(prefix + "key 只能用英文、数字、下划线，且不能以数字开头。");
+                }
+                else if (!keys.Add(field.Key))
+                {
+                    errors.Add(prefix + "key 重复。");
+                }
+
+                if (string.IsNullOrWhiteSpace(field.DisplayName))
+                {
+                    errors.Add(prefix + "中文名不能为空。");
+                }
+
+                if (string.IsNullOrWhiteSpace(field.Description))
+                {
+                    errors.Add(prefix + "说明不能为空。");
+                }
+
+                if (!IsSupportedFieldKind(field.ValueKind))
+                {
+                    errors.Add(prefix + "类型不在当前项目支持列表中。");
+                }
+
+                if (CanonicalFieldKind(field.ValueKind) == "enum" && !HasNonEmptyEnumValue(field))
+                {
+                    errors.Add(prefix + "枚举类型至少需要一个枚举值。");
+                }
+
+                hasPrimary = hasPrimary || field.IsPrimary;
+            }
+
+            if (_fieldRows.Count == 0)
+            {
+                errors.Add("至少需要一个字段。");
+            }
+
+            if (!hasPrimary)
+            {
+                errors.Add("至少需要一个唯一 ID 字段。");
+            }
+
+            return new NewTableValidationResult
+            {
+                Valid = errors.Count == 0,
+                Message = string.Join("\n", errors.ToArray())
+            };
+        }
+
+        private static bool IsPortableKey(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var first = value[0];
+            if (!(first == '_' || first >= 'A' && first <= 'Z' || first >= 'a' && first <= 'z'))
+            {
+                return false;
+            }
+
+            for (var i = 1; i < value.Length; i++)
+            {
+                var c = value[i];
+                if (!(c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9'))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool IsSupportedFieldKind(string valueKind)
+        {
+            var canonical = CanonicalFieldKind(valueKind);
+            var specs = GetSupportedFieldTypes();
+            for (var i = 0; i < specs.Count; i++)
+            {
+                if (string.Equals(specs[i].Canonical, canonical, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private List<FieldTypeSpec> GetSupportedFieldTypes()
+        {
+            var specs = new List<FieldTypeSpec>();
+            if (_projectConfig.NewTableSupportedFieldTypes.Count > 0)
+            {
+                for (var i = 0; i < _projectConfig.NewTableSupportedFieldTypes.Count; i++)
+                {
+                    AddFieldTypeSpec(specs, _projectConfig.NewTableSupportedFieldTypes[i]);
+                }
+            }
+
+            if (specs.Count == 0)
+            {
+                AddFieldTypeSpec(specs, "string");
+                AddFieldTypeSpec(specs, "integer");
+                AddFieldTypeSpec(specs, "number");
+                AddFieldTypeSpec(specs, "bool");
+                AddFieldTypeSpec(specs, "date");
+                AddFieldTypeSpec(specs, "datetime");
+                AddFieldTypeSpec(specs, "enum");
+                AddFieldTypeSpec(specs, "json");
+            }
+
+            return specs;
+        }
+
+        private static void AddFieldTypeSpec(List<FieldTypeSpec> specs, string valueKind)
+        {
+            var canonical = CanonicalFieldKind(valueKind);
+            if (string.IsNullOrWhiteSpace(canonical))
+            {
+                return;
+            }
+
+            for (var i = 0; i < specs.Count; i++)
+            {
+                if (string.Equals(specs[i].Canonical, canonical, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
+            specs.Add(new FieldTypeSpec
+            {
+                Canonical = canonical,
+                Label = PlannerTypeLabel(canonical)
+            });
+        }
+
+        private static string CanonicalFieldKind(string valueKind)
+        {
+            var value = (valueKind ?? "").Trim();
+            var lower = value.ToLowerInvariant();
+            if (lower.StartsWith("enum:", StringComparison.Ordinal) ||
+                lower.StartsWith("enum(", StringComparison.Ordinal) ||
+                lower.StartsWith("enum{", StringComparison.Ordinal))
+            {
+                return "enum";
+            }
+
+            switch (lower)
+            {
+                case "":
+                case "string":
+                case "str":
+                case "text":
+                    return "string";
+                case "integer":
+                case "int":
+                case "int32":
+                case "long":
+                case "int64":
+                    return "integer";
+                case "number":
+                case "float":
+                case "double":
+                case "decimal":
+                    return "number";
+                case "bool":
+                case "boolean":
+                    return "bool";
+                case "date":
+                    return "date";
+                case "datetime":
+                case "date_time":
+                case "timestamp":
+                    return "datetime";
+                case "enum":
+                    return "enum";
+                case "json":
+                    return "json";
+                default:
+                    return "";
+            }
+        }
+
+        private static string PlannerTypeLabel(string canonical)
+        {
+            switch (canonical)
+            {
+                case "integer":
+                    return "整数";
+                case "number":
+                    return "小数";
+                case "bool":
+                    return "是/否";
+                case "date":
+                    return "日期";
+                case "datetime":
+                    return "日期时间";
+                case "enum":
+                    return "枚举";
+                case "json":
+                    return "JSON";
+                default:
+                    return "文本";
+            }
+        }
+
+        private static bool HasNonEmptyEnumValue(ProjectFieldInput field)
+        {
+            if (field == null || field.EnumValues == null)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < field.EnumValues.Count; i++)
+            {
+                if (!string.IsNullOrWhiteSpace(field.EnumValues[i]))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string ValueKindForContract(ProjectFieldInput field)
+        {
+            var canonical = CanonicalFieldKind(field == null ? "" : field.ValueKind);
+            if (canonical == "enum")
+            {
+                var values = new List<string>();
+                if (field != null && field.EnumValues != null)
+                {
+                    for (var i = 0; i < field.EnumValues.Count; i++)
+                    {
+                        var value = (field.EnumValues[i] ?? "").Trim();
+                        if (!string.IsNullOrWhiteSpace(value) && !values.Contains(value))
+                        {
+                            values.Add(value);
+                        }
+                    }
+                }
+
+                return values.Count == 0 ? "enum" : "enum:" + string.Join(",", values.ToArray());
+            }
+
+            return FirstNonEmpty(canonical, "string");
+        }
+
+        private void SyncFieldTemplateTextFromRows()
+        {
+            _fieldsText = FieldRowsToTemplateText();
+        }
+
+        private string FieldRowsToTemplateText()
+        {
+            var builder = new StringBuilder();
+            for (var i = 0; i < _fieldRows.Count; i++)
+            {
+                var field = _fieldRows[i];
+                builder.Append(field.Key ?? "").Append(" | ")
+                    .Append(field.DisplayName ?? "").Append(" | ")
+                    .Append(ValueKindForContract(field)).Append(" | ")
+                    .Append(field.Description ?? "");
+                if (i + 1 < _fieldRows.Count)
+                {
+                    builder.AppendLine();
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        private static List<ProjectFieldInput> ParseFieldsText(string text)
+        {
+            var fields = new List<ProjectFieldInput>();
+            foreach (var rawLine in (text ?? "").Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parts = rawLine.Split('|');
+                var key = parts.Length > 0 ? parts[0].Trim() : "";
+                if (string.IsNullOrWhiteSpace(key))
+                {
+                    continue;
+                }
+
+                var field = new ProjectFieldInput
+                {
+                    Key = key,
+                    DisplayName = parts.Length > 1 ? parts[1].Trim() : key,
+                    ValueKind = parts.Length > 2 ? CanonicalFieldKind(parts[2].Trim()) : "string",
+                    Description = parts.Length > 3 ? parts[3].Trim() : "",
+                    IsPrimary = fields.Count == 0 || string.Equals(key, "id", StringComparison.OrdinalIgnoreCase) || string.Equals(key, "key", StringComparison.OrdinalIgnoreCase)
+                };
+                field.EnumValues.AddRange(ExtractEnumValues(parts.Length > 2 ? parts[2].Trim() : ""));
+                fields.Add(field);
+            }
+
+            return fields;
+        }
+
+        private static List<string> ExtractEnumValues(string valueKind)
+        {
+            var values = new List<string>();
+            var text = (valueKind ?? "").Trim();
+            var lower = text.ToLowerInvariant();
+            if (lower.StartsWith("enum:", StringComparison.Ordinal))
+            {
+                AddEnumValues(values, text.Substring("enum:".Length));
+            }
+            else if (lower.StartsWith("enum(", StringComparison.Ordinal) && text.EndsWith(")", StringComparison.Ordinal))
+            {
+                AddEnumValues(values, text.Substring(5, text.Length - 6));
+            }
+            else if (lower.StartsWith("enum{", StringComparison.Ordinal) && text.EndsWith("}", StringComparison.Ordinal))
+            {
+                AddEnumValues(values, text.Substring(5, text.Length - 6));
+            }
+
+            return values;
+        }
+
+        private static void AddEnumValues(List<string> values, string text)
+        {
+            foreach (var raw in (text ?? "").Split(new[] { ',', '|', ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var value = raw.Trim();
+                if (!string.IsNullOrWhiteSpace(value) && !values.Contains(value))
+                {
+                    values.Add(value);
+                }
+            }
         }
 
         private void DrawProjectMergeInputs()
@@ -1190,6 +2117,7 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("PR 合并上下文", EditorStyles.boldLabel);
             DrawReadonlyRow("当前分支", FirstNonEmpty(_mergeSourceBranch, _currentGitBranch, "未知"), "source/head branch。");
+            DrawGitHubPreflightCard();
             DrawTargetBranchField();
             DrawReadonlyRow("GitHub PR", BuildPrText(), "如果 gh 可用且 allowPrAutoDetect=true，会尝试自动识别当前分支的 PR。");
             DrawReadonlyRow("当前状态", BuildMergeStatusText(), "合并预览/写回的当前状态。");
@@ -1198,6 +2126,16 @@ namespace ConfigSheetForge.Unity.Editor
             if (!string.IsNullOrWhiteSpace(_mergeContextStatus))
             {
                 EditorGUILayout.LabelField(_mergeContextStatus, EditorStyles.wordWrappedMiniLabel);
+            }
+            if (_manualTargetBranchOverride)
+            {
+                EditorGUILayout.HelpBox("当前正在使用手动覆盖的目标分支。想重新跟随 GitHub PR，请恢复 PR 自动识别。", MessageType.Info);
+                if (GUILayout.Button(new GUIContent("恢复 PR 自动识别", "清除手动覆盖，重新尝试读取当前 GitHub PR 的 base branch。"), GUILayout.Height(22)))
+                {
+                    _manualTargetBranchOverride = false;
+                    _mergeContextTask = null;
+                    RefreshMergeContext();
+                }
             }
 
             EditorGUILayout.BeginHorizontal();
@@ -1218,6 +2156,12 @@ namespace ConfigSheetForge.Unity.Editor
                 DrawReadonlyRow("共同祖先", FirstNonEmpty(_mergeBase, "待推导"), "source/head 与 target/base 的 merge-base。");
                 DrawReadonlyRow("目标 Feishu", FirstNonEmpty(_targetFeishuProfile, "按目标分支推导中"), "目标分支对应的 Feishu profile。");
                 DrawReadonlyRow("目标 Wiki", BuildTargetWikiText(), "目标分支对应的 Wiki branch 节点。");
+                if (!string.IsNullOrWhiteSpace(_prNumber))
+                {
+                    EditorGUILayout.HelpBox("一般不需要改目标分支。只有 PR 目标分支异常时，才在这里手动覆盖。", MessageType.Info);
+                    DrawTargetBranchPicker("手动覆盖目标分支", "高级选项：覆盖 GitHub PR base branch。", manualOverride: true);
+                }
+
                 _mergeTableId = EditorGUILayout.TextField(new GUIContent("只比较单表", "可选；留空时 adapter 可比较当前分支所有在线表。"), _mergeTableId);
                 _mergeReportPath = EditorGUILayout.TextField(new GUIContent("报告路径", "写入 inputs.mergeReportPath。"), _mergeReportPath);
                 _mergedPath = EditorGUILayout.TextField(new GUIContent("合并结果路径", "写入 inputs.mergedPath。"), _mergedPath);
@@ -1735,6 +2679,12 @@ namespace ConfigSheetForge.Unity.Editor
         private bool DrawJobButton(GUIContent content, bool enabled, params GUILayoutOption[] options)
         {
             var oldEnabled = GUI.enabled;
+            var originalTooltip = content == null ? "" : content.tooltip;
+            if (content != null && IsJobRunning)
+            {
+                content = new GUIContent(content.text, FirstNonEmpty(originalTooltip, "") + "\n后台任务运行中，完成后自动恢复。");
+            }
+
             GUI.enabled = oldEnabled && enabled && !IsJobRunning;
             var clicked = GUILayout.Button(content, options);
             GUI.enabled = oldEnabled;
@@ -1761,9 +2711,9 @@ namespace ConfigSheetForge.Unity.Editor
                 builder.Append("name=").Append(_tableName).Append('|');
                 builder.Append("owner=").Append(_ownerRole).Append('|');
                 builder.Append("schema=").Append(_schemaChangeSummary).Append('|');
-                builder.Append("excel=").Append(_excelPath).Append('|');
-                builder.Append("sheet=").Append(_sheetName).Append('|');
-                builder.Append("fields=").Append(_fieldsText);
+                builder.Append("excel=").Append(EffectiveNewTableExcelPath()).Append('|');
+                builder.Append("sheet=").Append(EffectiveNewTableSheetName()).Append('|');
+                builder.Append("fields=").Append(FieldRowsToTemplateText());
             }
             else if (string.Equals(operation, "seed-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
                      string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
@@ -2262,6 +3212,7 @@ namespace ConfigSheetForge.Unity.Editor
             var projectRoot = FindProjectRoot();
             _currentGitBranch = TryRunReadOnlyGit("branch", "--show-current");
             _projectConfig = ConfigSheetForgeEditorUtility.LoadProjectConfigSummary(projectRoot, _currentGitBranch);
+            EnsureNewTableDefaults();
             _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
             MergeLifecycleSummary(projectRoot, "sync-cache.result.json");
             MergeLifecycleSummary(projectRoot, "pr-gate-report.result.json");
@@ -2289,12 +3240,14 @@ namespace ConfigSheetForge.Unity.Editor
             UpdateMergeWorkspaceContext();
 
             _githubRepository = FirstNonEmpty(_projectConfig.GithubRepository, TryReadGithubRepository(projectRoot));
-            _allowPrAutoDetect = _projectConfig.AllowPrAutoDetect;
-            _targetBranchOptions = ReadRemoteBranches(projectRoot);
-            if (!_targetBranchOptions.Contains(_targetBranch))
+            _allowPrAutoDetect = _projectConfig.AllowPrAutoDetect && !_manualTargetBranchOverride;
+            _githubPreflight = ProbeGitHubPreflight(projectRoot, _githubRepository, _allowPrAutoDetect, _projectConfig.GithubInstallHelpUrl);
+            if (_manualTargetBranchOverride)
             {
-                _targetBranchOptions.Insert(0, _targetBranch);
+                _githubPreflight.Status = "GitHub PR 识别：已手动覆盖目标分支";
+                _githubPreflight.NextStep = "当前使用手动目标分支；如需跟随 PR base，请点“恢复 PR 自动识别”。";
             }
+            _targetBranchOptions = ReadRemoteBranchOptions(projectRoot, !string.IsNullOrWhiteSpace(_prNumber) ? _targetBranch : "", _defaultTargetBranch, _targetBranch);
 
             _mergeBase = "正在计算";
             _mergeContextStatus = "已按当前分支和目标分支推导合并上下文；不需要手动选择 base/ours/theirs 文件。";
@@ -2322,13 +3275,15 @@ namespace ConfigSheetForge.Unity.Editor
                 var result = _mergeContextTask.Result;
                 if (result != null && result.Found)
                 {
+                    _manualTargetBranchOverride = false;
                     _prNumber = result.Number;
                     _prUrl = result.Url;
                     _targetBranch = FirstNonEmpty(result.BaseBranch, _targetBranch, _defaultTargetBranch);
                     _mergeBase = FirstNonEmpty(result.MergeBase, "未计算到共同祖先");
                     UpdateMergeInputPaths();
                     UpdateMergeWorkspaceContext();
-                    _mergeContextStatus = "已识别 GitHub PR #" + _prNumber + "，目标分支为 " + _targetBranch + "。";
+                    _targetBranchOptions = ReadRemoteBranchOptions(FindProjectRoot(), _targetBranch, _defaultTargetBranch, _targetBranch);
+                    _mergeContextStatus = "已识别 GitHub PR #" + _prNumber + "，目标分支来自 PR：" + _targetBranch + "。";
                 }
                 else if (result != null && !string.IsNullOrWhiteSpace(result.Message))
                 {
@@ -2847,8 +3802,9 @@ namespace ConfigSheetForge.Unity.Editor
             AppendJsonProperty(builder, "displayName", _tableName, comma: true);
             AppendJsonProperty(builder, "ownerRole", _ownerRole, comma: true);
             AppendJsonProperty(builder, "schemaChangeSummary", _schemaChangeSummary, comma: true);
-            AppendJsonProperty(builder, "excelPath", _excelPath, comma: true);
-            AppendJsonProperty(builder, "sheetName", _sheetName, comma: true);
+            var isNewTable = string.Equals(operation, "new-table", StringComparison.OrdinalIgnoreCase);
+            AppendJsonProperty(builder, "excelPath", isNewTable ? EffectiveNewTableExcelPath() : _excelPath, comma: true);
+            AppendJsonProperty(builder, "sheetName", isNewTable ? EffectiveNewTableSheetName() : _sheetName, comma: true);
             AppendJsonProperty(builder, "basePath", _basePath, comma: true);
             AppendJsonProperty(builder, "oursPath", _oursPath, comma: true);
             AppendJsonProperty(builder, "theirsPath", _theirsPath, comma: true);
@@ -2871,7 +3827,7 @@ namespace ConfigSheetForge.Unity.Editor
             AppendJsonProperty(builder, "confirmExcelToSoSettingsUpdate", _confirmSeedExcelToSo, comma: true);
             AppendJsonProperty(builder, "gateReportPath", finalGateReportPath, comma: true);
             builder.AppendLine("  \"fields\": [");
-            var fields = ParseFieldsText();
+            var fields = GetNewTableFieldsForContract();
             for (var i = 0; i < fields.Count; i++)
             {
                 builder.Append("    { ");
@@ -2894,22 +3850,23 @@ namespace ConfigSheetForge.Unity.Editor
 
         private List<ProjectFieldInput> ParseFieldsText()
         {
-            var fields = new List<ProjectFieldInput>();
-            foreach (var rawLine in (_fieldsText ?? "").Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                var parts = rawLine.Split('|');
-                var key = parts.Length > 0 ? parts[0].Trim() : "";
-                if (string.IsNullOrWhiteSpace(key))
-                {
-                    continue;
-                }
+            return ParseFieldsText(_fieldsText);
+        }
 
+        private List<ProjectFieldInput> GetNewTableFieldsForContract()
+        {
+            EnsureNewTableDefaults();
+            var fields = new List<ProjectFieldInput>();
+            for (var i = 0; i < _fieldRows.Count; i++)
+            {
+                var source = _fieldRows[i];
                 fields.Add(new ProjectFieldInput
                 {
-                    Key = key,
-                    DisplayName = parts.Length > 1 ? parts[1].Trim() : key,
-                    ValueKind = parts.Length > 2 ? parts[2].Trim() : "string",
-                    Description = parts.Length > 3 ? parts[3].Trim() : ""
+                    Key = source.Key,
+                    DisplayName = source.DisplayName,
+                    ValueKind = ValueKindForContract(source),
+                    Description = source.Description,
+                    IsPrimary = source.IsPrimary
                 });
             }
 
@@ -3058,7 +4015,51 @@ namespace ConfigSheetForge.Unity.Editor
                 : value;
         }
 
-        private static List<string> ReadRemoteBranches(string projectRoot)
+        private static List<TargetBranchOption> ReadRemoteBranchOptions(string projectRoot, string prBaseBranch, string defaultTargetBranch, string selectedBranch)
+        {
+            var branches = new List<TargetBranchOption>();
+            var forEachRef = TryRunTool(projectRoot, "git", new[] { "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)|%(committerdate:iso8601-strict)", "refs/remotes/origin" }, 4500);
+            if (forEachRef.ExitCode == 0 && !string.IsNullOrWhiteSpace(forEachRef.Stdout))
+            {
+                foreach (var raw in forEachRef.Stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var split = raw.IndexOf('|');
+                    var name = split >= 0 ? raw.Substring(0, split).Trim() : raw.Trim();
+                    var date = split >= 0 ? raw.Substring(split + 1).Trim() : "";
+                    if (name.StartsWith("origin/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        name = name.Substring("origin/".Length);
+                    }
+
+                    if (!string.Equals(name, "HEAD", StringComparison.OrdinalIgnoreCase))
+                    {
+                        AddOrUpdateBranchOption(branches, name, date, "git for-each-ref");
+                    }
+                }
+            }
+
+            if (branches.Count == 0)
+            {
+                foreach (var name in ReadRemoteBranchNamesFromRefs(projectRoot))
+                {
+                    AddOrUpdateBranchOption(branches, name, "", "refs");
+                }
+            }
+
+            AddOrUpdateBranchOption(branches, prBaseBranch, "", "GitHub PR");
+            AddOrUpdateBranchOption(branches, defaultTargetBranch, "", "project default");
+            AddOrUpdateBranchOption(branches, selectedBranch, "", "current selection");
+            for (var i = 0; i < branches.Count; i++)
+            {
+                branches[i].IsPrBase = !string.IsNullOrWhiteSpace(prBaseBranch) && string.Equals(branches[i].Name, prBaseBranch, StringComparison.OrdinalIgnoreCase);
+                branches[i].IsDefault = !string.IsNullOrWhiteSpace(defaultTargetBranch) && string.Equals(branches[i].Name, defaultTargetBranch, StringComparison.OrdinalIgnoreCase);
+            }
+
+            branches.Sort(CompareTargetBranchOptions);
+            return branches;
+        }
+
+        private static List<string> ReadRemoteBranchNamesFromRefs(string projectRoot)
         {
             var branches = new List<string>();
             try
@@ -3107,6 +4108,124 @@ namespace ConfigSheetForge.Unity.Editor
             return branches;
         }
 
+        private static void AddOrUpdateBranchOption(List<TargetBranchOption> branches, string name, string lastCommitText, string source)
+        {
+            name = (name ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return;
+            }
+
+            for (var i = 0; i < branches.Count; i++)
+            {
+                if (string.Equals(branches[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrWhiteSpace(branches[i].LastCommitText) && !string.IsNullOrWhiteSpace(lastCommitText))
+                    {
+                        branches[i].LastCommitText = lastCommitText;
+                    }
+
+                    return;
+                }
+            }
+
+            branches.Add(new TargetBranchOption
+            {
+                Name = name,
+                LastCommitText = lastCommitText ?? "",
+                Source = source ?? ""
+            });
+        }
+
+        private static int CompareTargetBranchOptions(TargetBranchOption left, TargetBranchOption right)
+        {
+            var leftRank = BranchRank(left);
+            var rightRank = BranchRank(right);
+            if (leftRank != rightRank)
+            {
+                return leftRank.CompareTo(rightRank);
+            }
+
+            if (leftRank == 2)
+            {
+                var dateCompare = string.Compare(right.LastCommitText, left.LastCommitText, StringComparison.OrdinalIgnoreCase);
+                if (dateCompare != 0)
+                {
+                    return dateCompare;
+                }
+            }
+
+            return string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int BranchRank(TargetBranchOption option)
+        {
+            if (option.IsPrBase)
+            {
+                return 0;
+            }
+
+            if (option.IsDefault)
+            {
+                return 1;
+            }
+
+            return string.IsNullOrWhiteSpace(option.LastCommitText) ? 3 : 2;
+        }
+
+        private static GitHubPreflightSummary ProbeGitHubPreflight(string projectRoot, string repository, bool allowPrAutoDetect, string installHelpUrl)
+        {
+            var summary = GitHubPreflightSummary.Unknown();
+            summary.InstallHelpUrl = FirstNonEmpty(installHelpUrl, "https://cli.github.com/");
+            summary.AllowPrAutoDetect = allowPrAutoDetect;
+
+            var git = TryRunTool(projectRoot, "git", new[] { "--version" }, 2500);
+            summary.GitAvailable = git.ExitCode == 0;
+            if (!summary.GitAvailable)
+            {
+                summary.Status = "GitHub PR 识别：git 不可用";
+                summary.NextStep = "请先安装 git 或确认 Unity 能访问 git 命令。";
+                return summary;
+            }
+
+            summary.RemoteIsGitHub = !string.IsNullOrWhiteSpace(repository);
+            if (!summary.RemoteIsGitHub)
+            {
+                summary.Status = "GitHub PR 识别：当前仓库不是 GitHub remote";
+                summary.NextStep = "可以手动选择目标分支；PR 自动识别只在 GitHub remote 中启用。";
+                return summary;
+            }
+
+            if (!allowPrAutoDetect)
+            {
+                summary.Status = "GitHub PR 识别：项目配置已关闭";
+                summary.NextStep = "使用目标分支选择器生成合并预览。";
+                return summary;
+            }
+
+            var gh = TryRunTool(projectRoot, "gh", new[] { "--version" }, 2500);
+            summary.GhAvailable = gh.ExitCode == 0;
+            if (!summary.GhAvailable)
+            {
+                summary.Status = "GitHub PR 识别：未安装 gh，只能手动选择目标分支";
+                summary.NextStep = "安装 GitHub CLI 后运行 gh auth login；也可以先手动选择目标分支。";
+                return summary;
+            }
+
+            var auth = TryRunTool(projectRoot, "gh", new[] { "auth", "status" }, 4500);
+            summary.GhAuthenticated = auth.ExitCode == 0;
+            if (!summary.GhAuthenticated)
+            {
+                summary.Status = "GitHub PR 识别：gh 未登录";
+                summary.NextStep = "请运行 gh auth login；也可以先手动选择目标分支。";
+                return summary;
+            }
+
+            summary.Status = "GitHub PR 识别：可用";
+            summary.NextStep = "合并页会优先使用当前 GitHub PR 的 base branch。";
+            return summary;
+        }
+
         private static MergeContextProbeResult ProbeMergeContext(string projectRoot, string sourceBranch, string targetBranch, bool allowPrAutoDetect)
         {
             var result = new MergeContextProbeResult();
@@ -3124,7 +4243,7 @@ namespace ConfigSheetForge.Unity.Editor
                 }
                 else
                 {
-                    result.Message = string.IsNullOrWhiteSpace(gh.Stderr) ? "gh 不可用或当前分支没有可识别 PR" : "gh 未返回 PR：" + gh.Stderr.Trim();
+                    result.Message = HumanizeGhFailure(gh);
                 }
             }
             else
@@ -3139,6 +4258,30 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return result;
+        }
+
+        private static string HumanizeGhFailure(ProcessCaptureResult gh)
+        {
+            var stderr = FirstNonEmpty(gh == null ? "" : gh.Stderr, gh == null ? "" : gh.Stdout);
+            var lower = (stderr ?? "").ToLowerInvariant();
+            if (gh == null || gh.ExitCode < 0 ||
+                lower.IndexOf("cannot find", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("not recognized", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("no such file", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "GitHub PR 识别：未安装 gh，只能手动选择目标分支";
+            }
+
+            if (lower.IndexOf("not logged", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("auth", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("authentication", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "GitHub PR 识别：gh 未登录，请运行 gh auth login";
+            }
+
+            return string.IsNullOrWhiteSpace(stderr)
+                ? "GitHub PR 识别：当前分支没有可识别 PR"
+                : "GitHub PR 识别：" + stderr.Trim();
         }
 
         private static string TryReadMergeBase(string projectRoot, string sourceBranch, string targetBranch)
@@ -3856,6 +4999,19 @@ namespace ConfigSheetForge.Unity.Editor
         public bool Success { get; private set; }
         public bool WasCancelled { get; private set; }
         public bool RefreshReadonlyStatusOnComplete { get; private set; }
+        public DateTime StartedAtUtc { get; private set; }
+        public double ElapsedSeconds
+        {
+            get
+            {
+                if (StartedAtUtc == default(DateTime))
+                {
+                    return 0;
+                }
+
+                return Math.Max(0, (DateTime.UtcNow - StartedAtUtc).TotalSeconds);
+            }
+        }
 
         public bool IsFinished
         {
@@ -4007,6 +5163,7 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             _started = true;
+            StartedAtUtc = DateTime.UtcNow;
             Task.Run(async () =>
             {
                 try
@@ -4067,6 +5224,10 @@ namespace ConfigSheetForge.Unity.Editor
             builder.AppendLine("状态: " + Status);
             builder.AppendLine("操作: " + Operation);
             builder.AppendLine("模式: " + (DryRun ? "dry-run / 生成预览" : "apply / 执行写入"));
+            if (ElapsedSeconds > 0)
+            {
+                builder.AppendLine("已用时间: " + Math.Floor(ElapsedSeconds).ToString("0") + " 秒");
+            }
             if (DryRun)
             {
                 builder.AppendLine("安全性: 只生成预览，不写飞书、不改本地 cache、不改 ProjectSettings。");
@@ -4663,6 +5824,55 @@ namespace ConfigSheetForge.Unity.Editor
         public string DisplayName { get; set; } = "";
         public string ValueKind { get; set; } = "string";
         public string Description { get; set; } = "";
+        public bool IsPrimary { get; set; }
+        public List<string> EnumValues { get; set; } = new List<string>();
+    }
+
+    internal sealed class NewTableValidationResult
+    {
+        public bool Valid { get; set; }
+        public string Message { get; set; } = "";
+    }
+
+    internal sealed class FieldTypeSpec
+    {
+        public string Canonical { get; set; } = "";
+        public string Label { get; set; } = "";
+    }
+
+    internal sealed class TargetBranchOption
+    {
+        public string Name { get; set; } = "";
+        public string LastCommitText { get; set; } = "";
+        public string Source { get; set; } = "";
+        public bool IsPrBase { get; set; }
+        public bool IsDefault { get; set; }
+    }
+
+    internal sealed class GitHubPreflightSummary
+    {
+        public bool AllowPrAutoDetect { get; set; }
+        public bool GitAvailable { get; set; }
+        public bool RemoteIsGitHub { get; set; }
+        public bool GhAvailable { get; set; }
+        public bool GhAuthenticated { get; set; }
+        public string Status { get; set; } = "";
+        public string NextStep { get; set; } = "";
+        public string InstallHelpUrl { get; set; } = "https://cli.github.com/";
+
+        public bool IsReady
+        {
+            get { return GitAvailable && RemoteIsGitHub && (!AllowPrAutoDetect || GhAvailable && GhAuthenticated); }
+        }
+
+        public static GitHubPreflightSummary Unknown()
+        {
+            return new GitHubPreflightSummary
+            {
+                Status = "GitHub PR 识别：待刷新",
+                NextStep = "刷新合并上下文后会检查 git、gh 和当前仓库 remote。"
+            };
+        }
     }
 
     internal sealed class MergeContextProbeResult

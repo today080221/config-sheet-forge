@@ -39,8 +39,14 @@ namespace ConfigSheetForge.Core
         public string DefaultTargetBranch { get; set; } = "";
         public string GithubRepository { get; set; } = "";
         public bool AllowPrAutoDetect { get; set; } = true;
+        public bool GithubRequiredForPrAutoDetect { get; set; }
+        public string GithubInstallHelpUrl { get; set; } = "https://cli.github.com/";
+        public string NewTableDefaultOwnerRole { get; set; } = "";
         public Dictionary<string, string> DocumentationTargets { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public List<string> ContractArguments { get; set; } = new List<string>();
+        public List<ProjectRoleSummary> Roles { get; set; } = new List<ProjectRoleSummary>();
+        public List<string> NewTableSupportedFieldTypes { get; set; } = new List<string>();
+        public List<ProjectConfigFieldSummary> NewTableDefaultFields { get; set; } = new List<ProjectConfigFieldSummary>();
         public List<ProjectConfigTableSummary> Tables { get; set; } = new List<ProjectConfigTableSummary>();
         public List<ProjectConfigTableSummary> CurrentBranchTables { get; set; } = new List<ProjectConfigTableSummary>();
         public List<BranchBindingContract> BranchBindings { get; set; } = new List<BranchBindingContract>();
@@ -83,6 +89,26 @@ namespace ConfigSheetForge.Core
 
             return "";
         }
+    }
+
+    public sealed class ProjectRoleSummary
+    {
+        public string Key { get; set; } = "";
+        public string DisplayName { get; set; } = "";
+        public string Description { get; set; } = "";
+        public bool CanApproveWaiver { get; set; }
+        public bool CanApproveMainWriteBack { get; set; }
+        public bool CanApproveSchemaReview { get; set; }
+        public bool CanRequestMerge { get; set; }
+    }
+
+    public sealed class ProjectConfigFieldSummary
+    {
+        public string Key { get; set; } = "";
+        public string DisplayName { get; set; } = "";
+        public string ValueKind { get; set; } = "string";
+        public string Description { get; set; } = "";
+        public bool IsPrimary { get; set; }
     }
 
     public sealed class ProjectConfigTableSummary
@@ -236,6 +262,17 @@ namespace ConfigSheetForge.Core
                                         GetBoolean(toolkit, "allowPrAutoDetect", "prAutoDetect") ??
                                         GetBoolean(github, "allowPrAutoDetect", "prAutoDetect") ??
                                         true;
+            summary.GithubRequiredForPrAutoDetect = GetBoolean(root, "githubRequiredForPrAutoDetect", "requiredForPrAutoDetect") ??
+                                                    GetBoolean(toolkit, "githubRequiredForPrAutoDetect", "requiredForPrAutoDetect") ??
+                                                    GetBoolean(github, "requiredForPrAutoDetect", "githubRequiredForPrAutoDetect") ??
+                                                    false;
+            summary.GithubInstallHelpUrl = FirstNonEmpty(
+                GetString(root, "githubInstallHelpUrl", "installHelpUrl"),
+                GetString(toolkit, "githubInstallHelpUrl", "installHelpUrl"),
+                GetString(github, "installHelpUrl", "githubInstallHelpUrl"),
+                "https://cli.github.com/");
+            ReadRoles(summary, root);
+            ReadNewTableOptions(summary, root, toolkit);
             ReadDocumentationTargets(summary, root, toolkit);
             summary.ContractArguments.AddRange(GetStringArray(root, "contractArgs", "adapterArgs", "lifecycleContractArgs"));
             if (summary.ContractArguments.Count == 0)
@@ -244,6 +281,136 @@ namespace ConfigSheetForge.Core
             }
 
             ReadRegistry(summary, root);
+        }
+
+        private static void ReadRoles(ProjectConfigSummary summary, SimpleJsonValue root)
+        {
+            AddRoles(summary, GetObject(root, "roles", "ownerRoles"));
+            AddRoles(summary, GetObject(GetObject(root, "toolkit"), "roles", "ownerRoles"));
+        }
+
+        private static void AddRoles(ProjectConfigSummary summary, SimpleJsonValue roles)
+        {
+            if (summary == null || roles == null || roles.Kind != SimpleJsonKind.Object)
+            {
+                return;
+            }
+
+            foreach (var pair in roles.ObjectValue)
+            {
+                if (pair.Value.Kind == SimpleJsonKind.String || pair.Value.Kind == SimpleJsonKind.Number)
+                {
+                    UpsertRole(summary, new ProjectRoleSummary
+                    {
+                        Key = pair.Key,
+                        DisplayName = FirstNonEmpty(pair.Value.StringValue, pair.Key)
+                    });
+                }
+                else if (pair.Value.Kind == SimpleJsonKind.Object)
+                {
+                    UpsertRole(summary, new ProjectRoleSummary
+                    {
+                        Key = FirstNonEmpty(GetString(pair.Value, "key", "id", "role"), pair.Key),
+                        DisplayName = FirstNonEmpty(GetString(pair.Value, "displayName", "name", "title", "label"), pair.Key),
+                        Description = GetString(pair.Value, "description", "help", "summary"),
+                        CanApproveWaiver = GetBoolean(pair.Value, "canApproveWaiver", "approveWaiver") ?? false,
+                        CanApproveMainWriteBack = GetBoolean(pair.Value, "canApproveMainWriteBack", "canWriteMain", "approveMainWriteBack") ?? false,
+                        CanApproveSchemaReview = GetBoolean(pair.Value, "canApproveSchemaReview", "canReviewSchema", "approveSchemaReview") ?? false,
+                        CanRequestMerge = GetBoolean(pair.Value, "canRequestMerge", "requestMerge") ?? false
+                    });
+                }
+            }
+        }
+
+        private static void UpsertRole(ProjectConfigSummary summary, ProjectRoleSummary role)
+        {
+            if (summary == null || role == null || string.IsNullOrWhiteSpace(role.Key))
+            {
+                return;
+            }
+
+            for (var i = 0; i < summary.Roles.Count; i++)
+            {
+                if (string.Equals(summary.Roles[i].Key, role.Key, StringComparison.OrdinalIgnoreCase))
+                {
+                    summary.Roles[i] = role;
+                    return;
+                }
+            }
+
+            summary.Roles.Add(role);
+        }
+
+        private static void ReadNewTableOptions(ProjectConfigSummary summary, SimpleJsonValue root, SimpleJsonValue toolkit)
+        {
+            var newTable = GetObject(root, "newTable", "newTableDefaults");
+            var toolkitNewTable = GetObject(toolkit, "newTable", "newTableDefaults");
+            summary.NewTableDefaultOwnerRole = FirstNonEmpty(
+                GetString(newTable, "defaultOwnerRole", "ownerRole"),
+                GetString(toolkitNewTable, "defaultOwnerRole", "ownerRole"),
+                GetString(root, "newTableDefaultOwnerRole"));
+
+            summary.NewTableSupportedFieldTypes.AddRange(GetStringArray(newTable, "supportedFieldTypes", "fieldTypes", "types"));
+            if (summary.NewTableSupportedFieldTypes.Count == 0)
+            {
+                summary.NewTableSupportedFieldTypes.AddRange(GetStringArray(toolkitNewTable, "supportedFieldTypes", "fieldTypes", "types"));
+            }
+
+            AddDefaultFields(summary, GetValue(newTable, "defaultFields", "fields"));
+            if (summary.NewTableDefaultFields.Count == 0)
+            {
+                AddDefaultFields(summary, GetValue(toolkitNewTable, "defaultFields", "fields"));
+            }
+        }
+
+        private static void AddDefaultFields(ProjectConfigSummary summary, SimpleJsonValue value)
+        {
+            if (summary == null || value == null || value.Kind != SimpleJsonKind.Array)
+            {
+                return;
+            }
+
+            foreach (var item in value.ArrayValue)
+            {
+                var field = ParseDefaultField(item);
+                if (!string.IsNullOrWhiteSpace(field.Key) || !string.IsNullOrWhiteSpace(field.DisplayName))
+                {
+                    summary.NewTableDefaultFields.Add(field);
+                }
+            }
+        }
+
+        private static ProjectConfigFieldSummary ParseDefaultField(SimpleJsonValue item)
+        {
+            if (item == null)
+            {
+                return new ProjectConfigFieldSummary();
+            }
+
+            if (item.Kind == SimpleJsonKind.String || item.Kind == SimpleJsonKind.Number)
+            {
+                var key = item.StringValue ?? "";
+                return new ProjectConfigFieldSummary
+                {
+                    Key = key,
+                    DisplayName = key,
+                    ValueKind = "string"
+                };
+            }
+
+            if (item.Kind != SimpleJsonKind.Object)
+            {
+                return new ProjectConfigFieldSummary();
+            }
+
+            return new ProjectConfigFieldSummary
+            {
+                Key = GetString(item, "key", "id", "fieldKey"),
+                DisplayName = GetString(item, "displayName", "name", "title", "label"),
+                ValueKind = FirstNonEmpty(GetString(item, "valueKind", "type", "kind"), "string"),
+                Description = GetString(item, "description", "desc", "help"),
+                IsPrimary = GetBoolean(item, "isPrimary", "primary", "stableId", "isStableId") ?? false
+            };
         }
 
         private static void ReadDocumentationTargets(ProjectConfigSummary summary, SimpleJsonValue root, SimpleJsonValue toolkit)

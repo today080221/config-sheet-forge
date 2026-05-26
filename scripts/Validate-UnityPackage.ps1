@@ -217,6 +217,16 @@ foreach ($requiredUiMarker in @("DrawOnboardingCard", "BuildRecommendationText",
   }
 }
 
+foreach ($requiredV413Marker in @("DrawTargetBranchPicker", "GitHub PR 识别", "DrawOwnerRolePicker", "DrawStructuredFieldEditor", "DrawEnumValuesEditor", "AdvancedModePrefKey", "已用时间", "后台任务运行中，完成后自动恢复")) {
+  if ($window -notlike "*$requiredV413Marker*") {
+    throw "Unity v0.4.13 UX source marker is missing: $requiredV413Marker"
+  }
+}
+
+if ($window -like "*EditorGUILayout.Popup(selected, _targetBranchOptions.ToArray())*") {
+  throw "Target branch selector must not regress to a non-searchable Popup."
+}
+
 foreach ($requiredLayoutText in @("CollapsedOutputBarHeight = 34f", "DrawCollapsedOutputStatusBar", "BottomOutputExpandedPrefKey", "BottomOutputHeightPrefKey", "SetBottomOutputExpanded", "OnboardingDismissedPrefKey", "ShowHelpMenu", "documentationTargets")) {
   if ($window -notlike "*$requiredLayoutText*") {
     throw "Unity output drawer layout is missing expected source marker: $requiredLayoutText"
@@ -241,6 +251,12 @@ foreach ($forbiddenCollapsedLayout in @("BeginScrollView", "ExpandHeight")) {
 foreach ($retiredUiText in @("passed=false", "failures=")) {
   if ($window -like "*$retiredUiText*") {
     throw "Unity workflow UI still contains retired debug text: $retiredUiText"
+  }
+}
+
+foreach ($retiredPlannerText in @("合并输入", "例如 configOwner")) {
+  if ($window -like "*$retiredPlannerText*") {
+    throw "Unity workflow UI still contains retired planner-hostile text: $retiredPlannerText"
   }
 }
 
