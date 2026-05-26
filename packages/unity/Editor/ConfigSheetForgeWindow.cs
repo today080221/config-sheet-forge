@@ -37,12 +37,31 @@ namespace ConfigSheetForge.Unity.Editor
         private string _theirsPath = "";
         private string _mergeReportPath = "merge-report.md";
         private string _mergedPath = "merged.semantic.json";
+        private string _mergeTableId = "";
+        private string _mergeSourceBranch = "";
+        private string _targetBranch = "";
+        private string _defaultTargetBranch = "main";
+        private string _mergeBase = "";
+        private string _prNumber = "";
+        private string _prUrl = "";
+        private string _githubRepository = "";
+        private string _targetFeishuProfile = "";
+        private string _targetBranchWikiNodeTitle = "";
+        private string _targetBranchWikiNodeUrl = "";
+        private string _targetBranchWikiNodeToken = "";
+        private bool _allowPrAutoDetect = true;
+        private string _mergeContextStatus = "";
+        private List<string> _targetBranchOptions = new List<string>();
+        private Task<MergeContextProbeResult> _mergeContextTask;
         private bool _writeBackToMain;
         private bool _confirmWriteMain;
         private bool _confirmSeedApply;
         private bool _confirmSeedExcelToSo;
         private bool _confirmSyncApply;
         private bool _showAdvancedDiagnostics;
+        private bool _showBottomOutput = true;
+        private bool _isResizingOutputPanel;
+        private float _bottomOutputHeight = 260f;
         private string _output = "";
         private string _resultSummary = "";
         private string _lastCommand = "";
@@ -165,6 +184,7 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             EditorGUILayout.EndScrollView();
+            DrawOutputResizeHandle();
             DrawOutputTab(expanded: false, preferredHeight: outputHeight);
         }
 
@@ -180,7 +200,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("复制 UPM", "复制通过 Unity Package Manager 安装此包的 Git URL。"), GUILayout.Width(88)))
             {
-                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.8";
+                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.9";
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("飞书在线 Sheet 是 Source of Truth，本地 Excel 只是兼容缓存。", EditorStyles.miniLabel);
@@ -213,6 +233,72 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndVertical();
         }
 
+        private void DrawTargetBranchField()
+        {
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(new GUIContent("目标分支", "target/base branch。没有 PR 时默认 main，可从远端分支列表选择。"), GUILayout.Width(110));
+            var selected = Math.Max(0, _targetBranchOptions.IndexOf(_targetBranch));
+            var previous = _targetBranch;
+            if (_targetBranchOptions.Count > 0)
+            {
+                selected = EditorGUILayout.Popup(selected, _targetBranchOptions.ToArray());
+                _targetBranch = _targetBranchOptions[Mathf.Clamp(selected, 0, _targetBranchOptions.Count - 1)];
+            }
+            else
+            {
+                _targetBranch = EditorGUILayout.TextField(_targetBranch);
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (!string.Equals(previous, _targetBranch, StringComparison.OrdinalIgnoreCase))
+            {
+                _mergeContextTask = null;
+                _prNumber = "";
+                _prUrl = "";
+                RefreshMergeContext();
+            }
+        }
+
+        private string BuildPrText()
+        {
+            if (!string.IsNullOrWhiteSpace(_prNumber))
+            {
+                return "#" + _prNumber + " -> " + FirstNonEmpty(_prUrl, "未记录 URL");
+            }
+
+            return _allowPrAutoDetect ? "未识别到 PR，使用目标分支 fallback" : "项目配置关闭 PR 自动识别";
+        }
+
+        private string BuildMergeTablesText()
+        {
+            if (_projectConfig.CurrentBranchTables.Count == 0)
+            {
+                return "当前 branch/profile 暂无在线表记录";
+            }
+
+            if (!string.IsNullOrWhiteSpace(_mergeTableId))
+            {
+                return "单表：" + _mergeTableId;
+            }
+
+            return _projectConfig.CurrentBranchTables.Count.ToString() + " 张当前分支在线表";
+        }
+
+        private string BuildTargetWikiText()
+        {
+            if (!string.IsNullOrWhiteSpace(_targetBranchWikiNodeTitle))
+            {
+                return _targetBranchWikiNodeTitle;
+            }
+
+            if (!string.IsNullOrWhiteSpace(_targetBranchWikiNodeUrl) || !string.IsNullOrWhiteSpace(_targetBranchWikiNodeToken))
+            {
+                return "已绑定 Wiki 节点";
+            }
+
+            return "按 BranchBindings/模板推导中";
+        }
+
         private void DrawProjectSummary()
         {
             var projectRoot = FindProjectRoot();
@@ -222,18 +308,32 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("当前工作流", EditorStyles.boldLabel);
-            DrawReadonlyRow("Git 分支", FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch, "未知"), "当前本地 git branch。");
-            DrawReadonlyRow("Feishu Profile", FirstNonEmpty(_projectConfig.BranchProfile, "按当前分支推导中"), "当前 Git 分支对应的 Feishu profile。");
-            DrawReadonlyRow("Wiki 节点", FirstNonEmpty(_projectConfig.BranchWikiNodeTitle, "按规则推导中"), "当前 branch/profile 对应的 Wiki branch 节点。");
-            DrawReadonlyRow("Wiki 链接", FirstNonEmpty(_projectConfig.BranchWikiNodeUrl, _projectConfig.BranchWikiNodeToken, "待读取 BranchBindings"), "当前 branch/profile 对应的 Wiki 节点链接或 token。");
-            DrawReadonlyRow("当前分支表", BuildCurrentBranchTableCountText(), "当前 branch/profile 下可见的配表数量。");
-            DrawReadonlyRow("Cache 状态", BuildCacheOverviewText(projectRoot), "本地 semantic/xlsx cache 是否需要同步。");
-            DrawReadonlyRow("PR Gate", _gateReportSummary.ShortText, "最近一次 Temp/ConfigSheetForge/pr-gate-report.json 摘要。");
-            DrawStatusRow("项目配置", _projectConfig.Exists, ToProjectRelativePath(_projectConfig.ProjectConfigPath), "未发现 ProjectSettings/*ConfigSheetForge*.json。");
-            _cliPath = EditorGUILayout.TextField(new GUIContent("CLI", "CLI 可执行文件或绝对路径；默认会先看项目配置声明的环境变量。"), _cliPath);
+            EditorGUILayout.LabelField("当前状态", EditorStyles.boldLabel);
+            EditorGUILayout.BeginHorizontal();
+            DrawStatusMiniCard("当前分支", FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch, "未知"), MessageType.None);
+            DrawStatusMiniCard("Feishu branch/profile", FirstNonEmpty(_projectConfig.BranchProfile, "按当前分支推导中"), MessageType.None);
+            DrawStatusMiniCard("在线表", BuildOnlineTableStatus(), OnlineTablesReadable() ? MessageType.Info : MessageType.Warning);
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            DrawStatusMiniCard("Cache", BuildCacheOverviewText(projectRoot), CacheLooksFresh(projectRoot) ? MessageType.Info : MessageType.Warning);
+            DrawStatusMiniCard("PR Gate", BuildGateStatusText(), GateLooksPassed() ? MessageType.Info : MessageType.Warning);
+            DrawStatusMiniCard("下一步", BuildNextStepText(projectRoot), MessageType.None);
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            if (DrawJobButton(new GUIContent(BuildNextStepButtonText(projectRoot), "按当前状态执行推荐动作。"), GUILayout.Height(26)))
+            {
+                RunNextStep(projectRoot);
+            }
+
+            if (GUILayout.Button(new GUIContent(_showBottomOutput ? "收起结果" : "展开结果", "显示或隐藏底部结果摘要面板。"), GUILayout.Width(92), GUILayout.Height(26)))
+            {
+                _showBottomOutput = !_showBottomOutput;
+            }
+            EditorGUILayout.EndHorizontal();
+
             _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
-            DrawReadonlyRow("CLI 来源", _cliInvocation.CanLaunch ? _cliInvocation.SourceDescription : "未找到：" + _cliInvocation.SourceDescription, "CLI 来自环境变量、源码 checkout、PATH 或窗口 CLI 字段。");
             EditorGUILayout.EndVertical();
         }
 
@@ -280,12 +380,23 @@ namespace ConfigSheetForge.Unity.Editor
             var configPath = ConfigSheetForgeEditorUtility.GetConfigPath(projectRoot);
             var registryPath = ConfigSheetForgeEditorUtility.GetRegistryPath(projectRoot);
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            DrawReadonlyRow("Git 分支", FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch, "未知"), "当前本地 git branch。");
+            DrawReadonlyRow("Feishu Profile", FirstNonEmpty(_projectConfig.BranchProfile, "按当前分支推导中"), "当前 Git 分支对应的 Feishu profile。");
+            DrawReadonlyRow("Wiki 节点", FirstNonEmpty(_projectConfig.BranchWikiNodeTitle, "按规则推导中"), "当前 branch/profile 对应的 Wiki branch 节点。");
+            DrawReadonlyRow("Wiki 链接", FirstNonEmpty(_projectConfig.BranchWikiNodeUrl, _projectConfig.BranchWikiNodeToken, "待读取 BranchBindings"), "当前 branch/profile 对应的 Wiki 节点链接或 token。");
             DrawReadonlyRow("项目根目录", projectRoot, "CLI 会以此目录作为工作目录。");
+            DrawReadonlyRow("项目配置", _projectConfig.Exists ? ToProjectRelativePath(_projectConfig.ProjectConfigPath) : "未发现", "ProjectSettings/*ConfigSheetForge*.json。");
             DrawReadonlyRow("schemaVersion", FirstNonEmpty(_projectConfig.SchemaVersion, "未声明"), "项目 config 中声明的 schema 版本。");
             DrawReadonlyRow("共享表数量", _projectConfig.TableCount > 0 ? _projectConfig.TableCount.ToString() : "未声明", "ProjectSettings 顶层 tables/configSheets 数组中的配表数量。");
             DrawReadonlyRow("lifecycle", FirstNonEmpty(_projectConfig.LifecycleApplyMode, "未声明"), "项目 config 中声明的 lifecycle 写入模式。");
             DrawReadonlyRow("Gate 报告", FirstNonEmpty(_projectConfig.GateReportPath, "Temp/ConfigSheetForge/pr-gate-report.json"), "PR gate report 输出路径。");
             DrawReadonlyRow("Adapter", FirstNonEmpty(_projectConfig.AdapterDescription, "未配置"), "项目 adapter 负责把项目 config 转成 lifecycle contract。");
+            _cliPath = EditorGUILayout.TextField(new GUIContent("CLI", "CLI 可执行文件或绝对路径；默认会先看项目配置声明的环境变量。"), _cliPath);
+            _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
+            DrawReadonlyRow("CLI 来源", _cliInvocation.CanLaunch ? _cliInvocation.SourceDescription : "未找到：" + _cliInvocation.SourceDescription, "CLI 来自环境变量、源码 checkout、PATH 或窗口 CLI 字段。");
+            DrawReadonlyRow("目标分支默认值", FirstNonEmpty(_projectConfig.DefaultTargetBranch, "main"), "合并页默认 target branch。");
+            DrawReadonlyRow("GitHub repo", FirstNonEmpty(_projectConfig.GithubRepository, _githubRepository, "未声明/待从 remote 推导"), "用于 PR 自动识别。");
+            DrawReadonlyRow("PR 自动识别", _projectConfig.AllowPrAutoDetect ? "启用" : "关闭", "allowPrAutoDetect。");
             DrawReadonlyRow("本地状态目录", BuildLocalStateText(configPath, registryPath), ".config-sheet-forge 是 gitignored 本地状态/cache；可忽略，可重建，不参与共享项目摘要。");
             if (_projectConfig.Diagnostics.Count > 0)
             {
@@ -425,22 +536,34 @@ namespace ConfigSheetForge.Unity.Editor
         private void DrawMergeTab()
         {
             DrawSectionTitle("合并审查");
-            EditorGUILayout.HelpBox("三方合并只生成报告和预览；写回 main 必须由项目 contract 显式确认。", MessageType.None);
+            EditorGUILayout.HelpBox("合并审查按当前 Git 分支和目标分支自动推导，像 GitHub PR 一样先生成预览；写回 main 必须显式确认。", MessageType.None);
 
+            DrawProjectMergeInputs();
             if (_projectConfig.Exists)
             {
-                DrawProjectMergeInputs();
-                DrawProjectLifecycleCard(
-                    "项目三方比较与合并",
-                    "发现项目配置后，这里走 adapter 生成 compare-merge lifecycle contract。低风险 merge 默认只生成预览。",
-                    "生成合并预览",
-                    "compare-merge",
-                    dryRun: true,
-                    includeNewTableSteps: false);
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                EditorGUILayout.LabelField("执行", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("低风险 merge 只生成预览，不写回 main；adapter 会根据 source/target/merge-base 自动准备 base/ours/theirs semantic 输入。", EditorStyles.wordWrappedLabel);
+                EditorGUILayout.BeginHorizontal();
+                if (DrawJobButton(new GUIContent("生成合并预览", "生成 compare-merge dry-run，不写回 main。"), GUILayout.Height(28)))
+                {
+                    RunProjectLifecycle("compare-merge", dryRun: true);
+                }
+
+                if (DrawJobButton(new GUIContent("确认写回 main", "危险操作：必须勾选申请写回和确认写回。"), _writeBackToMain && _confirmWriteMain, GUILayout.Height(28)))
+                {
+                    if (EditorUtility.DisplayDialog("确认写回 main", "将按项目 adapter 的 compare-merge contract 执行写回。请确认预览已经通过。", "确认执行", "取消"))
+                    {
+                        RunProjectLifecycle("compare-merge", dryRun: false);
+                    }
+                }
+                EditorGUILayout.EndHorizontal();
+                EditorGUILayout.EndVertical();
                 return;
             }
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.HelpBox("未发现 ProjectSettings/*ConfigSheetForge*.json，无法按 BranchBindings 自动定位在线表。请先接入项目 adapter；下面保留本地 CLI 兼容入口给工程诊断使用。", MessageType.Warning);
             DrawPathField("基线", ref _basePath, "共同祖先 semantic workbook JSON。");
             DrawPathField("本分支", ref _oursPath, "本地 semantic workbook JSON。");
             DrawPathField("对方", ref _theirsPath, "待合入 semantic workbook JSON。");
@@ -576,13 +699,35 @@ namespace ConfigSheetForge.Unity.Editor
         private void DrawProjectMergeInputs()
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("合并输入", EditorStyles.boldLabel);
-            _tableId = EditorGUILayout.TextField(new GUIContent("配表ID", "写入 inputs.tableId。"), _tableId);
-            DrawPathField("基线", ref _basePath, "共同祖先 semantic workbook JSON。");
-            DrawPathField("本分支", ref _oursPath, "本地 semantic workbook JSON。");
-            DrawPathField("对方", ref _theirsPath, "待合入 semantic workbook JSON。");
-            _mergeReportPath = EditorGUILayout.TextField(new GUIContent("报告", "写入 inputs.mergeReportPath。"), _mergeReportPath);
-            _mergedPath = EditorGUILayout.TextField(new GUIContent("合并结果", "写入 inputs.mergedPath。"), _mergedPath);
+            EditorGUILayout.LabelField("PR 合并上下文", EditorStyles.boldLabel);
+            DrawReadonlyRow("当前分支", FirstNonEmpty(_mergeSourceBranch, _currentGitBranch, "未知"), "source/head branch。");
+            DrawTargetBranchField();
+            DrawReadonlyRow("目标 Feishu", FirstNonEmpty(_targetFeishuProfile, "按目标分支推导中"), "目标分支对应的 Feishu profile。");
+            DrawReadonlyRow("目标 Wiki", BuildTargetWikiText(), "目标分支对应的 Wiki branch 节点。");
+            DrawReadonlyRow("共同祖先", FirstNonEmpty(_mergeBase, "待推导"), "source/head 与 target/base 的 merge-base。");
+            DrawReadonlyRow("GitHub PR", BuildPrText(), "如果 gh 可用且 allowPrAutoDetect=true，会尝试自动识别当前分支的 PR。");
+            DrawReadonlyRow("比较范围", BuildMergeTablesText(), "将比较当前 branch/profile 下可见的在线表。");
+            DrawReadonlyRow("模式", _writeBackToMain && _confirmWriteMain ? "申请写回 main" : "只生成预览", "低风险默认只生成预览。");
+            if (!string.IsNullOrWhiteSpace(_mergeContextStatus))
+            {
+                EditorGUILayout.LabelField(_mergeContextStatus, EditorStyles.wordWrappedMiniLabel);
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button(new GUIContent("刷新合并上下文", "重新读取当前分支、远端分支、PR、merge-base。"), GUILayout.Height(24)))
+            {
+                RefreshMergeContext();
+            }
+
+            if (GUILayout.Button(new GUIContent("复制 PR 链接", "复制当前识别到的 PR URL。"), GUILayout.Height(24)))
+            {
+                EditorGUIUtility.systemCopyBuffer = _prUrl ?? "";
+            }
+            EditorGUILayout.EndHorizontal();
+
+            _mergeTableId = EditorGUILayout.TextField(new GUIContent("只比较单表", "可选；留空时 adapter 可比较当前分支所有在线表。"), _mergeTableId);
+            _mergeReportPath = EditorGUILayout.TextField(new GUIContent("报告路径", "写入 inputs.mergeReportPath。"), _mergeReportPath);
+            _mergedPath = EditorGUILayout.TextField(new GUIContent("合并结果路径", "写入 inputs.mergedPath。"), _mergedPath);
             _writeBackToMain = EditorGUILayout.Toggle(new GUIContent("申请写回 main", "默认关闭；关闭时只生成 merge.preview。"), _writeBackToMain);
             if (_writeBackToMain)
             {
@@ -654,17 +799,28 @@ namespace ConfigSheetForge.Unity.Editor
         {
             DrawSectionTitle(expanded ? "输出" : "最近结果");
             EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Height(preferredHeight), GUILayout.ExpandHeight(expanded));
-            if (expanded)
+            if (!expanded)
             {
-                _showRecentCommand = EditorGUILayout.Foldout(_showRecentCommand, "最近命令", true);
-                if (_showRecentCommand)
+                EditorGUILayout.BeginHorizontal();
+                _showBottomOutput = EditorGUILayout.Foldout(_showBottomOutput, "结果摘要", true);
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button(new GUIContent("复制输出", "复制摘要、命令和详细日志。"), GUILayout.Width(84)))
                 {
-                    DrawWrappedReadonlyBlock("", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
+                    EditorGUIUtility.systemCopyBuffer = BuildCopyOutput();
                 }
-            }
-            else
-            {
-                DrawWrappedReadonlyBlock("最近命令", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
+
+                if (GUILayout.Button(new GUIContent(_showBottomOutput ? "收起" : "展开", "折叠或展开底部结果面板。"), GUILayout.Width(64)))
+                {
+                    _showBottomOutput = !_showBottomOutput;
+                }
+
+                EditorGUILayout.EndHorizontal();
+                if (!_showBottomOutput)
+                {
+                    EditorGUILayout.LabelField(FirstLine(BuildVisibleSummary()), EditorStyles.wordWrappedMiniLabel);
+                    EditorGUILayout.EndVertical();
+                    return;
+                }
             }
 
             EditorGUILayout.BeginHorizontal();
@@ -673,7 +829,7 @@ namespace ConfigSheetForge.Unity.Editor
                 EditorGUIUtility.systemCopyBuffer = _lastCommand ?? "";
             }
 
-            if (GUILayout.Button(new GUIContent("复制输出", "复制命令输出。"), GUILayout.Width(104)))
+            if (expanded && GUILayout.Button(new GUIContent("复制输出", "复制命令输出。"), GUILayout.Width(104)))
             {
                 EditorGUIUtility.systemCopyBuffer = BuildCopyOutput();
             }
@@ -705,11 +861,17 @@ namespace ConfigSheetForge.Unity.Editor
             var summaryHeight = Math.Min(expanded ? 180f : 132f, Math.Max(72f, summaryStyle.CalcHeight(new GUIContent(summary), Math.Max(240f, EditorGUIUtility.currentViewWidth - 56f)) + 10f));
             EditorGUILayout.SelectableLabel(summary, summaryStyle, GUILayout.Height(summaryHeight), GUILayout.ExpandWidth(true));
 
+            _showRecentCommand = EditorGUILayout.Foldout(_showRecentCommand, expanded ? "命令详情" : "查看完整命令", true);
+            if (_showRecentCommand)
+            {
+                DrawWrappedReadonlyBlock("", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
+            }
+
             _showDetailedLogs = EditorGUILayout.Foldout(_showDetailedLogs || IsJobRunning, "详细日志", true);
             if (_showDetailedLogs || IsJobRunning)
             {
                 var outputStyle = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
-                var logHeight = Math.Max(80f, preferredHeight - summaryHeight - (expanded ? 160f : 180f));
+                var logHeight = Math.Max(80f, preferredHeight - summaryHeight - (expanded ? 190f : 210f));
                 _outputScroll = EditorGUILayout.BeginScrollView(_outputScroll, false, true, GUILayout.Height(logHeight), GUILayout.ExpandHeight(true));
                 EditorGUILayout.TextArea(string.IsNullOrWhiteSpace(_output) ? "暂无详细日志。" : _output, outputStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
                 EditorGUILayout.EndScrollView();
@@ -754,6 +916,18 @@ namespace ConfigSheetForge.Unity.Editor
             return builder.ToString().TrimEnd();
         }
 
+        private static string FirstLine(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "暂无结果摘要。";
+            }
+
+            var normalized = value.Replace("\r\n", "\n");
+            var index = normalized.IndexOf('\n');
+            return index >= 0 ? normalized.Substring(0, index) : normalized;
+        }
+
         private void SetImmediateOutput(string summary, string details)
         {
             _resultSummary = summary ?? "";
@@ -769,19 +943,68 @@ namespace ConfigSheetForge.Unity.Editor
 
         private float CalculateInlineOutputHeight()
         {
-            var height = Math.Max(220f, position.height * 0.36f);
-            if (position.height > 760f)
+            if (!_showBottomOutput)
             {
-                height = Math.Max(height, position.height - 520f);
+                return 58f;
             }
 
-            return Math.Min(height, Math.Max(220f, position.height - 280f));
+            if (_bottomOutputHeight <= 0f)
+            {
+                _bottomOutputHeight = Math.Max(240f, position.height * 0.34f);
+            }
+
+            var max = Math.Max(240f, position.height - 280f);
+            if (position.height > 780f && Math.Abs(_bottomOutputHeight - 260f) < 2f)
+            {
+                _bottomOutputHeight = Math.Max(_bottomOutputHeight, position.height * 0.38f);
+            }
+
+            _bottomOutputHeight = Mathf.Clamp(_bottomOutputHeight, 220f, max);
+            return _bottomOutputHeight;
+        }
+
+        private void DrawOutputResizeHandle()
+        {
+            if (!_showBottomOutput || _selectedTab == 4)
+            {
+                return;
+            }
+
+            var rect = GUILayoutUtility.GetRect(1f, 7f, GUILayout.ExpandWidth(true));
+            EditorGUIUtility.AddCursorRect(rect, MouseCursor.ResizeVertical);
+            if (Event.current.type == EventType.Repaint)
+            {
+                EditorGUI.DrawRect(new Rect(rect.x, rect.y + 3f, rect.width, 1f), new Color(0.35f, 0.35f, 0.35f, 0.75f));
+            }
+
+            if (Event.current.type == EventType.MouseDown && rect.Contains(Event.current.mousePosition))
+            {
+                _isResizingOutputPanel = true;
+                Event.current.Use();
+            }
+            else if (Event.current.type == EventType.MouseDrag && _isResizingOutputPanel)
+            {
+                _bottomOutputHeight = Mathf.Clamp(_bottomOutputHeight - Event.current.delta.y, 220f, Math.Max(240f, position.height - 280f));
+                Repaint();
+                Event.current.Use();
+            }
+            else if (Event.current.type == EventType.MouseUp && _isResizingOutputPanel)
+            {
+                _isResizingOutputPanel = false;
+                Event.current.Use();
+            }
         }
 
         private void OnEditorUpdate()
         {
+            var mergeChanged = ApplyMergeContextProbeIfDone();
             if (_activeJob == null)
             {
+                if (mergeChanged)
+                {
+                    Repaint();
+                }
+
                 return;
             }
 
@@ -796,6 +1019,7 @@ namespace ConfigSheetForge.Unity.Editor
                 changed = DrainActiveJobOutput() || changed;
                 var refresh = _activeJob.RefreshReadonlyStatusOnComplete;
                 _resultSummary = _activeJob.FinalSummary;
+                _showBottomOutput = true;
                 _showDetailedLogs = _activeJob.WasCancelled || !_activeJob.Success;
                 _activeJob = null;
                 if (refresh)
@@ -805,7 +1029,7 @@ namespace ConfigSheetForge.Unity.Editor
                 changed = true;
             }
 
-            if (changed)
+            if (changed || mergeChanged)
             {
                 Repaint();
             }
@@ -877,6 +1101,7 @@ namespace ConfigSheetForge.Unity.Editor
             _outputScroll = Vector2.zero;
             _resultSummary = job.BuildLiveSummary();
             _output = job.StartOutput;
+            _showBottomOutput = true;
             _showDetailedLogs = false;
             job.Start();
             Repaint();
@@ -926,7 +1151,19 @@ namespace ConfigSheetForge.Unity.Editor
                 return _confirmSyncApply;
             }
 
+            if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
+            {
+                return _writeBackToMain && _confirmWriteMain;
+            }
+
             return _confirmSeedApply;
+        }
+
+        private string TableIdForOperation(string operation)
+        {
+            return string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase)
+                ? _mergeTableId
+                : _tableId;
         }
 
         private string ProjectButtonLabel(string fallback, string operation)
@@ -973,6 +1210,25 @@ namespace ConfigSheetForge.Unity.Editor
         {
             EditorGUILayout.Space(8);
             EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
+        }
+
+        private static void DrawStatusMiniCard(string label, string value, MessageType messageType)
+        {
+            var oldColor = GUI.color;
+            if (messageType == MessageType.Warning)
+            {
+                GUI.color = new Color(1f, 0.82f, 0.48f);
+            }
+            else if (messageType == MessageType.Info)
+            {
+                GUI.color = new Color(0.65f, 0.92f, 0.7f);
+            }
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.MinWidth(150), GUILayout.ExpandWidth(true));
+            GUI.color = oldColor;
+            EditorGUILayout.LabelField(label, EditorStyles.miniBoldLabel);
+            EditorGUILayout.LabelField(value, EditorStyles.wordWrappedMiniLabel, GUILayout.MinHeight(EditorGUIUtility.singleLineHeight * 2f));
+            EditorGUILayout.EndVertical();
         }
 
         private static void DrawReadonlyRow(string label, string value, string tooltip)
@@ -1257,12 +1513,130 @@ namespace ConfigSheetForge.Unity.Editor
             MergeLifecycleSummary(projectRoot, "sync-cache.result.json");
             MergeLifecycleSummary(projectRoot, "pr-gate-report.result.json");
             _gateReportSummary = LoadGateReportSummary(projectRoot);
+            RefreshMergeContext();
         }
 
         private ConfigSheetForgeCliInvocation ResolveCoreCli(string projectRoot)
         {
             _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
             return _cliInvocation;
+        }
+
+        private void RefreshMergeContext()
+        {
+            var projectRoot = FindProjectRoot();
+            _mergeSourceBranch = FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch, TryReadGitBranch(projectRoot));
+            _defaultTargetBranch = FirstNonEmpty(_projectConfig.DefaultTargetBranch, "main");
+            if (string.IsNullOrWhiteSpace(_targetBranch) || string.Equals(_targetBranch, _mergeSourceBranch, StringComparison.OrdinalIgnoreCase))
+            {
+                _targetBranch = _defaultTargetBranch;
+            }
+
+            UpdateMergeInputPaths();
+            UpdateMergeWorkspaceContext();
+
+            _githubRepository = FirstNonEmpty(_projectConfig.GithubRepository, TryReadGithubRepository(projectRoot));
+            _allowPrAutoDetect = _projectConfig.AllowPrAutoDetect;
+            _targetBranchOptions = ReadRemoteBranches(projectRoot);
+            if (!_targetBranchOptions.Contains(_targetBranch))
+            {
+                _targetBranchOptions.Insert(0, _targetBranch);
+            }
+
+            _mergeBase = "正在计算";
+            _mergeContextStatus = "已按当前分支和目标分支推导合并上下文；不需要手动选择 base/ours/theirs 文件。";
+            if (_mergeContextTask == null)
+            {
+                var source = _mergeSourceBranch;
+                var target = _targetBranch;
+                var allowPr = _allowPrAutoDetect;
+                _mergeContextTask = Task.Run(() => ProbeMergeContext(projectRoot, source, target, allowPr));
+                _mergeContextStatus = allowPr
+                    ? "正在尝试识别当前分支的 GitHub PR 并计算 merge-base；gh 不可用时会使用目标分支 fallback。"
+                    : "正在按目标分支计算 merge-base。";
+            }
+        }
+
+        private bool ApplyMergeContextProbeIfDone()
+        {
+            if (_mergeContextTask == null || !_mergeContextTask.IsCompleted)
+            {
+                return false;
+            }
+
+            try
+            {
+                var result = _mergeContextTask.Result;
+                if (result != null && result.Found)
+                {
+                    _prNumber = result.Number;
+                    _prUrl = result.Url;
+                    _targetBranch = FirstNonEmpty(result.BaseBranch, _targetBranch, _defaultTargetBranch);
+                    _mergeBase = FirstNonEmpty(result.MergeBase, "未计算到共同祖先");
+                    UpdateMergeInputPaths();
+                    UpdateMergeWorkspaceContext();
+                    _mergeContextStatus = "已识别 GitHub PR #" + _prNumber + "，目标分支为 " + _targetBranch + "。";
+                }
+                else if (result != null && !string.IsNullOrWhiteSpace(result.Message))
+                {
+                    _mergeBase = FirstNonEmpty(result.MergeBase, "未计算到共同祖先");
+                    _mergeContextStatus = result.Message + "；使用目标分支 fallback。";
+                }
+            }
+            catch (Exception ex)
+            {
+                _mergeBase = "未计算到共同祖先";
+                _mergeContextStatus = "PR 自动识别失败：" + ex.Message + "；使用目标分支 fallback。";
+            }
+            finally
+            {
+                _mergeContextTask = null;
+            }
+
+            return true;
+        }
+
+        private void UpdateMergeInputPaths()
+        {
+            var sourceSlug = SlugifyPathToken(FirstNonEmpty(_mergeSourceBranch, _currentGitBranch, "source"));
+            var targetSlug = SlugifyPathToken(FirstNonEmpty(_targetBranch, _defaultTargetBranch, "target"));
+            _basePath = "Temp/ConfigSheetForge/merge-inputs/" + targetSlug + "_base.semantic.json";
+            _oursPath = "Temp/ConfigSheetForge/merge-inputs/" + sourceSlug + "_ours.semantic.json";
+            _theirsPath = "Temp/ConfigSheetForge/merge-inputs/" + targetSlug + "_theirs.semantic.json";
+        }
+
+        private void UpdateMergeWorkspaceContext()
+        {
+            var target = ResolveWorkspaceForBranch(FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main"));
+            _targetFeishuProfile = FirstNonEmpty(target.Profile, target.FeishuBranch);
+            _targetBranchWikiNodeTitle = target.NodeTitle;
+            _targetBranchWikiNodeUrl = target.WikiNodeUrl;
+            _targetBranchWikiNodeToken = target.WikiNodeToken;
+        }
+
+        private BranchWorkspaceResolution ResolveWorkspaceForBranch(string gitBranch)
+        {
+            var request = new LifecycleContractRequest
+            {
+                Git = new ContractGitSpec { Branch = gitBranch },
+                BranchWorkspace = new BranchWorkspaceContract
+                {
+                    GitBranch = gitBranch,
+                    RootWikiToken = _projectConfig.BranchWorkspaceRootWikiToken,
+                    RootWikiUrl = _projectConfig.BranchWorkspaceRootWikiUrl,
+                    ProfileNameTemplate = FirstNonEmpty(_projectConfig.ProfileNameTemplate, "{gitBranch}"),
+                    BranchNodeTitleTemplate = FirstNonEmpty(_projectConfig.BranchNodeTitleTemplate, "branch-{slug}"),
+                    MainGitBranch = FirstNonEmpty(_projectConfig.MainGitBranch, "main"),
+                    MainFeishuBranch = FirstNonEmpty(_projectConfig.MainFeishuBranch, "main")
+                }
+            };
+
+            if (_projectConfig.BranchBindings != null)
+            {
+                request.BranchBindings.AddRange(_projectConfig.BranchBindings);
+            }
+
+            return BranchWorkspaceResolver.Resolve(request);
         }
 
         private void MergeLifecycleSummary(string projectRoot, string fileName)
@@ -1351,6 +1725,13 @@ namespace ConfigSheetForge.Unity.Editor
                     args.Add("--confirm-excel-to-so");
                 }
             }
+            else if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!dryRun && _writeBackToMain && _confirmWriteMain)
+                {
+                    args.Add("--yes");
+                }
+            }
 
             return args.ToArray();
         }
@@ -1385,6 +1766,155 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return "未找到表记录";
+        }
+
+        private string BuildOnlineTableStatus()
+        {
+            if (!_projectConfig.Exists)
+            {
+                return "未找到项目配置";
+            }
+
+            if (!BranchLooksBound())
+            {
+                return "未绑定";
+            }
+
+            if (OnlineTablesReadable())
+            {
+                return "在线表可读（" + _projectConfig.CurrentBranchTables.Count.ToString() + " 张）";
+            }
+
+            if (_projectConfig.CurrentBranchTables.Count == 0)
+            {
+                return "未读到 ConfigSheets";
+            }
+
+            return "部分不可读";
+        }
+
+        private bool BranchLooksBound()
+        {
+            return !string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeToken) ||
+                   !string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeUrl) ||
+                   !string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeTitle);
+        }
+
+        private bool OnlineTablesReadable()
+        {
+            var tables = _projectConfig.CurrentBranchTables;
+            if (tables == null || tables.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (var table in tables)
+            {
+                if (!string.IsNullOrWhiteSpace(table.BlockingReason) ||
+                    string.IsNullOrWhiteSpace(table.SpreadsheetToken) ||
+                    string.IsNullOrWhiteSpace(table.SheetId))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool CacheLooksFresh(string projectRoot)
+        {
+            var tables = _projectConfig.CurrentBranchTables;
+            if (tables == null || tables.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (var table in tables)
+            {
+                if (!HasCacheFiles(projectRoot, table))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool GateLooksPassed()
+        {
+            return _gateReportSummary != null &&
+                   _gateReportSummary.ShortText.IndexOf("passed=true", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                   _gateReportSummary.ShortText.IndexOf("failures=0", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private string BuildGateStatusText()
+        {
+            if (_gateReportSummary == null || string.IsNullOrWhiteSpace(_gateReportSummary.ShortText) || _gateReportSummary.ShortText == "暂无报告")
+            {
+                return "未生成";
+            }
+
+            return GateLooksPassed() ? "通过" : _gateReportSummary.ShortText;
+        }
+
+        private string BuildNextStepText(string projectRoot)
+        {
+            if (!_projectConfig.Exists)
+            {
+                return "先配置项目";
+            }
+
+            if (!BranchLooksBound() || !OnlineTablesReadable())
+            {
+                return "生成同步预览";
+            }
+
+            if (!CacheLooksFresh(projectRoot))
+            {
+                return "同步 cache";
+            }
+
+            if (!GateLooksPassed())
+            {
+                return "运行 PR 检查";
+            }
+
+            return "可以提交 PR";
+        }
+
+        private string BuildNextStepButtonText(string projectRoot)
+        {
+            var next = BuildNextStepText(projectRoot);
+            if (string.Equals(next, "运行 PR 检查", StringComparison.OrdinalIgnoreCase))
+            {
+                return "运行 PR 检查";
+            }
+
+            if (string.Equals(next, "可以提交 PR", StringComparison.OrdinalIgnoreCase))
+            {
+                return "刷新状态";
+            }
+
+            return "生成同步预览";
+        }
+
+        private void RunNextStep(string projectRoot)
+        {
+            var next = BuildNextStepText(projectRoot);
+            if (string.Equals(next, "运行 PR 检查", StringComparison.OrdinalIgnoreCase))
+            {
+                RunPrGateReport();
+                return;
+            }
+
+            if (string.Equals(next, "可以提交 PR", StringComparison.OrdinalIgnoreCase))
+            {
+                RefreshReadonlyStatus();
+                SetImmediateOutput("已刷新状态。当前看起来可以提交 PR。", "");
+                return;
+            }
+
+            RunSyncCache(apply: false);
         }
 
         private string BuildCacheOverviewText(string projectRoot)
@@ -1506,7 +2036,7 @@ namespace ConfigSheetForge.Unity.Editor
             AppendJsonProperty(builder, "branchWikiNodeTitle", _projectConfig.BranchWikiNodeTitle, comma: true);
             AppendJsonProperty(builder, "branchWikiNodeUrl", _projectConfig.BranchWikiNodeUrl, comma: true);
             AppendJsonProperty(builder, "branchWikiNodeToken", _projectConfig.BranchWikiNodeToken, comma: true);
-            AppendJsonProperty(builder, "tableId", _tableId, comma: true);
+            AppendJsonProperty(builder, "tableId", TableIdForOperation(operation), comma: true);
             AppendJsonProperty(builder, "title", _tableName, comma: true);
             AppendJsonProperty(builder, "displayName", _tableName, comma: true);
             AppendJsonProperty(builder, "ownerRole", _ownerRole, comma: true);
@@ -1516,6 +2046,17 @@ namespace ConfigSheetForge.Unity.Editor
             AppendJsonProperty(builder, "basePath", _basePath, comma: true);
             AppendJsonProperty(builder, "oursPath", _oursPath, comma: true);
             AppendJsonProperty(builder, "theirsPath", _theirsPath, comma: true);
+            AppendJsonProperty(builder, "sourceBranch", FirstNonEmpty(_mergeSourceBranch, _currentGitBranch), comma: true);
+            AppendJsonProperty(builder, "targetBranch", FirstNonEmpty(_targetBranch, _defaultTargetBranch), comma: true);
+            AppendJsonProperty(builder, "targetFeishuProfile", _targetFeishuProfile, comma: true);
+            AppendJsonProperty(builder, "targetBranchWikiNodeTitle", _targetBranchWikiNodeTitle, comma: true);
+            AppendJsonProperty(builder, "targetBranchWikiNodeUrl", _targetBranchWikiNodeUrl, comma: true);
+            AppendJsonProperty(builder, "targetBranchWikiNodeToken", _targetBranchWikiNodeToken, comma: true);
+            AppendJsonProperty(builder, "mergeBase", _mergeBase, comma: true);
+            AppendJsonProperty(builder, "githubRepository", FirstNonEmpty(_githubRepository, _projectConfig.GithubRepository), comma: true);
+            AppendJsonProperty(builder, "prNumber", _prNumber, comma: true);
+            AppendJsonProperty(builder, "prUrl", _prUrl, comma: true);
+            AppendJsonProperty(builder, "allowPrAutoDetect", _allowPrAutoDetect, comma: true);
             AppendJsonProperty(builder, "mergeReportPath", _mergeReportPath, comma: true);
             AppendJsonProperty(builder, "mergedPath", _mergedPath, comma: true);
             AppendJsonProperty(builder, "writeBackToMain", _writeBackToMain, comma: true);
@@ -1618,20 +2159,7 @@ namespace ConfigSheetForge.Unity.Editor
         {
             try
             {
-                var gitPath = Path.Combine(projectRoot, ".git");
-                if (File.Exists(gitPath))
-                {
-                    var text = File.ReadAllText(gitPath).Trim();
-                    const string gitDirPrefix = "gitdir:";
-                    if (text.StartsWith(gitDirPrefix, StringComparison.OrdinalIgnoreCase))
-                    {
-                        var gitDir = text.Substring(gitDirPrefix.Length).Trim();
-                        gitPath = Path.IsPathRooted(gitDir)
-                            ? gitDir
-                            : Path.GetFullPath(Path.Combine(projectRoot, gitDir.Replace('/', Path.DirectorySeparatorChar)));
-                    }
-                }
-
+                var gitPath = ResolveGitDir(projectRoot);
                 var headPath = Path.Combine(gitPath, "HEAD");
                 if (!File.Exists(headPath))
                 {
@@ -1648,6 +2176,289 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 return "";
             }
+        }
+
+        private static string ResolveGitDir(string projectRoot)
+        {
+            var gitPath = Path.Combine(projectRoot, ".git");
+            if (!File.Exists(gitPath))
+            {
+                return gitPath;
+            }
+
+            var text = File.ReadAllText(gitPath).Trim();
+            const string gitDirPrefix = "gitdir:";
+            if (!text.StartsWith(gitDirPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return gitPath;
+            }
+
+            var gitDir = text.Substring(gitDirPrefix.Length).Trim();
+            return Path.IsPathRooted(gitDir)
+                ? gitDir
+                : Path.GetFullPath(Path.Combine(projectRoot, gitDir.Replace('/', Path.DirectorySeparatorChar)));
+        }
+
+        private static string TryReadGithubRepository(string projectRoot)
+        {
+            try
+            {
+                var configPath = Path.Combine(ResolveGitDir(projectRoot), "config");
+                if (!File.Exists(configPath))
+                {
+                    return "";
+                }
+
+                var inOrigin = false;
+                foreach (var raw in File.ReadAllLines(configPath))
+                {
+                    var line = raw.Trim();
+                    if (line.StartsWith("[remote ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        inOrigin = line.IndexOf("\"origin\"", StringComparison.OrdinalIgnoreCase) >= 0;
+                        continue;
+                    }
+
+                    if (inOrigin && line.StartsWith("url", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var equals = line.IndexOf('=');
+                        return equals >= 0 ? NormalizeGithubRepository(line.Substring(equals + 1).Trim()) : "";
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return "";
+        }
+
+        private static string NormalizeGithubRepository(string remoteUrl)
+        {
+            var value = (remoteUrl ?? "").Trim();
+            const string httpsPrefix = "https://github.com/";
+            const string sshPrefix = "git@github.com:";
+            if (value.StartsWith(httpsPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = value.Substring(httpsPrefix.Length);
+            }
+            else if (value.StartsWith(sshPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = value.Substring(sshPrefix.Length);
+            }
+
+            return value.EndsWith(".git", StringComparison.OrdinalIgnoreCase)
+                ? value.Substring(0, value.Length - 4)
+                : value;
+        }
+
+        private static List<string> ReadRemoteBranches(string projectRoot)
+        {
+            var branches = new List<string>();
+            try
+            {
+                var gitDir = ResolveGitDir(projectRoot);
+                var originDir = Path.Combine(gitDir, "refs", "remotes", "origin");
+                if (Directory.Exists(originDir))
+                {
+                    foreach (var file in Directory.GetFiles(originDir, "*", SearchOption.AllDirectories))
+                    {
+                        var rel = file.Substring(originDir.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Replace('\\', '/');
+                        if (!string.Equals(rel, "HEAD", StringComparison.OrdinalIgnoreCase))
+                        {
+                            AddUnique(branches, rel);
+                        }
+                    }
+                }
+
+                var packedRefs = Path.Combine(gitDir, "packed-refs");
+                if (File.Exists(packedRefs))
+                {
+                    foreach (var raw in File.ReadAllLines(packedRefs))
+                    {
+                        if (raw.StartsWith("#", StringComparison.Ordinal) || raw.StartsWith("^", StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+
+                        var parts = raw.Split(' ');
+                        if (parts.Length >= 2 && parts[1].StartsWith("refs/remotes/origin/", StringComparison.Ordinal))
+                        {
+                            var name = parts[1].Substring("refs/remotes/origin/".Length);
+                            if (!string.Equals(name, "HEAD", StringComparison.OrdinalIgnoreCase))
+                            {
+                                AddUnique(branches, name);
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            branches.Sort(StringComparer.OrdinalIgnoreCase);
+            return branches;
+        }
+
+        private static MergeContextProbeResult ProbeMergeContext(string projectRoot, string sourceBranch, string targetBranch, bool allowPrAutoDetect)
+        {
+            var result = new MergeContextProbeResult();
+            if (allowPrAutoDetect)
+            {
+                var gh = TryRunTool(projectRoot, "gh", new[] { "pr", "view", "--json", "number,url,baseRefName,headRefName" }, 4500);
+                if (gh.ExitCode == 0 && !string.IsNullOrWhiteSpace(gh.Stdout))
+                {
+                    result.Number = ExtractJsonString(gh.Stdout, "number");
+                    result.Url = ExtractJsonString(gh.Stdout, "url");
+                    result.BaseBranch = ExtractJsonString(gh.Stdout, "baseRefName");
+                    result.HeadBranch = ExtractJsonString(gh.Stdout, "headRefName");
+                    result.Found = !string.IsNullOrWhiteSpace(result.Number) || !string.IsNullOrWhiteSpace(result.Url);
+                    targetBranch = FirstNonEmpty(result.BaseBranch, targetBranch);
+                }
+                else
+                {
+                    result.Message = string.IsNullOrWhiteSpace(gh.Stderr) ? "gh 不可用或当前分支没有可识别 PR" : "gh 未返回 PR：" + gh.Stderr.Trim();
+                }
+            }
+            else
+            {
+                result.Message = "项目配置关闭 PR 自动识别";
+            }
+
+            result.MergeBase = TryReadMergeBase(projectRoot, sourceBranch, targetBranch);
+            if (string.IsNullOrWhiteSpace(result.Message) && !result.Found)
+            {
+                result.Message = "未识别到 GitHub PR";
+            }
+
+            return result;
+        }
+
+        private static string TryReadMergeBase(string projectRoot, string sourceBranch, string targetBranch)
+        {
+            if (string.IsNullOrWhiteSpace(sourceBranch) || string.IsNullOrWhiteSpace(targetBranch))
+            {
+                return "";
+            }
+
+            var result = TryRunTool(projectRoot, "git", new[] { "merge-base", sourceBranch, "origin/" + targetBranch }, 4500);
+            if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.Stdout))
+            {
+                result = TryRunTool(projectRoot, "git", new[] { "merge-base", sourceBranch, targetBranch }, 4500);
+            }
+
+            return result.ExitCode == 0 ? result.Stdout.Trim() : "";
+        }
+
+        private static ProcessCaptureResult TryRunTool(string workingDirectory, string executable, string[] arguments, int timeoutMilliseconds)
+        {
+            var result = new ProcessCaptureResult { ExitCode = -1 };
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = executable,
+                    Arguments = ConfigSheetForgeEditorUtility.JoinArguments(arguments),
+                    WorkingDirectory = workingDirectory,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8
+                };
+
+                using (var process = Process.Start(startInfo))
+                {
+                    if (process == null)
+                    {
+                        result.Stderr = "无法启动 " + executable;
+                        return result;
+                    }
+
+                    if (!process.WaitForExit(timeoutMilliseconds))
+                    {
+                        try
+                        {
+                            process.Kill();
+                        }
+                        catch
+                        {
+                        }
+
+                        result.Stderr = executable + " 超时";
+                        return result;
+                    }
+
+                    result.ExitCode = process.ExitCode;
+                    result.Stdout = process.StandardOutput.ReadToEnd();
+                    result.Stderr = process.StandardError.ReadToEnd();
+                    return result;
+                }
+            }
+            catch (Exception ex)
+            {
+                result.Stderr = ex.Message;
+                return result;
+            }
+        }
+
+        private static string ExtractJsonString(string json, string propertyName)
+        {
+            var property = "\"" + propertyName + "\"";
+            var propertyIndex = (json ?? "").IndexOf(property, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return "";
+            }
+
+            var colon = json.IndexOf(':', propertyIndex + property.Length);
+            if (colon < 0)
+            {
+                return "";
+            }
+
+            var valueStart = colon + 1;
+            while (valueStart < json.Length && char.IsWhiteSpace(json[valueStart]))
+            {
+                valueStart++;
+            }
+
+            if (valueStart < json.Length && json[valueStart] == '"')
+            {
+                int end;
+                return ParseJsonString(json, valueStart, out end);
+            }
+
+            var rest = valueStart < json.Length ? json.Substring(valueStart) : "";
+            var endIndex = rest.IndexOfAny(new[] { ',', '}', '\r', '\n' });
+            return (endIndex >= 0 ? rest.Substring(0, endIndex) : rest).Trim().Trim('"');
+        }
+
+        private static void AddUnique(List<string> values, string value)
+        {
+            if (!string.IsNullOrWhiteSpace(value) && !values.Contains(value))
+            {
+                values.Add(value);
+            }
+        }
+
+        private static string SlugifyPathToken(string value)
+        {
+            var builder = new StringBuilder();
+            foreach (var c in value ?? "")
+            {
+                builder.Append(char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : '-');
+            }
+
+            var result = builder.ToString().Trim('-');
+            while (result.IndexOf("--", StringComparison.Ordinal) >= 0)
+            {
+                result = result.Replace("--", "-");
+            }
+
+            return string.IsNullOrWhiteSpace(result) ? "branch" : result;
         }
 
         private static string ToProjectRelativePath(string path)
@@ -2867,5 +3678,16 @@ namespace ConfigSheetForge.Unity.Editor
         public string DisplayName { get; set; } = "";
         public string ValueKind { get; set; } = "string";
         public string Description { get; set; } = "";
+    }
+
+    internal sealed class MergeContextProbeResult
+    {
+        public bool Found { get; set; }
+        public string Number { get; set; } = "";
+        public string Url { get; set; } = "";
+        public string BaseBranch { get; set; } = "";
+        public string HeadBranch { get; set; } = "";
+        public string MergeBase { get; set; } = "";
+        public string Message { get; set; } = "";
     }
 }

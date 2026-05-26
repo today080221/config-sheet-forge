@@ -850,7 +850,10 @@ static void ProjectConfigProbeReadsLifecycleSummary()
         "defaultGateReportPath": "Temp/ConfigSheetForge/pr-gate-report.json",
         "coreCliEnvironmentVariable": "CONFIG_SHEET_FORGE_CLI",
         "sourceCheckoutEnvironmentVariable": "CONFIG_SHEET_FORGE_ROOT",
-        "sourceCliProjectRelativePath": "src/cli/ConfigSheetForge.Cli"
+        "sourceCliProjectRelativePath": "src/cli/ConfigSheetForge.Cli",
+        "defaultTargetBranch": "main",
+        "githubRepository": "today080221/config-sheet-forge",
+        "allowPrAutoDetect": true
       },
       "adapterScript": "tools/config_bridge.py",
       "contractArgs": ["--config", "{projectConfig}", "--operation", "{operation}", "--out", "{request}"],
@@ -876,6 +879,9 @@ static void ProjectConfigProbeReadsLifecycleSummary()
     AssertEqual("CONFIG_SHEET_FORGE_CLI", summary.CoreCliEnvironmentVariable, "CLI env var should be read.");
     AssertEqual("CONFIG_SHEET_FORGE_ROOT", summary.SourceCheckoutEnvironmentVariable, "source checkout env var should be read.");
     AssertEqual("src/cli/ConfigSheetForge.Cli", summary.SourceCliProjectRelativePath, "source CLI project path should be read.");
+    AssertEqual("main", summary.DefaultTargetBranch, "default target branch should be read.");
+    AssertEqual("today080221/config-sheet-forge", summary.GithubRepository, "GitHub repository should be read.");
+    AssertTrue(summary.AllowPrAutoDetect, "PR auto detect should be read.");
     AssertEqual("6", summary.ContractArguments.Count.ToString(), "contract args should be read.");
     AssertTrue(summary.HasLifecycleAdapter, "adapterScript should enable project lifecycle mode.");
 }

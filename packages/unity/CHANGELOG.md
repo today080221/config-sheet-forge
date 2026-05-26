@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.9
+
+- Unity 首页固定展示当前分支、Feishu branch/profile、在线表可读状态、cache 状态、PR gate 和下一步建议；CLI、路径、Wiki token/url、复制命令等工程信息默认收进“高级诊断”。
+- 非输出页改为底部可折叠/可拖拽结果面板，成功态优先显示摘要；完整命令和原始日志默认折叠，失败时自动展开关键日志。
+- 合并页改为 PR-like 工作流：自动读取当前分支、目标分支、GitHub PR、merge-base，并按 source/target 自动生成 base/ours/theirs semantic 输入路径。
+- Project config summary 新增 `defaultTargetBranch`、`githubRepository`、`allowPrAutoDetect`，供通用 merge 工作流使用，不写项目私有逻辑。
+- `compare-merge` inputs 会写入 source/target/target Feishu workspace/merge-base/PR 信息；写回 main 需要显式确认，并在确认后向 `apply-contract` 传 `--yes`。
+
 ## 0.4.8
 
 - Unity lifecycle 操作改为后台 job 执行，seed、sync-cache、compare-merge、pr-gate-report 不再在 IMGUI MouseUp 链路同步 `WaitForExit`。

@@ -8,9 +8,9 @@
 
 - `状态`：工作流首页，优先展示当前 Git 分支、Feishu profile、Wiki branch 节点、当前 branch 表数量、cache 状态和最近 PR gate 摘要；doctor、CLI、adapter、复制命令等放在“高级诊断”。
 - `配表`：展示当前 branch 表列表；发现 `ProjectSettings/*ConfigSheetForge*.json` 且配置了 adapter 时，走项目 adapter 生成 `new-table` lifecycle contract dry-run，也可以触发 `seed-from-local-xlsx` dry-run/apply；否则提供 generic registry fallback。
-- `合并`：项目 adapter 模式下生成 `compare-merge` lifecycle contract 预览；否则从 semantic workbook JSON 生成三方合并报告。
+- `合并`：项目 adapter 模式下像 PR 一样自动推导当前分支、目标分支、PR、共同祖先和 base/ours/theirs semantic 输入；否则从 semantic workbook JSON 生成三方合并报告。
 - `PR 检查`：项目 adapter 模式下生成 `pr-gate-report`；否则执行 generic gate。
-- `输出`：查看和复制命令输出。
+- `输出`：查看摘要、报告和折叠的详细日志；非输出页底部也会显示可折叠/可拖拽结果面板。
 
 Editor assembly 引用 `ConfigSheetForge.Core`，也就是 CLI 编译的同一份语义工作簿 core。Provider 访问不放在 Unity 里，统一交给已安装的 `config-sheet-forge` CLI。
 
@@ -66,6 +66,17 @@ inputs JSON 至少包含这些字段：
 - `basePath`
 - `oursPath`
 - `theirsPath`
+- `sourceBranch`
+- `targetBranch`
+- `targetFeishuProfile`
+- `targetBranchWikiNodeTitle`
+- `targetBranchWikiNodeUrl`
+- `targetBranchWikiNodeToken`
+- `mergeBase`
+- `githubRepository`
+- `prNumber`
+- `prUrl`
+- `allowPrAutoDetect`
 - `mergeReportPath`
 - `mergedPath`
 - `writeBackToMain`
@@ -79,7 +90,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.8
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.9
 ```
 
 ## 测试

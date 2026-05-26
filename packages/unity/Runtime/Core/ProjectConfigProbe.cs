@@ -36,6 +36,9 @@ namespace ConfigSheetForge.Core
         public string CoreCliEnvironmentVariable { get; set; } = "";
         public string SourceCheckoutEnvironmentVariable { get; set; } = "";
         public string SourceCliProjectRelativePath { get; set; } = "";
+        public string DefaultTargetBranch { get; set; } = "";
+        public string GithubRepository { get; set; } = "";
+        public bool AllowPrAutoDetect { get; set; } = true;
         public List<string> ContractArguments { get; set; } = new List<string>();
         public List<ProjectConfigTableSummary> Tables { get; set; } = new List<ProjectConfigTableSummary>();
         public List<ProjectConfigTableSummary> CurrentBranchTables { get; set; } = new List<ProjectConfigTableSummary>();
@@ -179,6 +182,8 @@ namespace ConfigSheetForge.Core
 
         private static void ReadSharedSummary(ProjectConfigSummary summary, SimpleJsonValue root)
         {
+            var toolkit = GetObject(root, "toolkit");
+            var github = GetObject(root, "github");
             summary.SchemaVersion = FirstNonEmpty(
                 GetString(root, "schemaVersion"),
                 GetString(root, "schema"),
@@ -215,6 +220,21 @@ namespace ConfigSheetForge.Core
                 GetString(root, "sourceCliProjectRelativePath", "cliProjectRelativePath"),
                 FindStringDeep(root, "sourceCliProjectRelativePath", "cliProjectRelativePath"),
                 Path.Combine("src", "cli", "ConfigSheetForge.Cli"));
+            summary.DefaultTargetBranch = FirstNonEmpty(
+                GetString(root, "defaultTargetBranch", "targetBranch", "mainBranch"),
+                GetString(toolkit, "defaultTargetBranch", "targetBranch", "mainBranch"),
+                GetString(github, "defaultTargetBranch", "targetBranch", "mainBranch"),
+                FindStringDeep(root, "defaultTargetBranch", "targetBranch", "mainBranch"),
+                "main");
+            summary.GithubRepository = FirstNonEmpty(
+                GetString(root, "githubRepository", "repository", "repo"),
+                GetString(toolkit, "githubRepository"),
+                GetString(github, "githubRepository", "repository", "repo"),
+                FindStringDeep(root, "githubRepository", "repository", "repo"));
+            summary.AllowPrAutoDetect = GetBoolean(root, "allowPrAutoDetect", "prAutoDetect") ??
+                                        GetBoolean(toolkit, "allowPrAutoDetect", "prAutoDetect") ??
+                                        GetBoolean(github, "allowPrAutoDetect", "prAutoDetect") ??
+                                        true;
             summary.ContractArguments.AddRange(GetStringArray(root, "contractArgs", "adapterArgs", "lifecycleContractArgs"));
             if (summary.ContractArguments.Count == 0)
             {

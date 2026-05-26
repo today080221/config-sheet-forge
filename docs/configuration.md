@@ -157,6 +157,26 @@ Base 注册中心建议包含这些字段：
 
 `registry-migrate` 会补齐这些 machine key 对应的中文字段显示名，并保留已有数据。
 
+## Unity merge workflow
+
+Unity 窗口的项目 adapter 模式会按当前 git branch 自动推导合并上下文。项目配置可以在根节点、`toolkit` 或 `github` 节点声明：
+
+```json
+{
+  "toolkit": {
+    "defaultTargetBranch": "main",
+    "githubRepository": "owner/repo",
+    "allowPrAutoDetect": true
+  }
+}
+```
+
+- `defaultTargetBranch`：没有识别到 GitHub PR 时使用的目标分支，默认 `main`。
+- `githubRepository`：GitHub 仓库名；为空时 Unity 会尝试从 `origin` remote 推导。
+- `allowPrAutoDetect`：是否允许 Unity 通过 `gh pr view` 自动读取 PR number、URL 和 base branch，默认 `true`。
+
+这些字段只用于通用工作流推导。真正的 branch/profile 定位仍由 `branchWorkspace`、`BranchBindings` 和 `ConfigSheets` 决定，项目私有规则应放在 adapter 内。
+
 ## lark-cli 路径
 
 默认使用环境中的 `lark-cli`。如果安装在非标准位置，可设置：
