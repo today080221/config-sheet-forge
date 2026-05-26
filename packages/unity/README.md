@@ -1,17 +1,19 @@
 # Config Sheet Forge Unity 包
 
-这个包提供 Unity Editor 窗口，用于在 Unity 项目中运行 Config Sheet Forge 命令。
+这个包提供 Unity Editor 窗口，用于在 Unity 项目中使用 Config Sheet Forge 配表流程。
+
+普通策划和项目成员请先看 [Unity 配表窗口 5 分钟说明](../../docs/unity-window.md)。这份 README 主要给接入维护者、主程和工具作者看。
 
 打开入口：`Tools > Config Sheet Forge` 或 `Tools > Config Sheet Forge > 打开同步窗口`。
 
-窗口采用任务型 Dashboard：第一次打开会提示“飞书在线 Sheet 是正式源头，本地 Excel 是 cache”；首页会给出“推荐下一步”，通常从 `预览同步计划` 开始。预览类按钮只读取不写文件；写入/创建/写回类按钮必须勾选确认，并要求最近一次同输入 dry-run 成功。
+窗口采用任务型 Dashboard：第一次打开会提示“飞书在线表是正式源头，本地 Excel 是缓存”；首页会给出“推荐下一步”，通常从 `预览同步计划` 开始。预览类按钮只读取不写文件；写入、创建、写回类按钮必须勾选确认，并要求最近一次同输入预览成功。
 
 窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。
-- `配表`：展示当前 branch 表列表；发现 `ProjectSettings/*ConfigSheetForge*.json` 且配置了 adapter 时，走项目 adapter 生成 `new-table` lifecycle contract dry-run，也可以触发 `seed-from-local-xlsx` dry-run/apply；否则提供 generic registry fallback。
-- `合并`：项目 adapter 模式下像 PR 一样自动推导当前分支、目标分支、PR、共同祖先和 base/ours/theirs semantic 输入；否则从 semantic workbook JSON 生成三方合并报告。
-- `PR 检查`：项目 adapter 模式下生成 `pr-gate-report`；否则执行 generic gate。
+- `配表`：同步已有在线表，或申请新建配表。项目配置存在时会走项目 adapter 生成 lifecycle contract；否则提供 generic registry fallback。
+- `合并`：按当前分支和目标分支生成合并预览；项目 adapter 模式下会自动推导 PR、共同祖先和语义输入。
+- `PR 检查`：合 PR 前生成检查报告；失败时优先显示中文原因和下一步。
 - `输出`：查看摘要、报告和折叠的详细日志；非输出页底部默认只显示一行最近结果，展开后才是可拖拽底部抽屉。
 
 顶部 `教程` 菜单会优先读取项目配置里的 `documentationTargets`、`localDocs`、`feishuRootUrl`，也会 fallback 到 config-sheet-forge 通用教程。

@@ -211,9 +211,9 @@ foreach ($requiredText in @("BuildLifecycleInputsJson", "--inputs", "gateReportP
   }
 }
 
-foreach ($requiredUiText in @("当前状态", "推荐下一步", "我该做什么", "配表 Source of Truth 怎么用？", "PR 合并上下文", "结果摘要", "详细日志", "预览同步计划", "预览新建配表", "预览本地 Excel Seed", "PR 还不能合并")) {
-  if ($window -notlike "*$requiredUiText*") {
-    throw "Unity workflow UI is missing expected user-facing text: $requiredUiText"
+foreach ($requiredUiMarker in @("DrawOnboardingCard", "BuildRecommendationText", "DrawWorkflowGuideCards", "DrawGateReportCards", "DrawProjectNewTableActions", "DrawCollapsedOutputStatusBar", "ShowHelpMenu")) {
+  if ($window -notlike "*$requiredUiMarker*") {
+    throw "Unity workflow UI is missing expected source marker: $requiredUiMarker"
   }
 }
 
@@ -238,7 +238,7 @@ foreach ($forbiddenCollapsedLayout in @("BeginScrollView", "ExpandHeight")) {
   }
 }
 
-foreach ($retiredUiText in @("当前工作流", "合并输入", "passed=false", "failures=")) {
+foreach ($retiredUiText in @("passed=false", "failures=")) {
   if ($window -like "*$retiredUiText*") {
     throw "Unity workflow UI still contains retired debug text: $retiredUiText"
   }

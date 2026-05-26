@@ -92,7 +92,7 @@ config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.Conf
 https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.12
 ```
 
-打开 `Tools > Config Sheet Forge`。Unity 窗口会使用同一份共享 core 做本地检查，provider 访问仍交给已安装的 CLI。
+打开 `Tools > Config Sheet Forge`。普通使用者优先看首页的 `推荐下一步` 和 [Unity 配表窗口 5 分钟说明](unity-window.md)。
 
 第一次打开窗口时，先看首页 `推荐下一步`。普通策划通常只需要：
 
@@ -101,6 +101,6 @@ https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.
 3. 预览通过后，在 `配表` 页确认并点 `写入本地 cache`。
 4. 提交 PR 或找配置负责人合并。
 
-`预览` 是 dry-run：不写飞书、不改本地 cache、不改 ProjectSettings。`写入 / 创建 / 写回` 是 apply：需要勾选确认，且必须有最近一次同输入 dry-run 成功。
+带 `预览` 的按钮只读取，不写飞书、不改本地文件。`写入 / 创建 / 写回` 会改东西，需要勾选确认，并且必须先预览通过。
 
-更多 Unity 使用说明见 [Unity 窗口 5 分钟入门](unity-window.md)。
+更多 Unity 使用说明见 [Unity 配表窗口 5 分钟说明](unity-window.md)。
