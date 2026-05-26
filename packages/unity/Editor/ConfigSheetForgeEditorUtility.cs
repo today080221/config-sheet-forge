@@ -115,6 +115,75 @@ namespace ConfigSheetForge.Unity.Editor
             return executable;
         }
 
+        public static ConfigSheetForgeCliInvocation ResolveCoreCli(ProjectConfigSummary summary, string projectRoot, string cliFieldValue)
+        {
+            summary = summary ?? new ProjectConfigSummary();
+            var envName = FirstNonEmpty(summary.CoreCliEnvironmentVariable, "CONFIG_SHEET_FORGE_CLI");
+            var envCli = Environment.GetEnvironmentVariable(envName);
+            if (!string.IsNullOrWhiteSpace(envCli))
+            {
+                return ConfigSheetForgeCliInvocation.ForExecutable(envCli, "环境变量 " + envName, "");
+            }
+
+            if (!IsDefaultCliName(cliFieldValue))
+            {
+                return ConfigSheetForgeCliInvocation.ForExecutable(cliFieldValue, "窗口 CLI 字段", "");
+            }
+
+            var checkoutEnvName = FirstNonEmpty(summary.SourceCheckoutEnvironmentVariable, "CONFIG_SHEET_FORGE_ROOT");
+            var checkoutRoot = Environment.GetEnvironmentVariable(checkoutEnvName);
+            if (!string.IsNullOrWhiteSpace(checkoutRoot))
+            {
+                var relativeProject = FirstNonEmpty(summary.SourceCliProjectRelativePath, Path.Combine("src", "cli", "ConfigSheetForge.Cli"));
+                var projectPath = ResolveSourceCliProjectPath(checkoutRoot, relativeProject);
+                var dotnet = ConfigSheetForgeCliInvocation.ForExecutable("dotnet", "环境变量 " + checkoutEnvName + " 的源码 checkout", "");
+                if (!string.IsNullOrWhiteSpace(projectPath) && dotnet.CanLaunch)
+                {
+                    dotnet.PrefixArguments.Add("run");
+                    dotnet.PrefixArguments.Add("--project");
+                    dotnet.PrefixArguments.Add(projectPath);
+                    dotnet.PrefixArguments.Add("--");
+                    dotnet.SourceDescription = "源码 checkout: " + checkoutEnvName + " -> " + projectPath;
+                    return dotnet;
+                }
+
+                var reason = string.IsNullOrWhiteSpace(projectPath)
+                    ? "已设置 " + checkoutEnvName + "，但找不到 CLI project：" + Path.Combine(checkoutRoot, relativeProject)
+                    : "已设置 " + checkoutEnvName + "，但找不到 dotnet 可执行文件。";
+                return ConfigSheetForgeCliInvocation.Unresolved(
+                    "dotnet",
+                    "源码 checkout: " + checkoutEnvName,
+                    reason);
+            }
+
+            return ConfigSheetForgeCliInvocation.ForExecutable(FirstNonEmpty(cliFieldValue, "config-sheet-forge"), "PATH 或窗口 CLI 字段", "");
+        }
+
+        public static string FormatCliLaunchFailure(string command, string reason)
+        {
+            return FormatCliLaunchFailure(command, reason, null);
+        }
+
+        public static string FormatCliLaunchFailure(string command, string reason, ProjectConfigSummary summary)
+        {
+            summary = summary ?? new ProjectConfigSummary();
+            var cliEnv = FirstNonEmpty(summary.CoreCliEnvironmentVariable, "CONFIG_SHEET_FORGE_CLI");
+            var rootEnv = FirstNonEmpty(summary.SourceCheckoutEnvironmentVariable, "CONFIG_SHEET_FORGE_ROOT");
+            var sourceRelative = FirstNonEmpty(summary.SourceCliProjectRelativePath, Path.Combine("src", "cli", "ConfigSheetForge.Cli"));
+            return "无法运行 Config Sheet Forge CLI" + Environment.NewLine +
+                   Environment.NewLine +
+                   "命令:" + Environment.NewLine +
+                   command + Environment.NewLine +
+                   Environment.NewLine +
+                   "原因:" + Environment.NewLine +
+                   HumanizeLaunchReason(reason) + Environment.NewLine +
+                   Environment.NewLine +
+                   "下一步:" + Environment.NewLine +
+                   "1. 设置 " + cliEnv + " 指向 config-sheet-forge 可执行文件。" + Environment.NewLine +
+                   "2. 或设置 " + rootEnv + " 指向 config-sheet-forge 源码 checkout，Unity 会运行 dotnet run --project " + sourceRelative + " -- <args>。" + Environment.NewLine +
+                   "3. 或安装/发布 CLI，并确认 config-sheet-forge 在 PATH 中。";
+        }
+
         public static string GetConfigPath(string projectRoot)
         {
             return Path.Combine(projectRoot, ".config-sheet-forge", "config.json");
@@ -272,12 +341,153 @@ namespace ConfigSheetForge.Unity.Editor
                 .Replace("{dryRun}", dryRun ? "true" : "false");
         }
 
-        public static string FormatCliLaunchFailure(string command, string reason)
+        private static string ResolveSourceCliProjectPath(string checkoutRoot, string relativeProject)
         {
-            return "无法运行 Config Sheet Forge CLI。" + Environment.NewLine +
-                   "命令: " + command + Environment.NewLine +
-                   "原因: " + reason + Environment.NewLine +
-                   "建议: 安装 CLI，或把 CLI 字段设置为可执行文件的绝对路径。";
+            if (string.IsNullOrWhiteSpace(checkoutRoot))
+            {
+                return "";
+            }
+
+            var root = checkoutRoot.Trim().Trim('"');
+            var combined = Path.IsPathRooted(relativeProject)
+                ? relativeProject
+                : Path.Combine(root, (relativeProject ?? "").Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(combined))
+            {
+                return Path.GetFullPath(combined);
+            }
+
+            if (Directory.Exists(combined))
+            {
+                var projects = Directory.GetFiles(combined, "*.csproj");
+                Array.Sort(projects, StringComparer.OrdinalIgnoreCase);
+                if (projects.Length > 0)
+                {
+                    return Path.GetFullPath(projects[0]);
+                }
+            }
+
+            return "";
+        }
+
+        private static bool IsDefaultCliName(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ||
+                   string.Equals(value.Trim(), "config-sheet-forge", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string HumanizeLaunchReason(string reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                return "没有找到 config-sheet-forge CLI。";
+            }
+
+            if (reason.IndexOf("ApplicationName=", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("No such file", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("The system cannot find", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("系统找不到", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "没有找到 config-sheet-forge CLI。" + Environment.NewLine + "原始错误：" + reason;
+            }
+
+            return reason;
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return "";
+        }
+    }
+
+    public sealed class ConfigSheetForgeCliInvocation
+    {
+        public string Executable { get; set; } = "";
+        public List<string> PrefixArguments { get; private set; } = new List<string>();
+        public string SourceDescription { get; set; } = "";
+        public string FailureReason { get; set; } = "";
+
+        public bool CanLaunch
+        {
+            get { return string.IsNullOrWhiteSpace(FailureReason); }
+        }
+
+        public static ConfigSheetForgeCliInvocation ForExecutable(string executable, string sourceDescription, string fallbackReason)
+        {
+            var resolved = ConfigSheetForgeEditorUtility.ResolveExecutable(executable);
+            var canLaunch = IsResolvable(resolved);
+            return new ConfigSheetForgeCliInvocation
+            {
+                Executable = resolved,
+                SourceDescription = sourceDescription + (string.Equals(resolved, executable, StringComparison.OrdinalIgnoreCase) ? "" : " -> " + resolved),
+                FailureReason = canLaunch ? "" : FirstNonEmpty(fallbackReason, "没有找到可执行文件：" + executable)
+            };
+        }
+
+        public static ConfigSheetForgeCliInvocation Unresolved(string executable, string sourceDescription, string reason)
+        {
+            return new ConfigSheetForgeCliInvocation
+            {
+                Executable = executable ?? "",
+                SourceDescription = sourceDescription ?? "",
+                FailureReason = FirstNonEmpty(reason, "没有找到可执行文件：" + executable)
+            };
+        }
+
+        public string[] BuildArguments(IEnumerable<string> args)
+        {
+            var merged = new List<string>();
+            merged.AddRange(PrefixArguments);
+            foreach (var arg in args)
+            {
+                merged.Add(arg);
+            }
+
+            return merged.ToArray();
+        }
+
+        public string ToCommandLine(IEnumerable<string> args)
+        {
+            return ConfigSheetForgeEditorUtility.BuildCommandLine(Executable, BuildArguments(args));
+        }
+
+        private static bool IsResolvable(string executable)
+        {
+            if (string.IsNullOrWhiteSpace(executable))
+            {
+                return false;
+            }
+
+            if (Path.IsPathRooted(executable) || executable.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }) >= 0)
+            {
+                return File.Exists(executable);
+            }
+
+            return !string.Equals(executable, "config-sheet-forge", StringComparison.OrdinalIgnoreCase) &&
+                   !string.Equals(executable, "dotnet", StringComparison.OrdinalIgnoreCase)
+                ? true
+                : !string.Equals(ConfigSheetForgeEditorUtility.ResolveExecutable(executable), executable, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return "";
         }
     }
 

@@ -90,7 +90,8 @@ namespace ConfigSheetForge.Unity.Editor.Tests
             var message = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure("config-sheet-forge doctor", "file not found");
 
             Assert.That(message, Does.Contain("无法运行 Config Sheet Forge CLI"));
-            Assert.That(message, Does.Contain("建议"));
+            Assert.That(message, Does.Contain("下一步"));
+            Assert.That(message, Does.Contain("CONFIG_SHEET_FORGE_CLI"));
         }
     }
 }

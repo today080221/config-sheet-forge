@@ -47,6 +47,7 @@ namespace ConfigSheetForge.Unity.Editor
         private ProjectConfigSummary _projectConfig = new ProjectConfigSummary();
         private string _currentGitBranch = "";
         private GateReportSummaryView _gateReportSummary = GateReportSummaryView.NotFound("");
+        private ConfigSheetForgeCliInvocation _cliInvocation = ConfigSheetForgeCliInvocation.Unresolved("config-sheet-forge", "未刷新", "尚未解析 CLI。");
         private Vector2 _mainScroll;
         private Vector2 _outputScroll;
 
@@ -156,7 +157,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("复制 UPM", "复制通过 Unity Package Manager 安装此包的 Git URL。"), GUILayout.Width(88)))
             {
-                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.6";
+                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.7";
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("飞书在线 Sheet 是 Source of Truth，本地 Excel 只是兼容缓存。", EditorStyles.miniLabel);
@@ -181,7 +182,9 @@ namespace ConfigSheetForge.Unity.Editor
             DrawReadonlyRow("Cache 状态", BuildCacheOverviewText(projectRoot), "本地 semantic/xlsx cache 是否需要同步。");
             DrawReadonlyRow("PR Gate", _gateReportSummary.ShortText, "最近一次 Temp/ConfigSheetForge/pr-gate-report.json 摘要。");
             DrawStatusRow("项目配置", _projectConfig.Exists, ToProjectRelativePath(_projectConfig.ProjectConfigPath), "未发现 ProjectSettings/*ConfigSheetForge*.json。");
-            _cliPath = EditorGUILayout.TextField(new GUIContent("CLI", "CLI 可执行文件或绝对路径，通常是 config-sheet-forge。"), _cliPath);
+            _cliPath = EditorGUILayout.TextField(new GUIContent("CLI", "CLI 可执行文件或绝对路径；默认会先看项目配置声明的环境变量。"), _cliPath);
+            _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
+            DrawReadonlyRow("CLI 来源", _cliInvocation.CanLaunch ? _cliInvocation.SourceDescription : "未找到：" + _cliInvocation.SourceDescription, "CLI 来自环境变量、源码 checkout、PATH 或窗口 CLI 字段。");
             EditorGUILayout.EndVertical();
         }
 
@@ -200,7 +203,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("同步当前分支 cache", "先生成 dry-run 预览；不会写飞书，也不会改本地 cache。"), GUILayout.Height(32)))
             {
-                RunSyncCacheCli(apply: false);
+                RunSyncCache(apply: false);
             }
 
             if (GUILayout.Button(new GUIContent("运行 PR 检查", "生成最近一次 pr-gate-report，按钮旁和 PR 检查页会显示摘要。"), GUILayout.Height(32)))
@@ -488,7 +491,7 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button(new GUIContent("生成 dry-run 预览", "读取在线注册中心并生成同步计划，不改本地 cache。"), GUILayout.Height(28)))
             {
-                RunSyncCacheCli(apply: false);
+                RunSyncCache(apply: false);
             }
 
             GUI.enabled = _confirmSyncApply;
@@ -496,7 +499,7 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 if (EditorUtility.DisplayDialog("确认同步 cache", "将读取当前 branch/profile 的在线 Sheet，导出 xlsx，三方一致后更新本地 cache。无变化时会显示“无变化，未重写 cache”。", "确认执行", "取消"))
                 {
-                    RunSyncCacheCli(apply: true);
+                    RunSyncCache(apply: true);
                 }
             }
             GUI.enabled = true;
@@ -602,9 +605,14 @@ namespace ConfigSheetForge.Unity.Editor
         {
             DrawSectionTitle("命令输出");
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            DrawReadonlyRow("最近命令", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
+            DrawWrappedReadonlyBlock("最近命令", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
 
             EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button(new GUIContent("复制完整命令", "复制最近一次完整命令。"), GUILayout.Width(116)))
+            {
+                EditorGUIUtility.systemCopyBuffer = _lastCommand ?? "";
+            }
+
             if (GUILayout.Button(new GUIContent("复制输出", "复制命令输出。"), GUILayout.Width(104)))
             {
                 EditorGUIUtility.systemCopyBuffer = _output ?? "";
@@ -616,8 +624,9 @@ namespace ConfigSheetForge.Unity.Editor
             }
             EditorGUILayout.EndHorizontal();
 
-            _outputScroll = EditorGUILayout.BeginScrollView(_outputScroll, GUILayout.MinHeight(expanded ? 260 : 140));
-            EditorGUILayout.TextArea(string.IsNullOrWhiteSpace(_output) ? "暂无命令输出。" : _output, GUILayout.ExpandHeight(true));
+            var outputStyle = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
+            _outputScroll = EditorGUILayout.BeginScrollView(_outputScroll, false, true, GUILayout.MinHeight(expanded ? 260 : 140));
+            EditorGUILayout.TextArea(string.IsNullOrWhiteSpace(_output) ? "暂无命令输出。" : _output, outputStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
             EditorGUILayout.EndScrollView();
             EditorGUILayout.EndVertical();
         }
@@ -630,6 +639,17 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return defaultDryRun;
+        }
+
+        private bool ConfirmApplyForOperation(string operation)
+        {
+            if (string.Equals(operation, "sync-cache", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(operation, "sync-from-online-sheet", StringComparison.OrdinalIgnoreCase))
+            {
+                return _confirmSyncApply;
+            }
+
+            return _confirmSeedApply;
         }
 
         private string ProjectButtonLabel(string fallback, string operation)
@@ -686,6 +706,15 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndHorizontal();
         }
 
+        private static void DrawWrappedReadonlyBlock(string label, string value, string tooltip)
+        {
+            EditorGUILayout.LabelField(new GUIContent(label, tooltip), EditorStyles.boldLabel);
+            var style = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
+            var width = Math.Max(240f, EditorGUIUtility.currentViewWidth - 48f);
+            var height = Math.Max(EditorGUIUtility.singleLineHeight * 2f, style.CalcHeight(new GUIContent(value), width) + 8f);
+            EditorGUILayout.SelectableLabel(value, style, GUILayout.Height(height), GUILayout.ExpandWidth(true));
+        }
+
         private static void DrawStatusRow(string label, bool ok, string okText, string missingText)
         {
             EditorGUILayout.BeginHorizontal();
@@ -715,16 +744,35 @@ namespace ConfigSheetForge.Unity.Editor
         private void RunCli(params string[] args)
         {
             var cleanArgs = CleanArgs(args);
-            _lastCommand = ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, cleanArgs);
+            var projectRoot = FindProjectRoot();
+            var cli = ResolveCoreCli(projectRoot);
+            _lastCommand = cli.ToCommandLine(cleanArgs);
+            if (!cli.CanLaunch)
+            {
+                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig);
+                return;
+            }
 
             try
             {
-                _output = RunProcessCapture(ConfigSheetForgeEditorUtility.ResolveExecutable(_cliPath), cleanArgs, FindProjectRoot()).Render(_lastCommand);
+                _output = RunProcessCapture(cli.Executable, cli.BuildArguments(cleanArgs), projectRoot).Render(_lastCommand);
             }
             catch (Exception ex)
             {
-                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message);
+                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message, _projectConfig);
             }
+        }
+
+        private void RunSyncCache(bool apply)
+        {
+            RefreshReadonlyStatus();
+            if (_projectConfig.Exists && _projectConfig.HasLifecycleAdapter)
+            {
+                RunProjectLifecycle("sync-cache", dryRun: !apply);
+                return;
+            }
+
+            RunSyncCacheCli(apply);
         }
 
         private void RunSyncCacheCli(bool apply)
@@ -739,10 +787,17 @@ namespace ConfigSheetForge.Unity.Editor
             var projectRoot = FindProjectRoot();
             var resultPath = GetUnityLifecyclePath(projectRoot, "sync-cache.result.json");
             var args = BuildSyncCacheArgs(apply, resultPath);
-            _lastCommand = ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, args);
+            var cli = ResolveCoreCli(projectRoot);
+            _lastCommand = cli.ToCommandLine(args);
+            if (!cli.CanLaunch)
+            {
+                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig);
+                return;
+            }
+
             try
             {
-                var result = RunProcessCapture(ConfigSheetForgeEditorUtility.ResolveExecutable(_cliPath), args, projectRoot);
+                var result = RunProcessCapture(cli.Executable, cli.BuildArguments(args), projectRoot);
                 var output = result.Render(_lastCommand);
                 if (output.IndexOf("cache unchanged", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     output.IndexOf("无变化", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -755,7 +810,7 @@ namespace ConfigSheetForge.Unity.Editor
             }
             catch (Exception ex)
             {
-                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message);
+                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message, _projectConfig);
             }
         }
 
@@ -801,8 +856,15 @@ namespace ConfigSheetForge.Unity.Editor
             File.WriteAllText(inputsPath, BuildLifecycleInputsJson(operation, dryRun, finalGateReportPath), Utf8NoBom);
 
             var adapter = ConfigSheetForgeEditorUtility.CreateProjectLifecycleCommand(_projectConfig, projectRoot, operation, requestPath, inputsPath, dryRun);
+            var cli = ResolveCoreCli(projectRoot);
+            var applyArgs = BuildApplyContractArgs(operation, requestPath, resultPath, finalGateReportPath, dryRun);
             _lastCommand = adapter.ToCommandLine() + Environment.NewLine +
-                           ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, BuildApplyContractArgs(operation, requestPath, resultPath, finalGateReportPath));
+                           cli.ToCommandLine(applyArgs);
+            if (!cli.CanLaunch)
+            {
+                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig);
+                return;
+            }
 
             try
             {
@@ -827,9 +889,8 @@ namespace ConfigSheetForge.Unity.Editor
                 }
 
                 output.AppendLine("Contract request: " + requestPath);
-                var applyArgs = BuildApplyContractArgs(operation, requestPath, resultPath, finalGateReportPath);
-                var applyResult = RunProcessCapture(ConfigSheetForgeEditorUtility.ResolveExecutable(_cliPath), applyArgs, projectRoot);
-                output.AppendLine(applyResult.Render(ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, applyArgs)));
+                var applyResult = RunProcessCapture(cli.Executable, cli.BuildArguments(applyArgs), projectRoot);
+                output.AppendLine(applyResult.Render(cli.ToCommandLine(applyArgs)));
                 if (File.Exists(resultPath))
                 {
                     output.AppendLine("Lifecycle result: " + resultPath);
@@ -850,7 +911,7 @@ namespace ConfigSheetForge.Unity.Editor
             }
             catch (Exception ex)
             {
-                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message);
+                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message, _projectConfig);
             }
         }
 
@@ -892,14 +953,23 @@ namespace ConfigSheetForge.Unity.Editor
         private void CopyCommand(params string[] args)
         {
             var cleanArgs = CleanArgs(args);
-            EditorGUIUtility.systemCopyBuffer = ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, cleanArgs);
+            var cli = ResolveCoreCli(FindProjectRoot());
+            EditorGUIUtility.systemCopyBuffer = cli.ToCommandLine(cleanArgs);
         }
 
         private void CopySyncCacheCommand(bool apply)
         {
             RefreshReadonlyStatus();
-            var resultPath = GetUnityLifecyclePath(FindProjectRoot(), "sync-cache.result.json");
-            EditorGUIUtility.systemCopyBuffer = ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, BuildSyncCacheArgs(apply, resultPath));
+            var projectRoot = FindProjectRoot();
+            if (_projectConfig.Exists && _projectConfig.HasLifecycleAdapter)
+            {
+                CopyProjectLifecycleAdapterCommand("sync-cache", dryRun: !apply);
+                return;
+            }
+
+            var resultPath = GetUnityLifecyclePath(projectRoot, "sync-cache.result.json");
+            var cli = ResolveCoreCli(projectRoot);
+            EditorGUIUtility.systemCopyBuffer = cli.ToCommandLine(BuildSyncCacheArgs(apply, resultPath));
         }
 
         private void CopyPrGateCommand()
@@ -911,7 +981,8 @@ namespace ConfigSheetForge.Unity.Editor
                 return;
             }
 
-            EditorGUIUtility.systemCopyBuffer = ConfigSheetForgeEditorUtility.BuildCommandLine(_cliPath, BuildPrGateArgs());
+            var cli = ResolveCoreCli(FindProjectRoot());
+            EditorGUIUtility.systemCopyBuffer = cli.ToCommandLine(BuildPrGateArgs());
         }
 
         private void CopyProjectLifecycleAdapterCommand(string operation, bool dryRun)
@@ -929,9 +1000,16 @@ namespace ConfigSheetForge.Unity.Editor
             var projectRoot = FindProjectRoot();
             _currentGitBranch = TryRunReadOnlyGit("branch", "--show-current");
             _projectConfig = ConfigSheetForgeEditorUtility.LoadProjectConfigSummary(projectRoot, _currentGitBranch);
+            _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
             MergeLifecycleSummary(projectRoot, "sync-cache.result.json");
             MergeLifecycleSummary(projectRoot, "pr-gate-report.result.json");
             _gateReportSummary = LoadGateReportSummary(projectRoot);
+        }
+
+        private ConfigSheetForgeCliInvocation ResolveCoreCli(string projectRoot)
+        {
+            _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
+            return _cliInvocation;
         }
 
         private void MergeLifecycleSummary(string projectRoot, string fileName)
@@ -986,13 +1064,26 @@ namespace ConfigSheetForge.Unity.Editor
             }
         }
 
-        private string[] BuildApplyContractArgs(string operation, string requestPath, string resultPath, string finalGateReportPath)
+        private string[] BuildApplyContractArgs(string operation, string requestPath, string resultPath, string finalGateReportPath, bool dryRun)
         {
             var args = new List<string> { "apply-contract", "--request", requestPath, "--out", resultPath };
+            if (dryRun)
+            {
+                args.Add("--dry-run");
+            }
+
             if (string.Equals(operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
             {
                 args.Add("--report");
                 args.Add(finalGateReportPath);
+            }
+            else if (string.Equals(operation, "sync-cache", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(operation, "sync-from-online-sheet", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!dryRun && _confirmSyncApply)
+                {
+                    args.Add("--yes");
+                }
             }
             else if (string.Equals(operation, "seed-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
                      string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
@@ -1171,7 +1262,7 @@ namespace ConfigSheetForge.Unity.Editor
             AppendJsonProperty(builder, "mergedPath", _mergedPath, comma: true);
             AppendJsonProperty(builder, "writeBackToMain", _writeBackToMain, comma: true);
             AppendJsonProperty(builder, "confirmWriteMain", _writeBackToMain && _confirmWriteMain, comma: true);
-            AppendJsonProperty(builder, "confirmApply", _confirmSeedApply, comma: true);
+            AppendJsonProperty(builder, "confirmApply", ConfirmApplyForOperation(operation), comma: true);
             AppendJsonProperty(builder, "confirmExcelToSoSettingsUpdate", _confirmSeedExcelToSo, comma: true);
             AppendJsonProperty(builder, "gateReportPath", finalGateReportPath, comma: true);
             builder.AppendLine("  \"fields\": [");

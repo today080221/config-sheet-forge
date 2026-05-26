@@ -33,6 +33,9 @@ namespace ConfigSheetForge.Core
         public string AdapterInterpreter { get; set; } = "";
         public string ContractCommand { get; set; } = "";
         public string ContractRequestPath { get; set; } = "";
+        public string CoreCliEnvironmentVariable { get; set; } = "";
+        public string SourceCheckoutEnvironmentVariable { get; set; } = "";
+        public string SourceCliProjectRelativePath { get; set; } = "";
         public List<string> ContractArguments { get; set; } = new List<string>();
         public List<ProjectConfigTableSummary> Tables { get; set; } = new List<ProjectConfigTableSummary>();
         public List<ProjectConfigTableSummary> CurrentBranchTables { get; set; } = new List<ProjectConfigTableSummary>();
@@ -200,6 +203,18 @@ namespace ConfigSheetForge.Core
             summary.ContractRequestPath = FirstNonEmpty(
                 GetString(root, "contractRequestPath", "requestPath", "contractJsonPath"),
                 FindStringDeep(root, "contractRequestPath", "requestPath", "contractJsonPath"));
+            summary.CoreCliEnvironmentVariable = FirstNonEmpty(
+                GetString(root, "coreCliEnvironmentVariable", "cliEnvironmentVariable"),
+                FindStringDeep(root, "coreCliEnvironmentVariable", "cliEnvironmentVariable"),
+                "CONFIG_SHEET_FORGE_CLI");
+            summary.SourceCheckoutEnvironmentVariable = FirstNonEmpty(
+                GetString(root, "sourceCheckoutEnvironmentVariable", "checkoutEnvironmentVariable"),
+                FindStringDeep(root, "sourceCheckoutEnvironmentVariable", "checkoutEnvironmentVariable"),
+                "CONFIG_SHEET_FORGE_ROOT");
+            summary.SourceCliProjectRelativePath = FirstNonEmpty(
+                GetString(root, "sourceCliProjectRelativePath", "cliProjectRelativePath"),
+                FindStringDeep(root, "sourceCliProjectRelativePath", "cliProjectRelativePath"),
+                Path.Combine("src", "cli", "ConfigSheetForge.Cli"));
             summary.ContractArguments.AddRange(GetStringArray(root, "contractArgs", "adapterArgs", "lifecycleContractArgs"));
             if (summary.ContractArguments.Count == 0)
             {

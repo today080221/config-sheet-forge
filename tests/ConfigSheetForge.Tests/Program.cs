@@ -41,6 +41,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("project config probe derives branch workspace names", () => RunSync(ProjectConfigProbeDerivesBranchWorkspaceNames)),
     ("project config probe ignores local state registry", () => RunSync(ProjectConfigProbeIgnoresLocalStateRegistry)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
+    ("apply-contract sync-cache apply requires confirmation", ApplyContractSyncCacheApplyRequiresConfirmation),
     ("seed dry-run plans xlsx migration without writes", SeedDryRunPlansXlsxMigrationWithoutWrites),
     ("seed manifest does not treat cache excelPath as source", SeedManifestDoesNotTreatCacheExcelPathAsSource),
     ("seed dry-run blocks merged xlsx cells", SeedDryRunBlocksMergedCells),
@@ -845,7 +846,12 @@ static void ProjectConfigProbeReadsLifecycleSummary()
     {
       "schemaVersion": "example.config-source/v1",
       "lifecycleApplyMode": "dry-run-only",
-      "toolkit": { "defaultGateReportPath": "Temp/ConfigSheetForge/pr-gate-report.json" },
+      "toolkit": {
+        "defaultGateReportPath": "Temp/ConfigSheetForge/pr-gate-report.json",
+        "coreCliEnvironmentVariable": "CONFIG_SHEET_FORGE_CLI",
+        "sourceCheckoutEnvironmentVariable": "CONFIG_SHEET_FORGE_ROOT",
+        "sourceCliProjectRelativePath": "src/cli/ConfigSheetForge.Cli"
+      },
       "adapterScript": "tools/config_bridge.py",
       "contractArgs": ["--config", "{projectConfig}", "--operation", "{operation}", "--out", "{request}"],
       "gitBranch": "feature/config",
@@ -867,6 +873,9 @@ static void ProjectConfigProbeReadsLifecycleSummary()
     AssertEqual("feature/config", summary.GitBranch, "git branch should be read.");
     AssertEqual("feature-config", summary.Profile, "profile should be read.");
     AssertEqual("tools/config_bridge.py", summary.AdapterScript, "adapter script should be read.");
+    AssertEqual("CONFIG_SHEET_FORGE_CLI", summary.CoreCliEnvironmentVariable, "CLI env var should be read.");
+    AssertEqual("CONFIG_SHEET_FORGE_ROOT", summary.SourceCheckoutEnvironmentVariable, "source checkout env var should be read.");
+    AssertEqual("src/cli/ConfigSheetForge.Cli", summary.SourceCliProjectRelativePath, "source CLI project path should be read.");
     AssertEqual("6", summary.ContractArguments.Count.ToString(), "contract args should be read.");
     AssertTrue(summary.HasLifecycleAdapter, "adapterScript should enable project lifecycle mode.");
 }
@@ -1017,6 +1026,53 @@ static async Task ApplyContractPrGateReportWritesStandardReport()
         if (Directory.Exists(root))
         {
             Directory.Delete(root, true);
+        }
+    }
+}
+
+static async Task ApplyContractSyncCacheApplyRequiresConfirmation()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-sync-cache-confirm-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        Directory.SetCurrentDirectory(root);
+        var requestPath = Path.Combine(root, "request.json");
+        var resultPath = Path.Combine(root, "result.json");
+        var request = new LifecycleContractRequest
+        {
+            Operation = "sync-cache",
+            DryRun = false,
+            Git = new ContractGitSpec
+            {
+                Branch = "feature/config",
+                Profile = "feature/config"
+            },
+            BranchWorkspace = new BranchWorkspaceContract
+            {
+                GitBranch = "feature/config",
+                Profile = "feature/config",
+                ExistingWikiNodeToken = "wik_feature"
+            },
+            SyncCache = new SyncCacheContract
+            {
+                ConfirmApply = false
+            }
+        };
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "apply-contract", "--request", requestPath, "--out", resultPath });
+
+        AssertEqual("2", exitCode.ToString(), "sync-cache apply-contract should require explicit confirmation.");
+        AssertTrue(!File.Exists(resultPath), "Unconfirmed sync-cache apply should fail before writing a lifecycle result.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
         }
     }
 }

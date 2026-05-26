@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.7
+
+- Unity `sync-cache` 按钮在项目 adapter 模式下改走 lifecycle adapter + `apply-contract`，dry-run/apply 均复用 contract 输入，不再绕过项目桥接直接调用裸 CLI。
+- Unity CLI 解析支持 `CONFIG_SHEET_FORGE_CLI`，以及 `CONFIG_SHEET_FORGE_ROOT + sourceCliProjectRelativePath` 的 `dotnet run --project ... --` 源码 checkout fallback。
+- `sync-cache` apply 使用同步页确认开关并向 `apply-contract` 传 `--yes`；未确认的 apply 会被 core 阻断。
+- 最近命令和命令输出区改为自动换行，CLI 启动失败按“命令 / 原因 / 下一步”结构化中文展示。
+
 ## 0.4.6
 
 - Unity 状态页改为工作流摘要：优先展示当前 Git 分支、Feishu profile、Wiki branch 节点、当前 branch 表数量、cache 状态与最近 PR gate 摘要。

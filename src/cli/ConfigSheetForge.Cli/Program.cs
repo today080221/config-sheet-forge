@@ -1124,6 +1124,12 @@ public static class Program
                 throw new CliException("sync-cache 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
             }
 
+            request.SyncCache.ConfirmApply = request.SyncCache.ConfirmApply || args.HasFlag("yes") || args.HasFlag("confirm");
+            if (!request.DryRun && !request.SyncCache.ConfirmApply)
+            {
+                throw new CliException("sync-cache apply 会更新本地 cache，必须显式传 --yes，或在 contract.syncCache.confirmApply=true。", 2);
+            }
+
             await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
         }
 
@@ -1131,6 +1137,24 @@ public static class Program
             ? new PreviewLifecyclePlatform()
             : new CliLifecyclePlatform(args, request);
         var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
+        if (SyncCacheOperationRequested(request.Operation) && result.Success && !request.DryRun)
+        {
+            var workspace = await LoadWorkspaceAsync(requireConfig: false);
+            var tables = BuildSyncCacheTables(request, request.SyncCache.TableId);
+            if (tables.Count == 0)
+            {
+                result.AddFailure("sync-cache apply 找不到当前 branch/profile 的在线 Sheet 定位信息。请确认 ConfigSheets/ProjectSettings 已包含 spreadsheetToken、sheetId 和 TableId + Branch/Profile。");
+            }
+            else
+            {
+                var exit = await SyncTableConfigsAsync(workspace, args, tables, request.SyncCache.CacheDirectory, request.SyncCache.ExcelCacheDirectory);
+                if (exit != 0)
+                {
+                    result.AddFailure("sync-cache apply 没有通过在线读取 / xlsx 导出 / 三方一致性检查，已阻断 cache 更新。");
+                }
+            }
+        }
+
         if (string.Equals(request.Operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
         {
             var gateReportPath = ResolveGateReportPath(args, request);
