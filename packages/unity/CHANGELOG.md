@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.12
+
+- 修复非“输出”页底部“最近结果”收起后仍占大块高度的问题；collapsed 状态现在只绘制 34px 状态条，主工作区会回收高度。
+- 展开态才绘制底部结果抽屉，抽屉高度按窗口 25%-35% 左右取默认值，并支持拖拽 splitter 调整。
+- 底部结果抽屉展开/收起状态与用户拖拽高度写入 `EditorPrefs`，不会自动调整 Unity EditorWindow 外部尺寸。
+- collapsed 状态条显示运行中/成功/失败、当前 operation 和下一步，并保留复制输出、打开 result、打开 lifecycle 目录、展开以及运行中取消按钮。
+- 非输出页不再在 collapsed 路径创建日志 ScrollView；完整命令、stdout、stderr、result JSON 继续放在展开抽屉或“输出”tab。
+- 首页改为任务型 Dashboard：突出“推荐下一步”，提供一个主按钮、一个次按钮和安全说明，并增加“我该做什么”流程卡。
+- 新增首次打开 onboarding，说明飞书在线表是 Source of Truth、预览安全、写入/创建/写回需要确认；支持“我知道了 / 打开教程 / 不再提示”。
+- 顶部 `教程` 菜单支持通用教程、策划改表、新建配表、PR 合并、常见失败原因，并优先读取项目配置里的 `documentationTargets` / `localDocs` / `feishuRootUrl`。
+- 每个主 tab 顶部增加一句任务定位说明，帮助普通用户判断什么时候进入状态、配表、合并、PR 检查或输出页。
+- 状态卡和失败原因继续隐藏默认 debug 术语，失败卡附带“下一步”。
+- Unity package smoke 增加布局源码断言，防止回退到 collapsed 状态仍使用大面板/ScrollView/ExpandHeight 的旧布局。
+
 ## 0.4.11
 
 - Unity 首页状态卡改为策划向人话摘要，不再把 `passed=false`、`failures=1` 这类 raw debug 字段放进主流程；BranchBindings、Wiki token、CLI 来源和路径继续放在“高级诊断”。

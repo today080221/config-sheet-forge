@@ -39,6 +39,7 @@ namespace ConfigSheetForge.Core
         public string DefaultTargetBranch { get; set; } = "";
         public string GithubRepository { get; set; } = "";
         public bool AllowPrAutoDetect { get; set; } = true;
+        public Dictionary<string, string> DocumentationTargets { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public List<string> ContractArguments { get; set; } = new List<string>();
         public List<ProjectConfigTableSummary> Tables { get; set; } = new List<ProjectConfigTableSummary>();
         public List<ProjectConfigTableSummary> CurrentBranchTables { get; set; } = new List<ProjectConfigTableSummary>();
@@ -235,6 +236,7 @@ namespace ConfigSheetForge.Core
                                         GetBoolean(toolkit, "allowPrAutoDetect", "prAutoDetect") ??
                                         GetBoolean(github, "allowPrAutoDetect", "prAutoDetect") ??
                                         true;
+            ReadDocumentationTargets(summary, root, toolkit);
             summary.ContractArguments.AddRange(GetStringArray(root, "contractArgs", "adapterArgs", "lifecycleContractArgs"));
             if (summary.ContractArguments.Count == 0)
             {
@@ -242,6 +244,64 @@ namespace ConfigSheetForge.Core
             }
 
             ReadRegistry(summary, root);
+        }
+
+        private static void ReadDocumentationTargets(ProjectConfigSummary summary, SimpleJsonValue root, SimpleJsonValue toolkit)
+        {
+            AddDocumentationObject(summary, GetObject(root, "documentationTargets", "documentationLinks", "docs", "documentation"));
+            AddDocumentationObject(summary, GetObject(toolkit, "documentationTargets", "documentationLinks", "docs", "documentation"));
+            AddLocalDocs(summary, GetStringArray(root, "localDocs", "localDocumentation"));
+            AddLocalDocs(summary, GetStringArray(toolkit, "localDocs", "localDocumentation"));
+
+            AddDocumentationTarget(summary, "projectDocs", FirstNonEmpty(
+                GetString(root, "projectDocs", "projectDocsPath", "documentationPath"),
+                GetString(toolkit, "projectDocs", "projectDocsPath", "documentationPath")));
+            AddDocumentationTarget(summary, "feishuRootUrl", FirstNonEmpty(
+                GetString(root, "feishuRootUrl", "projectWikiUrl", "wikiRootUrl"),
+                GetString(toolkit, "feishuRootUrl", "projectWikiUrl", "wikiRootUrl")));
+        }
+
+        private static void AddDocumentationObject(ProjectConfigSummary summary, SimpleJsonValue value)
+        {
+            if (value == null || value.Kind != SimpleJsonKind.Object)
+            {
+                return;
+            }
+
+            foreach (var pair in value.ObjectValue)
+            {
+                if (pair.Value.Kind == SimpleJsonKind.String || pair.Value.Kind == SimpleJsonKind.Number)
+                {
+                    AddDocumentationTarget(summary, pair.Key, pair.Value.StringValue);
+                }
+                else if (pair.Value.Kind == SimpleJsonKind.Object)
+                {
+                    var target = FirstNonEmpty(
+                        GetString(pair.Value, "url", "href", "link", "path", "target"),
+                        GetString(pair.Value, "localPath", "file"));
+                    var label = FirstNonEmpty(GetString(pair.Value, "title", "label", "name"), pair.Key);
+                    AddDocumentationTarget(summary, label, target);
+                }
+            }
+        }
+
+        private static void AddLocalDocs(ProjectConfigSummary summary, List<string> docs)
+        {
+            for (var i = 0; i < docs.Count; i++)
+            {
+                AddDocumentationTarget(summary, i == 0 ? "projectDocs" : "projectDocs" + (i + 1).ToString(CultureInfo.InvariantCulture), docs[i]);
+            }
+        }
+
+        private static void AddDocumentationTarget(ProjectConfigSummary summary, string label, string target)
+        {
+            if (summary == null || string.IsNullOrWhiteSpace(target))
+            {
+                return;
+            }
+
+            label = string.IsNullOrWhiteSpace(label) ? "projectDocs" : label.Trim();
+            summary.DocumentationTargets[label] = target.Trim();
         }
 
         private static void ReadRegistry(ProjectConfigSummary summary, SimpleJsonValue root)
@@ -390,12 +450,12 @@ namespace ConfigSheetForge.Core
         {
             if (string.IsNullOrWhiteSpace(summary.BranchWikiNodeToken) && summary.BranchBindings.Count == 0)
             {
-                return "未读取到当前分支的 BranchBindings。请先刷新在线状态，或确认 Base 注册中心权限。";
+                return "未读取到当前分支的在线工作区。请先预览同步计划，或确认在线注册中心权限。";
             }
 
             if (string.IsNullOrWhiteSpace(table.TableId))
             {
-                return "ConfigSheets 记录缺少 TableId。";
+                return "在线表记录缺少 TableId。";
             }
 
             if (string.IsNullOrWhiteSpace(table.SpreadsheetToken) && string.IsNullOrWhiteSpace(table.OnlineSheetUrl))

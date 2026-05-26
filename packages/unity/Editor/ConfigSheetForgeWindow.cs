@@ -19,6 +19,12 @@ namespace ConfigSheetForge.Unity.Editor
         private const int MergeTab = 2;
         private const int GateTab = 3;
         private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
+        private const string BottomOutputExpandedPrefKey = "ConfigSheetForge.Unity.BottomOutputExpanded";
+        private const string BottomOutputHeightPrefKey = "ConfigSheetForge.Unity.BottomOutputHeight";
+        private const string OnboardingDismissedPrefKey = "ConfigSheetForge.Unity.OnboardingDismissed";
+        private const float CollapsedOutputBarHeight = 34f;
+        private const float MinBottomDrawerHeight = 220f;
+        private const float DefaultBottomDrawerHeight = 260f;
 
         private enum WorkflowStatusKind
         {
@@ -42,6 +48,22 @@ namespace ConfigSheetForge.Unity.Editor
                 Status = status;
                 Detail = detail;
                 Kind = kind;
+            }
+        }
+
+        private struct DashboardAction
+        {
+            public string Label;
+            public string Tooltip;
+            public string SafetyText;
+            public Action Execute;
+
+            public DashboardAction(string label, string tooltip, string safetyText, Action execute)
+            {
+                Label = label;
+                Tooltip = tooltip;
+                SafetyText = safetyText;
+                Execute = execute;
             }
         }
 
@@ -90,6 +112,8 @@ namespace ConfigSheetForge.Unity.Editor
         private bool _showSeedSection;
         private bool _showMergeAdvancedOptions;
         private bool _showFieldTemplateEditor;
+        private bool _showOnboarding;
+        private bool _showWorkflowGuide;
         private bool _showBottomOutput;
         private bool _isResizingOutputPanel;
         private float _bottomOutputHeight = 260f;
@@ -169,6 +193,9 @@ namespace ConfigSheetForge.Unity.Editor
         {
             EditorApplication.update -= OnEditorUpdate;
             EditorApplication.update += OnEditorUpdate;
+            _showBottomOutput = EditorPrefs.GetBool(BottomOutputExpandedPrefKey, false);
+            _bottomOutputHeight = EditorPrefs.HasKey(BottomOutputHeightPrefKey) ? EditorPrefs.GetFloat(BottomOutputHeightPrefKey, DefaultBottomDrawerHeight) : 0f;
+            _showOnboarding = !EditorPrefs.GetBool(OnboardingDismissedPrefKey, false);
             RefreshReadonlyStatus();
             _resultSummary = "配表 Source of Truth 窗口已打开。" + Environment.NewLine +
                              "这里只刷新本地状态，不会下载、不导出、不改文件。" + Environment.NewLine +
@@ -195,13 +222,11 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (_selectedTab == 4)
             {
-                DrawOutputTab(expanded: true, preferredHeight: Math.Max(320f, position.height - 230f));
+                DrawOutputTab(fullPage: true, preferredHeight: Math.Max(320f, position.height - 230f));
                 return;
             }
 
-            var outputHeight = CalculateInlineOutputHeight();
-            var contentHeight = Math.Max(180f, position.height - outputHeight - 260f);
-            _mainScroll = EditorGUILayout.BeginScrollView(_mainScroll, GUILayout.MaxHeight(contentHeight), GUILayout.ExpandHeight(false));
+            _mainScroll = EditorGUILayout.BeginScrollView(_mainScroll, GUILayout.ExpandHeight(true));
             switch (_selectedTab)
             {
                 case 0:
@@ -219,8 +244,15 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             EditorGUILayout.EndScrollView();
-            DrawOutputResizeHandle();
-            DrawOutputTab(expanded: false, preferredHeight: outputHeight);
+            if (_showBottomOutput)
+            {
+                DrawOutputResizeHandle();
+                DrawOutputTab(fullPage: false, preferredHeight: CalculateInlineOutputHeight());
+            }
+            else
+            {
+                DrawCollapsedOutputStatusBar();
+            }
         }
 
         private void DrawHeader()
@@ -228,18 +260,103 @@ namespace ConfigSheetForge.Unity.Editor
             GUILayout.Space(6);
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField("配表 Source of Truth", EditorStyles.boldLabel);
-            if (GUILayout.Button(new GUIContent("文档", "打开入门文档。"), GUILayout.Width(64)))
+            if (GUILayout.Button(new GUIContent("教程", "打开 5 分钟入门、项目文档或飞书入口。"), GUILayout.Width(64)))
             {
-                Application.OpenURL("https://github.com/today080221/config-sheet-forge/blob/main/docs/getting-started.md");
+                ShowHelpMenu();
             }
 
             if (GUILayout.Button(new GUIContent("复制 UPM", "复制通过 Unity Package Manager 安装此包的 Git URL。"), GUILayout.Width(88)))
             {
-                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.11";
+                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.12";
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("飞书在线 Sheet 是 Source of Truth，本地 Excel 只是兼容缓存。", EditorStyles.miniLabel);
             GUILayout.Space(4);
+        }
+
+        private void ShowHelpMenu()
+        {
+            var menu = new GenericMenu();
+            var projectRoot = FindProjectRoot();
+            AddHelpMenuItem(menu, "5 分钟入门", "https://github.com/today080221/config-sheet-forge/blob/main/docs/unity-window.md");
+            AddHelpMenuItem(menu, "策划改表流程", "https://github.com/today080221/config-sheet-forge/blob/main/docs/unity-window.md#策划改表-5-分钟流程");
+            AddHelpMenuItem(menu, "新建配表流程", "https://github.com/today080221/config-sheet-forge/blob/main/docs/unity-window.md#新建配表流程");
+            AddHelpMenuItem(menu, "PR 合并流程", "https://github.com/today080221/config-sheet-forge/blob/main/docs/unity-window.md#pr-合并流程");
+            AddHelpMenuItem(menu, "常见失败原因", "https://github.com/today080221/config-sheet-forge/blob/main/docs/unity-window.md#常见失败原因");
+            menu.AddSeparator("");
+
+            var addedProjectLink = false;
+            foreach (var pair in _projectConfig.DocumentationTargets)
+            {
+                var label = string.IsNullOrWhiteSpace(pair.Key) ? "项目文档" : "项目文档/" + pair.Key;
+                AddHelpMenuItem(menu, label, pair.Value);
+                addedProjectLink = true;
+            }
+
+            var defaultProjectDoc = Path.Combine(projectRoot, "docs", "tooling", "config-sheet-source-of-truth.md");
+            if (File.Exists(defaultProjectDoc))
+            {
+                AddHelpMenuItem(menu, "项目文档/Source of Truth 工具说明", defaultProjectDoc);
+                addedProjectLink = true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(_projectConfig.BranchWorkspaceRootWikiUrl))
+            {
+                AddHelpMenuItem(menu, "项目文档/飞书项目配置入口", _projectConfig.BranchWorkspaceRootWikiUrl);
+                addedProjectLink = true;
+            }
+
+            if (!addedProjectLink)
+            {
+                menu.AddDisabledItem(new GUIContent("项目文档/未在项目配置中声明"));
+            }
+
+            menu.AddSeparator("");
+            AddHelpMenuItem(menu, "config-sheet-forge README", "https://github.com/today080221/config-sheet-forge");
+            menu.ShowAsContext();
+        }
+
+        private void AddHelpMenuItem(GenericMenu menu, string label, string target)
+        {
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                menu.AddDisabledItem(new GUIContent(label + "（未配置）"));
+                return;
+            }
+
+            menu.AddItem(new GUIContent(label), false, () => OpenDocumentationTarget(target));
+        }
+
+        private void OpenDocumentationTarget(string target)
+        {
+            target = target ?? "";
+            if (IsUrl(target))
+            {
+                Application.OpenURL(target);
+                return;
+            }
+
+            var projectRoot = FindProjectRoot();
+            var resolved = Path.IsPathRooted(target)
+                ? target
+                : Path.GetFullPath(Path.Combine(projectRoot, target.Replace('/', Path.DirectorySeparatorChar)));
+            if (File.Exists(resolved) || Directory.Exists(resolved))
+            {
+                Application.OpenURL(new Uri(resolved).AbsoluteUri);
+                return;
+            }
+
+            SetImmediateOutput(
+                "没有找到项目文档：" + target,
+                "请确认项目配置 documentationTargets/localDocs/feishuRootUrl 是否正确，或在项目中添加 docs/tooling/config-sheet-source-of-truth.md。");
+        }
+
+        private static bool IsUrl(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   (value.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                    value.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                    value.StartsWith("file://", StringComparison.OrdinalIgnoreCase));
         }
 
         private void DrawActiveJobStatus()
@@ -356,7 +473,7 @@ namespace ConfigSheetForge.Unity.Editor
                 return "已绑定 Wiki 节点";
             }
 
-            return "按 BranchBindings/模板推导中";
+            return "按分支规则推导中";
         }
 
         private void DrawProjectSummary()
@@ -367,30 +484,211 @@ namespace ConfigSheetForge.Unity.Editor
                 RefreshReadonlyStatus();
             }
 
+            DrawOnboardingCard();
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("当前状态", EditorStyles.boldLabel);
-            DrawStatusCardGrid(BuildWorkflowStatusCards(projectRoot));
+            EditorGUILayout.LabelField("推荐下一步", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(BuildRecommendationText(projectRoot), EditorStyles.wordWrappedLabel);
 
+            var primary = BuildPrimaryDashboardAction(projectRoot);
+            var secondary = BuildSecondaryDashboardAction(projectRoot, primary.Label);
             EditorGUILayout.BeginHorizontal();
-            if (DrawJobButton(new GUIContent(BuildNextStepButtonText(projectRoot), "按当前状态执行推荐动作。"), GUILayout.Height(26)))
+            DrawDashboardActionButton(primary, true);
+            DrawDashboardActionButton(secondary, false);
+            if (GUILayout.Button(new GUIContent(_showBottomOutput ? "收起结果" : "展开结果", "显示或隐藏底部结果摘要面板。"), GUILayout.Width(92), GUILayout.Height(32)))
             {
-                RunNextStep(projectRoot);
-            }
-
-            if (GUILayout.Button(new GUIContent(_showBottomOutput ? "收起结果" : "展开结果", "显示或隐藏底部结果摘要面板。"), GUILayout.Width(92), GUILayout.Height(26)))
-            {
-                _showBottomOutput = !_showBottomOutput;
+                SetBottomOutputExpanded(!_showBottomOutput);
             }
             EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(primary.SafetyText, EditorStyles.wordWrappedMiniLabel);
+            EditorGUILayout.LabelField(secondary.SafetyText, EditorStyles.wordWrappedMiniLabel);
+            GUILayout.Space(94);
+            EditorGUILayout.EndHorizontal();
+
+            _showWorkflowGuide = EditorGUILayout.Foldout(_showWorkflowGuide, "我该做什么", true);
+            if (_showWorkflowGuide)
+            {
+                DrawWorkflowGuideCards();
+            }
+
+            GUILayout.Space(4);
+            EditorGUILayout.LabelField("当前状态", EditorStyles.boldLabel);
+            DrawStatusCardGrid(BuildWorkflowStatusCards(projectRoot));
 
             _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
             EditorGUILayout.EndVertical();
         }
 
+        private void DrawOnboardingCard()
+        {
+            if (!_showOnboarding)
+            {
+                return;
+            }
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("配表 Source of Truth 怎么用？", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("飞书在线表是正式源头；本地 Excel 只是自动生成的 cache。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("“预览”永远安全，不会写飞书，也不会改本地文件。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("“写入 / 创建 / 写回”都需要确认；不知道下一步时先点“预览同步计划”。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button(new GUIContent("我知道了", "只在本次窗口会话中收起说明。"), GUILayout.Width(92)))
+            {
+                _showOnboarding = false;
+            }
+
+            if (GUILayout.Button(new GUIContent("打开教程", "打开 Unity 窗口 5 分钟入门。"), GUILayout.Width(92)))
+            {
+                OpenDocumentationTarget("https://github.com/today080221/config-sheet-forge/blob/main/docs/unity-window.md");
+            }
+
+            if (GUILayout.Button(new GUIContent("不再提示", "以后打开窗口不再显示这段说明。"), GUILayout.Width(92)))
+            {
+                _showOnboarding = false;
+                EditorPrefs.SetBool(OnboardingDismissedPrefKey, true);
+            }
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.EndVertical();
+        }
+
+        private string BuildRecommendationText(string projectRoot)
+        {
+            var next = BuildNextStepText(projectRoot);
+            if (string.Equals(next, "预览同步计划", StringComparison.OrdinalIgnoreCase))
+            {
+                return "当前最稳妥的下一步是先预览同步计划：只读取在线信息，不写飞书、不改本地 cache。";
+            }
+
+            if (string.Equals(next, "运行 PR 检查", StringComparison.OrdinalIgnoreCase))
+            {
+                return "当前 cache 看起来已就绪，下一步跑 PR 检查；失败时会告诉你找谁处理。";
+            }
+
+            if (string.Equals(next, "可以提交 PR", StringComparison.OrdinalIgnoreCase))
+            {
+                return "当前状态看起来可以进入 PR 流程；提交前可再刷新状态或运行 PR 检查。";
+            }
+
+            return "先确认项目配置是否已接入；刷新状态不会写任何文件。";
+        }
+
+        private DashboardAction BuildPrimaryDashboardAction(string projectRoot)
+        {
+            var next = BuildNextStepText(projectRoot);
+            if (string.Equals(next, "运行 PR 检查", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DashboardAction(
+                    "运行 PR 检查",
+                    "生成最近一次 pr-gate-report，失败会给出中文下一步。",
+                    "安全：只生成检查报告，不写飞书、不改本地 cache。",
+                    RunPrGateReport);
+            }
+
+            if (string.Equals(next, "可以提交 PR", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DashboardAction(
+                    "刷新状态",
+                    "重新读取本地配置、git branch、最近 gate report 和 cache 状态。",
+                    "安全：只读刷新，不下载、不导出、不写文件。",
+                    RefreshStatusAction);
+            }
+
+            return new DashboardAction(
+                "预览同步计划",
+                "读取当前分支在线注册中心并生成 sync-cache dry-run。",
+                "安全：只读取，不写飞书、不改本地 cache、不改 ProjectSettings。",
+                () => RunSyncCache(apply: false));
+        }
+
+        private DashboardAction BuildSecondaryDashboardAction(string projectRoot, string primaryLabel)
+        {
+            if (!string.Equals(primaryLabel, "运行 PR 检查", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DashboardAction(
+                    "运行 PR 检查",
+                    "合 PR 前跑 gate；失败会展示原因和下一步。",
+                    "安全：只生成检查报告，不写在线表。",
+                    RunPrGateReport);
+            }
+
+            return new DashboardAction(
+                "预览同步计划",
+                "先看当前分支在线表和 cache 是否需要同步。",
+                "安全：只读取，不写任何文件。",
+                () => RunSyncCache(apply: false));
+        }
+
+        private void DrawDashboardActionButton(DashboardAction action, bool primary)
+        {
+            var width = primary ? 170f : 140f;
+            if (DrawJobButton(new GUIContent(action.Label, action.Tooltip), GUILayout.Width(width), GUILayout.Height(32)))
+            {
+                if (action.Execute != null)
+                {
+                    action.Execute();
+                }
+            }
+        }
+
+        private void RefreshStatusAction()
+        {
+            RefreshReadonlyStatus();
+            _lastCommand = "只读刷新状态";
+            SetImmediateOutput("已刷新状态。没有下载、导出或写入任何文件。", "");
+        }
+
+        private void DrawWorkflowGuideCards()
+        {
+            EditorGUILayout.BeginHorizontal();
+            DrawWorkflowGuideCard(
+                "策划改表",
+                "1. 在飞书在线表改数据\n2. 回 Unity 点“预览同步计划”\n3. 通过后勾选确认并“写入本地 cache”\n4. 提交 PR 或找主程合并",
+                "预览同步计划",
+                "安全：只读取，不写文件。",
+                () => RunSyncCache(apply: false));
+            DrawWorkflowGuideCard(
+                "新建配表",
+                "1. 填表 ID 和中文名\n2. 点“预览新建配表”\n3. 找配置负责人确认\n4. 确认后创建在线表并登记",
+                "填写新建配表",
+                "创建在线表是高风险，必须预览通过并二次确认。",
+                () =>
+                {
+                    _selectedTab = TablesTab;
+                    _showNewTableSection = true;
+                    _showSyncSection = false;
+                });
+            DrawWorkflowGuideCard(
+                "合并 PR",
+                "1. 点“生成合并预览”\n2. 确认冲突、Schema review 和合并审查\n3. 运行 PR 检查\n4. 通过后合 PR",
+                "去合并页",
+                "写回 main 是高风险，必须负责人确认。",
+                () => _selectedTab = MergeTab);
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawWorkflowGuideCard(string title, string body, string buttonLabel, string safety, Action action)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.MinWidth(190));
+            EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(body, EditorStyles.wordWrappedMiniLabel, GUILayout.MinHeight(56));
+            if (DrawJobButton(new GUIContent(buttonLabel, safety), GUILayout.Height(24)))
+            {
+                if (action != null)
+                {
+                    action();
+                }
+            }
+            EditorGUILayout.LabelField(safety, EditorStyles.wordWrappedMiniLabel);
+            EditorGUILayout.EndVertical();
+        }
+
         private void DrawStartTab()
         {
+            DrawTabIntro("状态", "看当前分支能不能同步，安全操作从这里开始。");
             DrawSectionTitle("今日操作");
-            EditorGUILayout.HelpBox("打开窗口只读取状态，不会下载、不导出、不写飞书、不改 Excel 或 ProjectSettings。", MessageType.Info);
+            EditorGUILayout.HelpBox("不知道下一步时先点“预览同步计划”。预览只读取状态和在线注册中心，不写飞书、不改本地文件。", MessageType.Info);
 
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button(new GUIContent("刷新状态", "只重新读取 ProjectSettings、git branch、最近 gate report 和本地 cache 文件状态。"), GUILayout.Height(32)))
@@ -531,7 +829,7 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void DrawTablesTab()
         {
-            DrawSectionTitle("配表");
+            DrawTabIntro("配表", "同步已有在线表，或申请新建配表。");
             EditorGUILayout.HelpBox("低风险操作可预览；创建在线表、改 schema、写回 main 等危险动作必须通过项目 contract 和确认流程。", MessageType.None);
 
             if (_projectConfig.Exists)
@@ -598,7 +896,7 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void DrawMergeTab()
         {
-            DrawSectionTitle("合并审查");
+            DrawTabIntro("合并", "处理当前分支到 main 的配表合并。");
             EditorGUILayout.HelpBox("合并审查按当前 Git 分支和目标分支自动推导，像 GitHub PR 一样先生成预览；写回 main 必须显式确认。", MessageType.None);
 
             DrawProjectMergeInputs();
@@ -631,7 +929,7 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.HelpBox("未发现 ProjectSettings/*ConfigSheetForge*.json，无法按 BranchBindings 自动定位在线表。请先接入项目 adapter；下面保留本地 CLI 兼容入口给工程诊断使用。", MessageType.Warning);
+            EditorGUILayout.HelpBox("未发现 ProjectSettings/*ConfigSheetForge*.json，无法按分支工作区规则自动定位在线表。请先接入项目 adapter；下面保留本地 CLI 兼容入口给工程诊断使用。", MessageType.Warning);
             DrawPathField("基线", ref _basePath, "共同祖先 semantic workbook JSON。");
             DrawPathField("本分支", ref _oursPath, "本地 semantic workbook JSON。");
             DrawPathField("对方", ref _theirsPath, "待合入 semantic workbook JSON。");
@@ -654,7 +952,7 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void DrawGateTab()
         {
-            DrawSectionTitle("PR 同步检查");
+            DrawTabIntro("PR 检查", "合 PR 前跑 gate，失败会告诉你找谁处理。");
             EditorGUILayout.HelpBox("Gate 是提交前硬检查。失败原因会尽量用策划能看懂的中文说明下一步。", MessageType.None);
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
@@ -750,12 +1048,12 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndHorizontal();
 
             DrawReadonlyRow("cache", BuildTableCacheStatus(table), "本地 cache 文件状态。");
-            DrawReadonlyRow("semantic", FirstNonEmpty(ShortHash(table.SemanticHash), "未记录"), "ConfigSheets 或 ProjectSettings 中记录的 semantic hash。");
+            DrawReadonlyRow("semantic", FirstNonEmpty(ShortHash(table.SemanticHash), "未记录"), "在线注册中心或 ProjectSettings 中记录的 semantic hash。");
             if (!compact)
             {
-                DrawReadonlyRow("更新时间", FirstNonEmpty(table.UpdatedAt, "未记录"), "ConfigSheets 或 ProjectSettings 中记录的更新时间。");
+                DrawReadonlyRow("更新时间", FirstNonEmpty(table.UpdatedAt, "未记录"), "在线注册中心或 ProjectSettings 中记录的更新时间。");
                 DrawReadonlyRow("Schema", FirstNonEmpty(table.SchemaStatus, "未知"), "schema 是否变化或是否需要审查。");
-                DrawReadonlyRow("负责人", FirstNonEmpty(table.OwnerRole, "未声明"), "ConfigSheets 负责人角色。");
+                DrawReadonlyRow("负责人", FirstNonEmpty(table.OwnerRole, "未声明"), "在线表负责人角色。");
                 DrawReadonlyRow("Sheet 定位", BuildSheetLocationText(table), "在线 Sheet token、sheet id、wiki node。");
                 if (!string.IsNullOrWhiteSpace(table.BlockingReason))
                 {
@@ -872,7 +1170,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (DrawJobButton(new GUIContent("创建在线表并登记", "危险操作：创建/复用在线 Sheet，并登记 Base；需要确认且最近一次预览成功。"), applyReady, GUILayout.Height(28)))
             {
-                if (EditorUtility.DisplayDialog("确认新建配表", "将创建或复用在线 Sheet，并登记 ConfigSheets / SchemaReviews。请确认新建配表预览已经通过。", "确认执行", "取消"))
+                if (EditorUtility.DisplayDialog("确认新建配表", "将创建或复用在线 Sheet，并登记在线注册中心和 schema 审查记录。请确认新建配表预览已经通过。", "确认执行", "取消"))
                 {
                     RunProjectLifecycle("new-table", dryRun: false);
                 }
@@ -996,41 +1294,61 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndVertical();
         }
 
-        private void DrawOutputTab(bool expanded, float preferredHeight)
+        private void DrawCollapsedOutputStatusBar()
         {
-            DrawSectionTitle(expanded ? "输出" : "最近结果");
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Height(preferredHeight), GUILayout.ExpandHeight(expanded));
-            if (!expanded)
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox, GUILayout.Height(CollapsedOutputBarHeight));
+            EditorGUILayout.LabelField(BuildCollapsedResultText(), EditorStyles.miniLabel, GUILayout.ExpandWidth(true));
+            if (IsJobRunning && GUILayout.Button(new GUIContent("取消", "终止当前后台任务。"), GUILayout.Width(58), GUILayout.Height(22)))
             {
-                EditorGUILayout.BeginHorizontal();
-                _showBottomOutput = EditorGUILayout.Foldout(_showBottomOutput, "结果摘要", true);
-                GUILayout.FlexibleSpace();
-                if (GUILayout.Button(new GUIContent("复制输出", "复制摘要、命令和详细日志。"), GUILayout.Width(84)))
-                {
-                    EditorGUIUtility.systemCopyBuffer = BuildCopyOutput();
-                }
-
-                if (GUILayout.Button(new GUIContent(_showBottomOutput ? "收起" : "展开", "折叠或展开底部结果面板。"), GUILayout.Width(64)))
-                {
-                    _showBottomOutput = !_showBottomOutput;
-                }
-
-                EditorGUILayout.EndHorizontal();
-                if (!_showBottomOutput)
-                {
-                    EditorGUILayout.LabelField(FirstLine(BuildVisibleSummary()), EditorStyles.wordWrappedMiniLabel);
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
+                CancelActiveJob();
             }
 
+            if (GUILayout.Button(new GUIContent("复制输出", "复制摘要、命令和详细日志。"), GUILayout.Width(76), GUILayout.Height(22)))
+            {
+                EditorGUIUtility.systemCopyBuffer = BuildCopyOutput();
+            }
+
+            GUI.enabled = File.Exists(_lastResultPath);
+            if (GUILayout.Button(new GUIContent("打开 result", "在文件浏览器中显示最近一次 lifecycle result。"), GUILayout.Width(82), GUILayout.Height(22)))
+            {
+                EditorUtility.RevealInFinder(_lastResultPath);
+            }
+            GUI.enabled = true;
+
+            GUI.enabled = Directory.Exists(_lastLifecycleDir);
+            if (GUILayout.Button(new GUIContent("打开目录", "打开 Temp/ConfigSheetForge/unity-lifecycle。"), GUILayout.Width(76), GUILayout.Height(22)))
+            {
+                EditorUtility.RevealInFinder(_lastLifecycleDir);
+            }
+            GUI.enabled = true;
+
+            if (GUILayout.Button(new GUIContent("展开", "展开底部结果抽屉。"), GUILayout.Width(58), GUILayout.Height(22)))
+            {
+                SetBottomOutputExpanded(true);
+            }
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawOutputTab(bool fullPage, float preferredHeight)
+        {
+            DrawSectionTitle(fullPage ? "输出" : "最近结果");
+            if (fullPage)
+            {
+                EditorGUILayout.LabelField("查看命令和详细日志，平时不用看。", EditorStyles.wordWrappedMiniLabel);
+            }
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Height(preferredHeight), GUILayout.ExpandHeight(fullPage));
             EditorGUILayout.BeginHorizontal();
+            if (!fullPage && GUILayout.Button(new GUIContent("收起", "收起后底部只保留一行最近结果。"), GUILayout.Width(64)))
+            {
+                SetBottomOutputExpanded(false);
+            }
+
             if (GUILayout.Button(new GUIContent("复制完整命令", "复制最近一次完整命令。"), GUILayout.Width(116)))
             {
                 EditorGUIUtility.systemCopyBuffer = _lastCommand ?? "";
             }
 
-            if (expanded && GUILayout.Button(new GUIContent("复制输出", "复制命令输出。"), GUILayout.Width(104)))
+            if (GUILayout.Button(new GUIContent("复制输出", "复制命令输出。"), GUILayout.Width(104)))
             {
                 EditorGUIUtility.systemCopyBuffer = BuildCopyOutput();
             }
@@ -1059,17 +1377,17 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.LabelField("摘要", EditorStyles.boldLabel);
             var summaryStyle = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
             var summary = BuildVisibleSummary();
-            var summaryHeight = Math.Min(expanded ? 180f : 132f, Math.Max(72f, summaryStyle.CalcHeight(new GUIContent(summary), Math.Max(240f, EditorGUIUtility.currentViewWidth - 56f)) + 10f));
+            var summaryHeight = Math.Min(fullPage ? 180f : 132f, Math.Max(72f, summaryStyle.CalcHeight(new GUIContent(summary), Math.Max(240f, EditorGUIUtility.currentViewWidth - 56f)) + 10f));
             EditorGUILayout.SelectableLabel(summary, summaryStyle, GUILayout.Height(summaryHeight), GUILayout.ExpandWidth(true));
 
-            _showRecentCommand = EditorGUILayout.Foldout(_showRecentCommand, expanded ? "命令详情" : "查看完整命令", true);
+            _showRecentCommand = EditorGUILayout.Foldout(_showRecentCommand, fullPage ? "命令详情" : "查看完整命令", true);
             if (_showRecentCommand)
             {
                 DrawWrappedReadonlyBlock("", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
             }
 
-            var showLogs = expanded;
-            if (!expanded)
+            var showLogs = fullPage;
+            if (!fullPage)
             {
                 _showDetailedLogs = EditorGUILayout.Foldout(_showDetailedLogs, "详细日志 / result JSON", true);
                 showLogs = _showDetailedLogs;
@@ -1082,13 +1400,72 @@ namespace ConfigSheetForge.Unity.Editor
             if (showLogs)
             {
                 var outputStyle = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
-                var logHeight = Math.Max(80f, preferredHeight - summaryHeight - (expanded ? 190f : 210f));
+                var logHeight = Math.Max(80f, preferredHeight - summaryHeight - (fullPage ? 190f : 210f));
                 _outputScroll = EditorGUILayout.BeginScrollView(_outputScroll, false, true, GUILayout.Height(logHeight), GUILayout.ExpandHeight(true));
                 EditorGUILayout.TextArea(string.IsNullOrWhiteSpace(_output) ? "暂无详细日志。" : _output, outputStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
                 EditorGUILayout.EndScrollView();
             }
 
             EditorGUILayout.EndVertical();
+        }
+
+        private string BuildCollapsedResultText()
+        {
+            if (IsJobRunning && _activeJob != null)
+            {
+                return "最近结果：正在运行：" + _activeJob.Operation + " " + (_activeJob.DryRun ? "dry-run" : "apply") +
+                       "，" + FirstNonEmpty(_activeJob.Status, "处理中") + "。可取消或切到“输出”查看日志。";
+            }
+
+            var summary = BuildVisibleSummary();
+            var state = FirstLine(summary);
+            var operation = ExtractSummaryValue(summary, "操作");
+            var nextStep = BuildCollapsedNextStep(state);
+            return "最近结果：" + FirstNonEmpty(state, "暂无结果") +
+                   (string.IsNullOrWhiteSpace(operation) ? "" : "，操作：" + operation) +
+                   "。下一步：" + nextStep;
+        }
+
+        private static string BuildCollapsedNextStep(string state)
+        {
+            state = state ?? "";
+            if (state.StartsWith("成功", StringComparison.OrdinalIgnoreCase))
+            {
+                return "继续下一步，或运行 PR 检查。";
+            }
+
+            if (state.StartsWith("失败", StringComparison.OrdinalIgnoreCase))
+            {
+                return "展开结果查看原因，处理后重试。";
+            }
+
+            if (state.StartsWith("已取消", StringComparison.OrdinalIgnoreCase))
+            {
+                return "按需重新预览。";
+            }
+
+            return "选择上方操作开始预览。";
+        }
+
+        private static string ExtractSummaryValue(string summary, string key)
+        {
+            if (string.IsNullOrWhiteSpace(summary) || string.IsNullOrWhiteSpace(key))
+            {
+                return "";
+            }
+
+            var normalized = summary.Replace("\r\n", "\n");
+            var prefix = key + ":";
+            foreach (var rawLine in normalized.Split('\n'))
+            {
+                var line = rawLine.Trim();
+                if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return line.Substring(prefix.Length).Trim();
+                }
+            }
+
+            return "";
         }
 
         private string BuildVisibleSummary()
@@ -1143,7 +1520,7 @@ namespace ConfigSheetForge.Unity.Editor
         {
             _resultSummary = summary ?? "";
             _output = details ?? "";
-            _showBottomOutput = false;
+            SetBottomOutputExpanded(false, persist: false);
             _showDetailedLogs = false;
             Repaint();
         }
@@ -1157,22 +1534,33 @@ namespace ConfigSheetForge.Unity.Editor
         {
             if (!_showBottomOutput)
             {
-                return 58f;
+                return CollapsedOutputBarHeight;
             }
 
-            if (_bottomOutputHeight <= 0f)
+            var maxByWindow = Math.Max(MinBottomDrawerHeight, position.height - 260f);
+            var maxByFraction = Math.Max(MinBottomDrawerHeight, position.height * 0.45f);
+            var max = Math.Min(maxByWindow, maxByFraction);
+            if (_bottomOutputHeight <= 0f || float.IsNaN(_bottomOutputHeight))
             {
-                _bottomOutputHeight = Math.Max(240f, position.height * 0.34f);
+                _bottomOutputHeight = Mathf.Clamp(position.height * 0.32f, MinBottomDrawerHeight, max);
             }
 
-            var max = Math.Max(240f, position.height - 280f);
-            if (position.height > 780f && Math.Abs(_bottomOutputHeight - 260f) < 2f)
-            {
-                _bottomOutputHeight = Math.Max(_bottomOutputHeight, position.height * 0.38f);
-            }
-
-            _bottomOutputHeight = Mathf.Clamp(_bottomOutputHeight, 220f, max);
+            _bottomOutputHeight = Mathf.Clamp(_bottomOutputHeight, MinBottomDrawerHeight, max);
             return _bottomOutputHeight;
+        }
+
+        private void SetBottomOutputExpanded(bool expanded)
+        {
+            SetBottomOutputExpanded(expanded, persist: true);
+        }
+
+        private void SetBottomOutputExpanded(bool expanded, bool persist)
+        {
+            _showBottomOutput = expanded;
+            if (persist)
+            {
+                EditorPrefs.SetBool(BottomOutputExpandedPrefKey, expanded);
+            }
         }
 
         private void DrawOutputResizeHandle()
@@ -1196,13 +1584,16 @@ namespace ConfigSheetForge.Unity.Editor
             }
             else if (Event.current.type == EventType.MouseDrag && _isResizingOutputPanel)
             {
-                _bottomOutputHeight = Mathf.Clamp(_bottomOutputHeight - Event.current.delta.y, 220f, Math.Max(240f, position.height - 280f));
+                var maxByWindow = Math.Max(MinBottomDrawerHeight, position.height - 260f);
+                var maxByFraction = Math.Max(MinBottomDrawerHeight, position.height * 0.55f);
+                _bottomOutputHeight = Mathf.Clamp(_bottomOutputHeight - Event.current.delta.y, MinBottomDrawerHeight, Math.Min(maxByWindow, maxByFraction));
                 Repaint();
                 Event.current.Use();
             }
             else if (Event.current.type == EventType.MouseUp && _isResizingOutputPanel)
             {
                 _isResizingOutputPanel = false;
+                EditorPrefs.SetFloat(BottomOutputHeightPrefKey, _bottomOutputHeight);
                 Event.current.Use();
             }
         }
@@ -1235,7 +1626,7 @@ namespace ConfigSheetForge.Unity.Editor
                 _lastCompletedDryRun = _activeJob.DryRun;
                 _lastCompletedSuccess = _activeJob.Success;
                 _lastCompletedInputFingerprint = _activeJob.InputFingerprint;
-                _showBottomOutput = false;
+                SetBottomOutputExpanded(false, persist: false);
                 _showDetailedLogs = false;
                 _activeJob = null;
                 if (refresh)
@@ -1318,7 +1709,7 @@ namespace ConfigSheetForge.Unity.Editor
             _outputScroll = Vector2.zero;
             _resultSummary = job.BuildLiveSummary();
             _output = job.StartOutput;
-            _showBottomOutput = false;
+            SetBottomOutputExpanded(false, persist: false);
             _showDetailedLogs = false;
             job.Start();
             Repaint();
@@ -1478,6 +1869,12 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
         }
 
+        private static void DrawTabIntro(string title, string oneLine)
+        {
+            DrawSectionTitle(title);
+            EditorGUILayout.LabelField(oneLine, EditorStyles.wordWrappedMiniLabel);
+        }
+
         private List<WorkflowStatusCard> BuildWorkflowStatusCards(string projectRoot)
         {
             var cards = new List<WorkflowStatusCard>();
@@ -1487,7 +1884,7 @@ namespace ConfigSheetForge.Unity.Editor
             cards.Add(new WorkflowStatusCard(
                 "分支工作区",
                 branchBound ? "已绑定" : "未绑定",
-                branchBound ? "已找到当前分支对应的在线工作区。" : "先预览同步计划，确认 BranchBindings 是否缺失或权限不足。",
+                branchBound ? "已找到当前分支对应的在线工作区。" : "先预览同步计划，确认是否还没绑定或权限不足。",
                 branchBound ? WorkflowStatusKind.Ok : WorkflowStatusKind.Warning));
             cards.Add(new WorkflowStatusCard(
                 "在线表",
@@ -2165,7 +2562,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (!BranchLooksBound())
             {
-                return "当前分支还没有可用 BranchBindings。";
+                return "当前分支还没有绑定在线工作区。";
             }
 
             if (OnlineTablesReadable())
@@ -2175,10 +2572,10 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (_projectConfig.CurrentBranchTables.Count == 0)
             {
-                return "没有从 ConfigSheets 读到当前分支在线表。";
+                return "还没找到当前分支的在线表记录。";
             }
 
-            return "有表缺少 Sheet token、sheet id 或被权限阻断。";
+            return "有表缺少在线链接、工作表 ID，或被权限阻断。";
         }
 
         private bool BranchLooksBound()
@@ -2398,10 +2795,10 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeToken) && string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeUrl))
             {
-                return "暂时没有读到当前分支的 BranchBindings。可能是未绑定分支、bot 权限不足，或最近还没有生成 sync-cache dry-run 结果。";
+                return "暂时没有读到当前分支的在线工作区。可能是未绑定分支、权限不足，或最近还没有预览同步计划。下一步：先点“预览同步计划”。";
             }
 
-            return "当前 branch/profile 下没有 ConfigSheets 记录，或记录缺少 TableId / Sheet token。";
+            return "当前分支没有在线表记录，或记录缺少表 ID / 在线表链接。下一步：确认这个分支是否已经 Seed；如果要迁移旧 Excel，请展开“本地 Excel Seed”。";
         }
 
         private static string BuildSheetLocationText(ProjectConfigTableSummary table)
@@ -3147,8 +3544,8 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 return new GateFailureView
                 {
-                    Reason = "分支工作区未绑定或绑定冲突",
-                    NextStep = "先预览同步计划，确认当前分支对应的 BranchBindings 记录唯一且有效。",
+                    Reason = "当前分支的在线工作区未绑定或绑定冲突",
+                    NextStep = "先预览同步计划，确认当前分支只对应一个有效在线工作区；权限不足时请找配置负责人处理。",
                     Priority = 50
                 };
             }
@@ -3157,8 +3554,8 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 return new GateFailureView
                 {
-                    Reason = "未读取到当前分支在线表",
-                    NextStep = "先预览同步计划；如果仍失败，请检查 ConfigSheets 是否缺 Sheet token / sheet id 或权限不足。",
+                    Reason = "当前分支没有在线表记录",
+                    NextStep = "先确认这个分支是否已经 Seed；如果只是预览新分支，请点“预览同步计划”；如果要迁移旧 Excel，请展开“本地 Excel Seed”。",
                     Priority = 60
                 };
             }

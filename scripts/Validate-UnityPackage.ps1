@@ -211,15 +211,42 @@ foreach ($requiredText in @("BuildLifecycleInputsJson", "--inputs", "gateReportP
   }
 }
 
-foreach ($requiredUiText in @("当前状态", "PR 合并上下文", "结果摘要", "详细日志", "预览同步计划", "预览新建配表", "预览本地 Excel Seed", "PR 还不能合并")) {
+foreach ($requiredUiText in @("当前状态", "推荐下一步", "我该做什么", "配表 Source of Truth 怎么用？", "PR 合并上下文", "结果摘要", "详细日志", "预览同步计划", "预览新建配表", "预览本地 Excel Seed", "PR 还不能合并")) {
   if ($window -notlike "*$requiredUiText*") {
     throw "Unity workflow UI is missing expected user-facing text: $requiredUiText"
+  }
+}
+
+foreach ($requiredLayoutText in @("CollapsedOutputBarHeight = 34f", "DrawCollapsedOutputStatusBar", "BottomOutputExpandedPrefKey", "BottomOutputHeightPrefKey", "SetBottomOutputExpanded", "OnboardingDismissedPrefKey", "ShowHelpMenu", "documentationTargets")) {
+  if ($window -notlike "*$requiredLayoutText*") {
+    throw "Unity output drawer layout is missing expected source marker: $requiredLayoutText"
+  }
+}
+
+if (-not (Test-Path docs/unity-window.md)) {
+  throw "Unity window tutorial docs/unity-window.md is required."
+}
+
+$collapsedMatch = [regex]::Match($window, "private void DrawCollapsedOutputStatusBar\(\)(?<body>[\s\S]*?)\r?\n        private void DrawOutputTab")
+if (-not $collapsedMatch.Success) {
+  throw "Could not inspect collapsed output status bar implementation."
+}
+$collapsedBody = $collapsedMatch.Groups["body"].Value
+foreach ($forbiddenCollapsedLayout in @("BeginScrollView", "ExpandHeight")) {
+  if ($collapsedBody -like "*$forbiddenCollapsedLayout*") {
+    throw "Collapsed output status bar must not allocate drawer-style layout: $forbiddenCollapsedLayout"
   }
 }
 
 foreach ($retiredUiText in @("当前工作流", "合并输入", "passed=false", "failures=")) {
   if ($window -like "*$retiredUiText*") {
     throw "Unity workflow UI still contains retired debug text: $retiredUiText"
+  }
+}
+
+foreach ($retiredLayoutText in @("GUILayout.MaxHeight(contentHeight)", "return 58f;")) {
+  if ($window -like "*$retiredLayoutText*") {
+    throw "Unity output drawer still contains retired collapsed-layout code: $retiredLayoutText"
   }
 }
 

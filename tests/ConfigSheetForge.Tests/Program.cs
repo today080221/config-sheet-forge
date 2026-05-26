@@ -39,6 +39,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("project config probe reads lifecycle summary", () => RunSync(ProjectConfigProbeReadsLifecycleSummary)),
     ("project config probe skips registry base table ids", () => RunSync(ProjectConfigProbeSkipsRegistryBaseTableIds)),
     ("project config probe derives branch workspace names", () => RunSync(ProjectConfigProbeDerivesBranchWorkspaceNames)),
+    ("project config probe reads documentation targets", () => RunSync(ProjectConfigProbeReadsDocumentationTargets)),
     ("project config probe ignores local state registry", () => RunSync(ProjectConfigProbeIgnoresLocalStateRegistry)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
     ("apply-contract sync-cache apply requires confirmation", ApplyContractSyncCacheApplyRequiresConfirmation),
@@ -940,6 +941,36 @@ static void ProjectConfigProbeDerivesBranchWorkspaceNames()
     AssertEqual("branch-codex-config-sheet-seed-feishu-main", summary.BranchWikiNodeTitle, "branch node title should use the slug template.");
     AssertEqual("BuIEwbzcNiEYIfkj3Aac2kfOnvc", summary.BranchWikiNodeToken, "matching BranchBindings token should hydrate the branch node.");
     AssertEqual("https://example.feishu.cn/wiki/BuIEwbzcNiEYIfkj3Aac2kfOnvc", summary.BranchWikiNodeUrl, "wiki token should render as a URL when a root wiki URL provides the host.");
+}
+
+static void ProjectConfigProbeReadsDocumentationTargets()
+{
+    var json = """
+    {
+      "documentationTargets": {
+        "5 分钟入门": "docs/tooling/config-sheet-source-of-truth.md",
+        "Feishu entry": "https://example.feishu.cn/wiki/root"
+      },
+      "toolkit": {
+        "localDocs": [
+          "docs/tooling/designer-flow.md"
+        ],
+        "documentationTargets": {
+          "PR 合并流程": {
+            "title": "PR 合并流程",
+            "path": "docs/tooling/pr-merge.md"
+          }
+        }
+      }
+    }
+    """;
+
+    var summary = ProjectConfigProbe.ProbeJson("ProjectSettings/Example.ConfigSheetForge.json", json);
+
+    AssertEqual("docs/tooling/config-sheet-source-of-truth.md", summary.DocumentationTargets["5 分钟入门"], "named doc link should be read.");
+    AssertEqual("https://example.feishu.cn/wiki/root", summary.DocumentationTargets["Feishu entry"], "feishu doc link should be read.");
+    AssertEqual("docs/tooling/designer-flow.md", summary.DocumentationTargets["projectDocs"], "localDocs should become project docs.");
+    AssertEqual("docs/tooling/pr-merge.md", summary.DocumentationTargets["PR 合并流程"], "object doc target should use path.");
 }
 
 static void ProjectConfigProbeIgnoresLocalStateRegistry()
