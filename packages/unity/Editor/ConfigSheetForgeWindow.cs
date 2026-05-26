@@ -190,7 +190,7 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void DrawHeader()
         {
-            EditorGUILayout.Space(6);
+            GUILayout.Space(6);
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField("配表 Source of Truth", EditorStyles.boldLabel);
             if (GUILayout.Button(new GUIContent("文档", "打开入门文档。"), GUILayout.Width(64)))
@@ -200,11 +200,11 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("复制 UPM", "复制通过 Unity Package Manager 安装此包的 Git URL。"), GUILayout.Width(88)))
             {
-                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.9";
+                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.10";
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("飞书在线 Sheet 是 Source of Truth，本地 Excel 只是兼容缓存。", EditorStyles.miniLabel);
-            EditorGUILayout.Space(4);
+            GUILayout.Space(4);
         }
 
         private void DrawActiveJobStatus()
@@ -1208,7 +1208,7 @@ namespace ConfigSheetForge.Unity.Editor
 
         private static void DrawSectionTitle(string title)
         {
-            EditorGUILayout.Space(8);
+            GUILayout.Space(8);
             EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
         }
 
@@ -2434,6 +2434,54 @@ namespace ConfigSheetForge.Unity.Editor
             var rest = valueStart < json.Length ? json.Substring(valueStart) : "";
             var endIndex = rest.IndexOfAny(new[] { ',', '}', '\r', '\n' });
             return (endIndex >= 0 ? rest.Substring(0, endIndex) : rest).Trim().Trim('"');
+        }
+
+        private static string ParseJsonString(string json, int start, out int end)
+        {
+            var builder = new StringBuilder();
+            var escaped = false;
+            for (var i = start + 1; i < json.Length; i++)
+            {
+                var c = json[i];
+                if (escaped)
+                {
+                    builder.Append(Unescape(c));
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    end = i;
+                    return builder.ToString();
+                }
+
+                builder.Append(c);
+            }
+
+            end = json.Length - 1;
+            return builder.ToString();
+        }
+
+        private static char Unescape(char c)
+        {
+            switch (c)
+            {
+                case 'n':
+                    return '\n';
+                case 'r':
+                    return '\r';
+                case 't':
+                    return '\t';
+                default:
+                    return c;
+            }
         }
 
         private static void AddUnique(List<string> values, string value)

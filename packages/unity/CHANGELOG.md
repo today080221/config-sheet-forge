@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.10
+
+- 修复 v0.4.9 Unity Editor assembly 编译失败：`ConfigSheetForgeWindow.ExtractJsonString` 现在使用窗口类内可见的 JSON string parser，不再误调用 helper class 私有方法。
+- 将 `EditorGUILayout.Space(float)` 改为 `GUILayout.Space(float)`，提升 Unity managed assembly smoke 的兼容性。
+- `Validate-UnityPackage.ps1` 新增真实 Editor assembly 编译 smoke，会生成临时 `ConfigSheetForge.Core.dll` 和 `ConfigSheetForge.Editor.dll`，CI 可捕获 CS0103 这类 Unity asmdef 编译错误。
+
 ## 0.4.9
 
 - Unity 首页固定展示当前分支、Feishu branch/profile、在线表可读状态、cache 状态、PR gate 和下一步建议；CLI、路径、Wiki token/url、复制命令等工程信息默认收进“高级诊断”。

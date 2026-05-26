@@ -64,7 +64,7 @@ branch/profile 工作区由 contract 的 `branchWorkspace` 和 `branchBindings` 
 ## Unity UPM 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.9
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.10
 ```
 
 安装后打开 `Tools > Config Sheet Forge` 或 `Tools > Config Sheet Forge > 打开同步窗口`。下游 Unity 项目推荐只保留薄菜单 adapter 和 `ProjectSettings/*ConfigSheetForge*.json` 项目配置，通用窗口、向导、contract 执行、三方比较和 gate UI 都由本包维护。
