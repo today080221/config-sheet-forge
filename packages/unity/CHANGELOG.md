@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.8
+
+- Unity lifecycle 操作改为后台 job 执行，seed、sync-cache、compare-merge、pr-gate-report 不再在 IMGUI MouseUp 链路同步 `WaitForExit`。
+- 后台 job 实时追加日志、展示阶段状态、运行中禁用相关按钮，并提供取消按钮终止进程树。
+- 输出区改为“摘要 + 详细日志”结构，dry-run 成功后优先显示成功/失败、模式、planned actions、branch node、result path 和是否写 cache。
+- 输出面板随窗口高度扩展；输出 tab 改为日志/报告主视图，最近命令默认折叠，并保留复制命令、复制输出、打开 result 和 lifecycle 目录按钮。
+- 首页同步按钮改为“生成同步预览”，明确等同 dry-run，不写飞书、不改本地 cache、不改 ProjectSettings。
+
 ## 0.4.7
 
 - Unity `sync-cache` 按钮在项目 adapter 模式下改走 lifecycle adapter + `apply-contract`，dry-run/apply 均复用 contract 输入，不再绕过项目桥接直接调用裸 CLI。

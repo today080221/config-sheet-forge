@@ -344,6 +344,8 @@ public static class Program
             var tableProvider = CreateProvider(FirstNonEmpty(table.Provider, workspace.Config.Provider));
             var tableTemp = Path.Combine(Directory.GetCurrentDirectory(), "Temp", "ConfigSheetForge", "sync-cache-temp", Guid.NewGuid().ToString("N"), table.Id);
             Directory.CreateDirectory(tableTemp);
+            Console.WriteLine("[stage] 正在读取在线 Sheet: " + table.Id);
+            Console.WriteLine("[stage] 正在导出 xlsx: " + table.Id);
             var result = await tableProvider.ExportAsync(CreateProviderContext(workspace, args), new ProviderExportRequest
             {
                 RootTokenOrUrl = FirstNonEmpty(table.Spreadsheet, workspace.Config.RootUrl, workspace.Config.RootToken),
@@ -375,6 +377,7 @@ public static class Program
                 continue;
             }
 
+            Console.WriteLine("[stage] 正在三方一致性检查: " + table.Id);
             var xlsxPath = FindExportedXlsx(tableTemp, table.Id);
             if (string.IsNullOrWhiteSpace(xlsxPath))
             {
@@ -438,6 +441,7 @@ public static class Program
 
             if (!tableHasError)
             {
+                Console.WriteLine("[stage] 正在 hash gate: " + table.Id);
                 var hash = SemanticHasher.ComputeHash(result.Workbook);
                 var cacheWrite = await WriteCacheIfChangedAsync(cacheDirectory, table.Id, result.Workbook, hash, xlsxPath, excelCacheDirectory);
                 Console.WriteLine(table.Id + ": " + hash);

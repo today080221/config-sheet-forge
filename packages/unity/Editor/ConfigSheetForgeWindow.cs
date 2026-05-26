@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using ConfigSheetForge.Core;
 using UnityEditor;
 using UnityEngine;
@@ -42,12 +44,19 @@ namespace ConfigSheetForge.Unity.Editor
         private bool _confirmSyncApply;
         private bool _showAdvancedDiagnostics;
         private string _output = "";
+        private string _resultSummary = "";
         private string _lastCommand = "";
+        private string _lastResultPath = "";
+        private string _lastLifecycleDir = "";
+        private bool _showRecentCommand;
+        private bool _showDetailedLogs;
         private int _selectedTab;
         private ProjectConfigSummary _projectConfig = new ProjectConfigSummary();
         private string _currentGitBranch = "";
         private GateReportSummaryView _gateReportSummary = GateReportSummaryView.NotFound("");
         private ConfigSheetForgeCliInvocation _cliInvocation = ConfigSheetForgeCliInvocation.Unresolved("config-sheet-forge", "未刷新", "尚未解析 CLI。");
+        private ConfigSheetForgeBackgroundJob _activeJob;
+        private string _activeJobStatus = "";
         private Vector2 _mainScroll;
         private Vector2 _outputScroll;
 
@@ -104,20 +113,41 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void OnEnable()
         {
+            EditorApplication.update -= OnEditorUpdate;
+            EditorApplication.update += OnEditorUpdate;
             RefreshReadonlyStatus();
-            _output = "配表 Source of Truth 窗口已打开。" + Environment.NewLine +
-                      "这里只刷新本地状态，不会下载、不导出、不改文件。" + Environment.NewLine +
-                      "主流程只保留刷新状态、同步当前分支 cache、运行 PR 检查。";
+            _resultSummary = "配表 Source of Truth 窗口已打开。" + Environment.NewLine +
+                             "这里只刷新本地状态，不会下载、不导出、不改文件。" + Environment.NewLine +
+                             "主流程只保留刷新状态、生成同步预览、运行 PR 检查。";
+            _output = "";
+        }
+
+        private void OnDisable()
+        {
+            EditorApplication.update -= OnEditorUpdate;
+            if (IsJobRunning)
+            {
+                _activeJob.Cancel("窗口已关闭，已取消，未写本地 cache。");
+            }
         }
 
         private void OnGUI()
         {
             DrawHeader();
             DrawProjectSummary();
+            DrawActiveJobStatus();
 
             _selectedTab = GUILayout.Toolbar(_selectedTab, Tabs);
 
-            _mainScroll = EditorGUILayout.BeginScrollView(_mainScroll);
+            if (_selectedTab == 4)
+            {
+                DrawOutputTab(expanded: true, preferredHeight: Math.Max(320f, position.height - 230f));
+                return;
+            }
+
+            var outputHeight = CalculateInlineOutputHeight();
+            var contentHeight = Math.Max(180f, position.height - outputHeight - 260f);
+            _mainScroll = EditorGUILayout.BeginScrollView(_mainScroll, GUILayout.MaxHeight(contentHeight), GUILayout.ExpandHeight(false));
             switch (_selectedTab)
             {
                 case 0:
@@ -132,17 +162,10 @@ namespace ConfigSheetForge.Unity.Editor
                 case 3:
                     DrawGateTab();
                     break;
-                default:
-                    DrawOutputTab(expanded: true);
-                    break;
-            }
-
-            if (_selectedTab != 4)
-            {
-                DrawOutputTab(expanded: false);
             }
 
             EditorGUILayout.EndScrollView();
+            DrawOutputTab(expanded: false, preferredHeight: outputHeight);
         }
 
         private void DrawHeader()
@@ -157,11 +180,37 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("复制 UPM", "复制通过 Unity Package Manager 安装此包的 Git URL。"), GUILayout.Width(88)))
             {
-                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.7";
+                EditorGUIUtility.systemCopyBuffer = "https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.8";
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("飞书在线 Sheet 是 Source of Truth，本地 Excel 只是兼容缓存。", EditorStyles.miniLabel);
             EditorGUILayout.Space(4);
+        }
+
+        private void DrawActiveJobStatus()
+        {
+            if (!IsJobRunning)
+            {
+                return;
+            }
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(FirstNonEmpty(_activeJobStatus, "后台任务运行中"), EditorStyles.wordWrappedLabel);
+            if (GUILayout.Button(new GUIContent("取消", "终止当前 adapter / CLI / lark-cli 进程树。"), GUILayout.Width(80)))
+            {
+                CancelActiveJob();
+            }
+            EditorGUILayout.EndHorizontal();
+            if (_activeJob != null && _activeJob.DryRun)
+            {
+                EditorGUILayout.HelpBox("dry-run：只生成预览，不写飞书、不改本地 cache、不改 ProjectSettings。", MessageType.Info);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox("任务在后台运行；窗口仍可滚动、复制命令和切换 tab。运行中会禁用相关执行按钮，避免重复点击。", MessageType.Info);
+            }
+            EditorGUILayout.EndVertical();
         }
 
         private void DrawProjectSummary()
@@ -198,19 +247,21 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 RefreshReadonlyStatus();
                 _lastCommand = "只读刷新状态";
-                _output = "已刷新状态。没有下载、导出或写入任何文件。";
+                _resultSummary = "已刷新状态。没有下载、导出或写入任何文件。";
+                _output = "";
             }
 
-            if (GUILayout.Button(new GUIContent("同步当前分支 cache", "先生成 dry-run 预览；不会写飞书，也不会改本地 cache。"), GUILayout.Height(32)))
+            if (DrawJobButton(new GUIContent("生成同步预览", "等同于同步页 dry-run；不会写飞书，也不会改本地 cache。"), GUILayout.Height(32)))
             {
                 RunSyncCache(apply: false);
             }
 
-            if (GUILayout.Button(new GUIContent("运行 PR 检查", "生成最近一次 pr-gate-report，按钮旁和 PR 检查页会显示摘要。"), GUILayout.Height(32)))
+            if (DrawJobButton(new GUIContent("运行 PR 检查", "生成最近一次 pr-gate-report，按钮旁和 PR 检查页会显示摘要。"), GUILayout.Height(32)))
             {
                 RunPrGateReport();
             }
             EditorGUILayout.EndHorizontal();
+            EditorGUILayout.LabelField("“生成同步预览”等同于 sync-cache dry-run，只生成计划，不写飞书、不改本地 cache、不改 ProjectSettings。", EditorStyles.wordWrappedMiniLabel);
 
             DrawCurrentBranchTables(compact: true);
             DrawSyncCacheModeCard();
@@ -245,7 +296,7 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("doctor --details", "运行 doctor --details，确认 CLI、lark-cli、权限和本地配置状态。"), GUILayout.Height(24)))
+            if (DrawJobButton(new GUIContent("doctor --details", "运行 doctor --details，确认 CLI、lark-cli、权限和本地配置状态。"), GUILayout.Height(24)))
             {
                 RunCli("doctor", "--details");
             }
@@ -254,8 +305,9 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 var report = SchemaReviewer.Review(CreateSmokeWorkbook());
                 _lastCommand = "Shared core smoke check";
-                _output = "Shared core smoke findings: " + report.Findings.Count + Environment.NewLine +
-                          "Semantic hash: " + SemanticHasher.ComputeHash(CreateSmokeWorkbook());
+                SetImmediateOutput(
+                    "Shared core smoke 已完成。" + Environment.NewLine + "Findings: " + report.Findings.Count,
+                    "Semantic hash: " + SemanticHasher.ComputeHash(CreateSmokeWorkbook()));
             }
 
             if (GUILayout.Button(new GUIContent("打开缓存目录", "在文件浏览器中显示 .config-sheet-forge/cache。"), GUILayout.Height(24)))
@@ -266,7 +318,7 @@ namespace ConfigSheetForge.Unity.Editor
 
             _rootQuery = EditorGUILayout.TextField(new GUIContent("Root 搜索", "飞书/Lark 文档标题的一部分。"), _rootQuery);
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("查找候选根文档", "只列出候选根文档，不会自动选择。"), GUILayout.Height(24)))
+            if (DrawJobButton(new GUIContent("查找候选根文档", "只列出候选根文档，不会自动选择。"), GUILayout.Height(24)))
             {
                 RunCli("discover-root", "--query", _rootQuery);
             }
@@ -345,19 +397,19 @@ namespace ConfigSheetForge.Unity.Editor
             _range = EditorGUILayout.TextField(new GUIContent("读取范围", "A1 范围，例如 A1:Z500。"), _range);
 
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("登记本地表", "添加或更新本地 registry.json。项目 Source of Truth 流程请优先使用 contract。"), GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("登记本地表", "添加或更新本地 registry.json。项目 Source of Truth 流程请优先使用 contract。"), GUILayout.Height(28)))
             {
                 RunCli("new-table", "--id", _tableId, "--name", _tableName, "--spreadsheet", _spreadsheet, "--sheet-id", _sheetId, "--range", _range);
             }
 
-            if (GUILayout.Button(new GUIContent("同步单表", "导出/读取此表并计算 semantic hash。"), GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("同步单表", "导出/读取此表并计算 semantic hash。"), GUILayout.Height(28)))
             {
                 RunCli("sync", "--table", _tableId);
             }
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("同步全部", "同步本地 registry 里的全部表。"), GUILayout.Height(24)))
+            if (DrawJobButton(new GUIContent("同步全部", "同步本地 registry 里的全部表。"), GUILayout.Height(24)))
             {
                 RunCli("sync");
             }
@@ -396,7 +448,7 @@ namespace ConfigSheetForge.Unity.Editor
             _mergedPath = EditorGUILayout.TextField(new GUIContent("合并结果", "合并后的 semantic workbook JSON 路径。"), _mergedPath);
 
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("生成合并预览", "生成三方合并报告和合并预览。"), GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("生成合并预览", "生成三方合并报告和合并预览。"), GUILayout.Height(28)))
             {
                 RunCli("merge", "--base", _basePath, "--ours", _oursPath, "--theirs", _theirsPath, "--out", _mergeReportPath, "--merged", _mergedPath);
             }
@@ -416,11 +468,11 @@ namespace ConfigSheetForge.Unity.Editor
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.BeginHorizontal();
-            if (_projectConfig.Exists && GUILayout.Button(new GUIContent("生成 PR gate report", "通过项目 adapter 生成 pr-gate-report contract，再由 core 输出 gate report。"), GUILayout.Height(28)))
+            if (_projectConfig.Exists && DrawJobButton(new GUIContent("生成 PR gate report", "通过项目 adapter 生成 pr-gate-report contract，再由 core 输出 gate report。"), GUILayout.Height(28)))
             {
                 RunPrGateReport();
             }
-            else if (!_projectConfig.Exists && GUILayout.Button(new GUIContent("运行 Gate", "检查 semantic cache 和同步报告。"), GUILayout.Height(28)))
+            else if (!_projectConfig.Exists && DrawJobButton(new GUIContent("运行 Gate", "检查 semantic cache 和同步报告。"), GUILayout.Height(28)))
             {
                 RunCli("gate", "--details");
             }
@@ -486,23 +538,22 @@ namespace ConfigSheetForge.Unity.Editor
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("同步当前分支 cache", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("dry-run 只生成预览，不写飞书、不改本地 cache。apply 会在线读取、导出 xlsx、做三方一致性检查，并且只有内容变化时才重写 cache。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("生成 dry-run 预览与首页“生成同步预览”等价：只生成计划，不写飞书、不改本地 cache、不改 ProjectSettings。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("apply 只有勾选确认并通过弹窗后才会执行；它会读取在线 Sheet、导出 xlsx、完成三方一致性检查和 hash gate 后，才可能更新本地 cache。", EditorStyles.wordWrappedLabel);
             _confirmSyncApply = EditorGUILayout.Toggle(new GUIContent("确认执行 apply", "apply 会更新 .config-sheet-forge/cache 和 excel-cache；必须先确认。"), _confirmSyncApply);
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("生成 dry-run 预览", "读取在线注册中心并生成同步计划，不改本地 cache。"), GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("生成 dry-run 预览", "读取在线注册中心并生成同步计划，不改本地 cache。"), GUILayout.Height(28)))
             {
                 RunSyncCache(apply: false);
             }
 
-            GUI.enabled = _confirmSyncApply;
-            if (GUILayout.Button(new GUIContent("执行 apply", "危险操作：会更新本地 cache；需要先确认。"), GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("执行 apply", "危险操作：会更新本地 cache；需要先确认。"), _confirmSyncApply, GUILayout.Height(28)))
             {
                 if (EditorUtility.DisplayDialog("确认同步 cache", "将读取当前 branch/profile 的在线 Sheet，导出 xlsx，三方一致后更新本地 cache。无变化时会显示“无变化，未重写 cache”。", "确认执行", "取消"))
                 {
                     RunSyncCache(apply: true);
                 }
             }
-            GUI.enabled = true;
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.EndVertical();
         }
@@ -563,7 +614,7 @@ namespace ConfigSheetForge.Unity.Editor
                     EditorGUILayout.LabelField("dry-run 预览会展示：创建 Sheet、写模板三行、登记 Base、更新 ExcelToSO、创建 SchemaReviews。", EditorStyles.wordWrappedMiniLabel);
                 }
 
-                if (GUILayout.Button(new GUIContent(ProjectButtonLabel(buttonLabel, operation), "先生成 contract，再运行 apply-contract。dry-run 不写飞书、不改本地文件。"), GUILayout.Height(28)))
+                if (DrawJobButton(new GUIContent(ProjectButtonLabel(buttonLabel, operation), "先生成 contract，再运行 apply-contract。dry-run 不写飞书、不改本地文件。"), GUILayout.Height(28)))
                 {
                     RunProjectLifecycle(operation, EffectiveDryRun(operation, dryRun));
                 }
@@ -582,30 +633,39 @@ namespace ConfigSheetForge.Unity.Editor
             _confirmSeedExcelToSo = EditorGUILayout.Toggle(new GUIContent("确认更新 ExcelToSO settings", "允许只追加/更新目标表的 ExcelToSO JSON/YAML settings。"), _confirmSeedExcelToSo);
 
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("生成 seed dry-run", "生成 seed-from-local-xlsx contract 并运行 dry-run，不写飞书、不改本地文件。"), GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("生成 seed dry-run", "生成 seed-from-local-xlsx contract 并运行 dry-run，不写飞书、不改本地文件。"), GUILayout.Height(28)))
             {
                 RunProjectLifecycle("seed-from-local-xlsx", dryRun: true);
             }
 
-            GUI.enabled = _confirmSeedApply && _confirmSeedExcelToSo;
-            if (GUILayout.Button(new GUIContent("执行 seed apply", "危险操作：必须先 dry-run 通过，再显式确认。"), GUILayout.Height(28)))
+            if (DrawJobButton(new GUIContent("执行 seed apply", "危险操作：必须先 dry-run 通过，再显式确认。"), _confirmSeedApply && _confirmSeedExcelToSo, GUILayout.Height(28)))
             {
                 if (EditorUtility.DisplayDialog("确认 seed apply", "将把本地 xlsx 迁移到在线 Sheet，并在三方一致后回填 cache、项目配置、Base 和 ExcelToSO settings。请确认 dry-run 已通过。", "确认执行", "取消"))
                 {
                     RunProjectLifecycle("seed-from-local-xlsx", dryRun: false);
                 }
             }
-            GUI.enabled = true;
 
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.EndVertical();
         }
 
-        private void DrawOutputTab(bool expanded)
+        private void DrawOutputTab(bool expanded, float preferredHeight)
         {
-            DrawSectionTitle("命令输出");
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            DrawWrappedReadonlyBlock("最近命令", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
+            DrawSectionTitle(expanded ? "输出" : "最近结果");
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Height(preferredHeight), GUILayout.ExpandHeight(expanded));
+            if (expanded)
+            {
+                _showRecentCommand = EditorGUILayout.Foldout(_showRecentCommand, "最近命令", true);
+                if (_showRecentCommand)
+                {
+                    DrawWrappedReadonlyBlock("", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
+                }
+            }
+            else
+            {
+                DrawWrappedReadonlyBlock("最近命令", string.IsNullOrWhiteSpace(_lastCommand) ? "（暂无）" : _lastCommand, "此窗口最近启动的命令。");
+            }
 
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button(new GUIContent("复制完整命令", "复制最近一次完整命令。"), GUILayout.Width(116)))
@@ -615,20 +675,237 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("复制输出", "复制命令输出。"), GUILayout.Width(104)))
             {
-                EditorGUIUtility.systemCopyBuffer = _output ?? "";
+                EditorGUIUtility.systemCopyBuffer = BuildCopyOutput();
             }
+
+            GUI.enabled = File.Exists(_lastResultPath);
+            if (GUILayout.Button(new GUIContent("打开 result 文件", "在文件浏览器中显示最近一次 lifecycle result。"), GUILayout.Width(116)))
+            {
+                EditorUtility.RevealInFinder(_lastResultPath);
+            }
+            GUI.enabled = true;
+
+            GUI.enabled = Directory.Exists(_lastLifecycleDir);
+            if (GUILayout.Button(new GUIContent("打开 lifecycle 目录", "打开 Temp/ConfigSheetForge/unity-lifecycle。"), GUILayout.Width(136)))
+            {
+                EditorUtility.RevealInFinder(_lastLifecycleDir);
+            }
+            GUI.enabled = true;
 
             if (GUILayout.Button(new GUIContent("清空", "清空输出面板。"), GUILayout.Width(72)))
             {
                 _output = "";
+                _resultSummary = "";
             }
             EditorGUILayout.EndHorizontal();
 
-            var outputStyle = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
-            _outputScroll = EditorGUILayout.BeginScrollView(_outputScroll, false, true, GUILayout.MinHeight(expanded ? 260 : 140));
-            EditorGUILayout.TextArea(string.IsNullOrWhiteSpace(_output) ? "暂无命令输出。" : _output, outputStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
-            EditorGUILayout.EndScrollView();
+            EditorGUILayout.LabelField("摘要", EditorStyles.boldLabel);
+            var summaryStyle = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
+            var summary = BuildVisibleSummary();
+            var summaryHeight = Math.Min(expanded ? 180f : 132f, Math.Max(72f, summaryStyle.CalcHeight(new GUIContent(summary), Math.Max(240f, EditorGUIUtility.currentViewWidth - 56f)) + 10f));
+            EditorGUILayout.SelectableLabel(summary, summaryStyle, GUILayout.Height(summaryHeight), GUILayout.ExpandWidth(true));
+
+            _showDetailedLogs = EditorGUILayout.Foldout(_showDetailedLogs || IsJobRunning, "详细日志", true);
+            if (_showDetailedLogs || IsJobRunning)
+            {
+                var outputStyle = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
+                var logHeight = Math.Max(80f, preferredHeight - summaryHeight - (expanded ? 160f : 180f));
+                _outputScroll = EditorGUILayout.BeginScrollView(_outputScroll, false, true, GUILayout.Height(logHeight), GUILayout.ExpandHeight(true));
+                EditorGUILayout.TextArea(string.IsNullOrWhiteSpace(_output) ? "暂无详细日志。" : _output, outputStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+                EditorGUILayout.EndScrollView();
+            }
+
             EditorGUILayout.EndVertical();
+        }
+
+        private string BuildVisibleSummary()
+        {
+            if (IsJobRunning && _activeJob != null)
+            {
+                return _activeJob.BuildLiveSummary();
+            }
+
+            return string.IsNullOrWhiteSpace(_resultSummary) ? "暂无结果摘要。" : _resultSummary;
+        }
+
+        private string BuildCopyOutput()
+        {
+            var builder = new StringBuilder();
+            if (!string.IsNullOrWhiteSpace(_resultSummary))
+            {
+                builder.AppendLine("摘要:");
+                builder.AppendLine(_resultSummary.TrimEnd());
+                builder.AppendLine();
+            }
+
+            if (!string.IsNullOrWhiteSpace(_lastCommand))
+            {
+                builder.AppendLine("最近命令:");
+                builder.AppendLine(_lastCommand.TrimEnd());
+                builder.AppendLine();
+            }
+
+            if (!string.IsNullOrWhiteSpace(_output))
+            {
+                builder.AppendLine("详细日志:");
+                builder.AppendLine(_output.TrimEnd());
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        private void SetImmediateOutput(string summary, string details)
+        {
+            _resultSummary = summary ?? "";
+            _output = details ?? "";
+            _showDetailedLogs = !string.IsNullOrWhiteSpace(_output);
+            Repaint();
+        }
+
+        private bool IsJobRunning
+        {
+            get { return _activeJob != null && !_activeJob.IsFinished; }
+        }
+
+        private float CalculateInlineOutputHeight()
+        {
+            var height = Math.Max(220f, position.height * 0.36f);
+            if (position.height > 760f)
+            {
+                height = Math.Max(height, position.height - 520f);
+            }
+
+            return Math.Min(height, Math.Max(220f, position.height - 280f));
+        }
+
+        private void OnEditorUpdate()
+        {
+            if (_activeJob == null)
+            {
+                return;
+            }
+
+            var changed = DrainActiveJobOutput();
+            _activeJobStatus = _activeJob.Status;
+            if (!_activeJob.IsFinished)
+            {
+                _resultSummary = _activeJob.BuildLiveSummary();
+            }
+            if (_activeJob.IsFinished)
+            {
+                changed = DrainActiveJobOutput() || changed;
+                var refresh = _activeJob.RefreshReadonlyStatusOnComplete;
+                _resultSummary = _activeJob.FinalSummary;
+                _showDetailedLogs = _activeJob.WasCancelled || !_activeJob.Success;
+                _activeJob = null;
+                if (refresh)
+                {
+                    RefreshReadonlyStatus();
+                }
+                changed = true;
+            }
+
+            if (changed)
+            {
+                Repaint();
+            }
+        }
+
+        private bool DrainActiveJobOutput()
+        {
+            if (_activeJob == null)
+            {
+                return false;
+            }
+
+            var changed = false;
+            foreach (var line in _activeJob.DrainLines())
+            {
+                AppendOutputLine(line);
+                changed = true;
+            }
+
+            if (changed && IsJobRunning)
+            {
+                _outputScroll.y = float.MaxValue;
+            }
+
+            return changed;
+        }
+
+        private void AppendOutputLine(string line)
+        {
+            if (string.IsNullOrEmpty(_output))
+            {
+                _output = line ?? "";
+            }
+            else
+            {
+                if (!_output.EndsWith(Environment.NewLine, StringComparison.Ordinal))
+                {
+                    _output += Environment.NewLine;
+                }
+
+                _output += line ?? "";
+            }
+
+            if (!_output.EndsWith(Environment.NewLine, StringComparison.Ordinal))
+            {
+                _output += Environment.NewLine;
+            }
+        }
+
+        private void StartBackgroundJob(ConfigSheetForgeBackgroundJob job)
+        {
+            if (job == null)
+            {
+                return;
+            }
+
+            if (IsJobRunning)
+            {
+                AppendOutputLine("已有后台任务正在运行，请等待完成或先取消。");
+                Repaint();
+                return;
+            }
+
+            _activeJob = job;
+            _activeJobStatus = job.Status;
+            _lastCommand = job.CommandLine;
+            _lastResultPath = job.ResultPath;
+            _lastLifecycleDir = job.LifecycleDirectory;
+            _outputScroll = Vector2.zero;
+            _resultSummary = job.BuildLiveSummary();
+            _output = job.StartOutput;
+            _showDetailedLogs = false;
+            job.Start();
+            Repaint();
+        }
+
+        private void CancelActiveJob()
+        {
+            if (_activeJob == null)
+            {
+                return;
+            }
+
+            _activeJob.Cancel("已取消，未写本地 cache。");
+            AppendOutputLine("正在取消后台任务，会终止当前进程树...");
+            Repaint();
+        }
+
+        private bool DrawJobButton(GUIContent content, params GUILayoutOption[] options)
+        {
+            return DrawJobButton(content, true, options);
+        }
+
+        private bool DrawJobButton(GUIContent content, bool enabled, params GUILayoutOption[] options)
+        {
+            var oldEnabled = GUI.enabled;
+            GUI.enabled = oldEnabled && enabled && !IsJobRunning;
+            var clicked = GUILayout.Button(content, options);
+            GUI.enabled = oldEnabled;
+            return clicked;
         }
 
         private bool EffectiveDryRun(string operation, bool defaultDryRun)
@@ -708,7 +985,11 @@ namespace ConfigSheetForge.Unity.Editor
 
         private static void DrawWrappedReadonlyBlock(string label, string value, string tooltip)
         {
-            EditorGUILayout.LabelField(new GUIContent(label, tooltip), EditorStyles.boldLabel);
+            if (!string.IsNullOrWhiteSpace(label))
+            {
+                EditorGUILayout.LabelField(new GUIContent(label, tooltip), EditorStyles.boldLabel);
+            }
+
             var style = new GUIStyle(EditorStyles.textArea) { wordWrap = true };
             var width = Math.Max(240f, EditorGUIUtility.currentViewWidth - 48f);
             var height = Math.Max(EditorGUIUtility.singleLineHeight * 2f, style.CalcHeight(new GUIContent(value), width) + 8f);
@@ -743,24 +1024,33 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void RunCli(params string[] args)
         {
+            RunCliInternal(false, args);
+        }
+
+        private void RunCliInternal(bool refreshReadonlyStatusOnComplete, params string[] args)
+        {
             var cleanArgs = CleanArgs(args);
             var projectRoot = FindProjectRoot();
             var cli = ResolveCoreCli(projectRoot);
             _lastCommand = cli.ToCommandLine(cleanArgs);
             if (!cli.CanLaunch)
             {
-                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig);
+                SetImmediateOutput(ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig), "");
                 return;
             }
 
-            try
-            {
-                _output = RunProcessCapture(cli.Executable, cli.BuildArguments(cleanArgs), projectRoot).Render(_lastCommand);
-            }
-            catch (Exception ex)
-            {
-                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message, _projectConfig);
-            }
+            var commandName = cleanArgs.Length > 0 ? cleanArgs[0] : "CLI";
+            StartBackgroundJob(ConfigSheetForgeBackgroundJob.CreateSingleProcess(
+                "CLI: " + commandName,
+                dryRun: Array.IndexOf(cleanArgs, "--dry-run") >= 0,
+                commandLine: _lastCommand,
+                executable: cli.Executable,
+                arguments: cli.BuildArguments(cleanArgs),
+                workingDirectory: projectRoot,
+                resultPath: "",
+                lifecycleDirectory: GetUnityLifecycleDirectory(projectRoot),
+                refreshReadonlyStatusOnComplete: refreshReadonlyStatusOnComplete,
+                projectConfig: _projectConfig));
         }
 
         private void RunSyncCache(bool apply)
@@ -780,7 +1070,7 @@ namespace ConfigSheetForge.Unity.Editor
             RefreshReadonlyStatus();
             if (!_projectConfig.Exists)
             {
-                _output = "未发现项目配置。请确认 ProjectSettings 下存在 *ConfigSheetForge*.json。";
+                SetImmediateOutput("未发现项目配置。请确认 ProjectSettings 下存在 *ConfigSheetForge*.json。", "");
                 return;
             }
 
@@ -791,27 +1081,21 @@ namespace ConfigSheetForge.Unity.Editor
             _lastCommand = cli.ToCommandLine(args);
             if (!cli.CanLaunch)
             {
-                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig);
+                SetImmediateOutput(ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig), "");
                 return;
             }
 
-            try
-            {
-                var result = RunProcessCapture(cli.Executable, cli.BuildArguments(args), projectRoot);
-                var output = result.Render(_lastCommand);
-                if (output.IndexOf("cache unchanged", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    output.IndexOf("无变化", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    output += Environment.NewLine + "无变化，未重写 cache。";
-                }
-
-                _output = output;
-                RefreshReadonlyStatus();
-            }
-            catch (Exception ex)
-            {
-                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message, _projectConfig);
-            }
+            StartBackgroundJob(ConfigSheetForgeBackgroundJob.CreateSingleProcess(
+                "sync-cache",
+                dryRun: !apply,
+                commandLine: _lastCommand,
+                executable: cli.Executable,
+                arguments: cli.BuildArguments(args),
+                workingDirectory: projectRoot,
+                resultPath: resultPath,
+                lifecycleDirectory: GetUnityLifecycleDirectory(projectRoot),
+                refreshReadonlyStatusOnComplete: true,
+                projectConfig: _projectConfig));
         }
 
         private void RunPrGateReport()
@@ -822,7 +1106,7 @@ namespace ConfigSheetForge.Unity.Editor
             }
             else
             {
-                RunCli("gate", "--details", "--report", ResolveGateReportPath(FindProjectRoot()));
+                RunCliInternal(true, "gate", "--details", "--report", ResolveGateReportPath(FindProjectRoot()));
             }
 
             RefreshReadonlyStatus();
@@ -833,18 +1117,18 @@ namespace ConfigSheetForge.Unity.Editor
             RefreshReadonlyStatus();
             if (!_projectConfig.Exists)
             {
-                _output = "未发现项目配置。请确认 ProjectSettings 下存在 *ConfigSheetForge*.json。";
+                SetImmediateOutput("未发现项目配置。请确认 ProjectSettings 下存在 *ConfigSheetForge*.json。", "");
                 return;
             }
 
             if (!_projectConfig.HasLifecycleAdapter)
             {
-                _output = "项目配置缺少 adapterScript 或 contractCommand，无法生成 lifecycle contract。";
+                SetImmediateOutput("项目配置缺少 adapterScript 或 contractCommand，无法生成 lifecycle contract。", "");
                 return;
             }
 
             var projectRoot = FindProjectRoot();
-            var workDir = Path.Combine(projectRoot, "Temp", "ConfigSheetForge", "unity-lifecycle");
+            var workDir = GetUnityLifecycleDirectory(projectRoot);
             Directory.CreateDirectory(workDir);
             var defaultRequestPath = Path.Combine(workDir, operation + ".contract.json");
             var inputsPath = Path.Combine(workDir, operation + ".inputs.json");
@@ -862,57 +1146,26 @@ namespace ConfigSheetForge.Unity.Editor
                            cli.ToCommandLine(applyArgs);
             if (!cli.CanLaunch)
             {
-                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig);
+                SetImmediateOutput(ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig), "");
                 return;
             }
 
-            try
-            {
-                var output = new StringBuilder();
-                var adapterResult = RunProcessCapture(ConfigSheetForgeEditorUtility.ResolveExecutable(adapter.Executable), adapter.Arguments, projectRoot);
-                output.AppendLine(adapterResult.Render(adapter.ToCommandLine()));
-                output.AppendLine("Inputs: " + inputsPath);
-                if (adapterResult.ExitCode != 0)
-                {
-                    output.AppendLine("adapter 没有成功生成 contract，请按上面的错误处理。");
-                    _output = output.ToString();
-                    return;
-                }
-
-                if (!File.Exists(requestPath))
-                {
-                    output.AppendLine("adapter 运行成功，但没有生成 contract request：");
-                    output.AppendLine(requestPath);
-                    output.AppendLine("请检查项目 config 的 contractArgs/contractRequestPath 设置。");
-                    _output = output.ToString();
-                    return;
-                }
-
-                output.AppendLine("Contract request: " + requestPath);
-                var applyResult = RunProcessCapture(cli.Executable, cli.BuildArguments(applyArgs), projectRoot);
-                output.AppendLine(applyResult.Render(cli.ToCommandLine(applyArgs)));
-                if (File.Exists(resultPath))
-                {
-                    output.AppendLine("Lifecycle result: " + resultPath);
-                    output.AppendLine(File.ReadAllText(resultPath));
-                }
-
-                if (string.Equals(operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
-                {
-                    output.AppendLine("Final gate report: " + finalGateReportPath);
-                    if (File.Exists(finalGateReportPath))
-                    {
-                        output.AppendLine(BuildGateReportSummary(File.ReadAllText(finalGateReportPath)));
-                    }
-                }
-
-                _output = output.ToString();
-                RefreshReadonlyStatus();
-            }
-            catch (Exception ex)
-            {
-                _output = ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, ex.Message, _projectConfig);
-            }
+            StartBackgroundJob(ConfigSheetForgeBackgroundJob.CreateLifecycle(
+                operation,
+                dryRun,
+                projectRoot,
+                requestPath,
+                inputsPath,
+                resultPath,
+                finalGateReportPath,
+                ConfigSheetForgeEditorUtility.ResolveExecutable(adapter.Executable),
+                adapter.Arguments.ToArray(),
+                adapter.ToCommandLine(),
+                cli.Executable,
+                cli.BuildArguments(applyArgs),
+                cli.ToCommandLine(applyArgs),
+                _lastCommand,
+                _projectConfig));
         }
 
         private static string[] CleanArgs(IEnumerable<string> args)
@@ -1110,7 +1363,12 @@ namespace ConfigSheetForge.Unity.Editor
 
         private static string GetUnityLifecyclePath(string projectRoot, string fileName)
         {
-            return Path.Combine(projectRoot, "Temp", "ConfigSheetForge", "unity-lifecycle", fileName);
+            return Path.Combine(GetUnityLifecycleDirectory(projectRoot), fileName);
+        }
+
+        private static string GetUnityLifecycleDirectory(string projectRoot)
+        {
+            return Path.Combine(projectRoot, "Temp", "ConfigSheetForge", "unity-lifecycle");
         }
 
         private string BuildCurrentBranchTableCountText()
@@ -1346,44 +1604,49 @@ namespace ConfigSheetForge.Unity.Editor
 
         private static string TryRunReadOnlyGit(params string[] args)
         {
+            if (args.Length == 2 &&
+                string.Equals(args[0], "branch", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(args[1], "--show-current", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryReadGitBranch(FindProjectRoot());
+            }
+
+            return "";
+        }
+
+        private static string TryReadGitBranch(string projectRoot)
+        {
             try
             {
-                var result = RunProcessCapture("git", args, FindProjectRoot());
-                return result.ExitCode == 0 ? result.Stdout.Trim() : "";
+                var gitPath = Path.Combine(projectRoot, ".git");
+                if (File.Exists(gitPath))
+                {
+                    var text = File.ReadAllText(gitPath).Trim();
+                    const string gitDirPrefix = "gitdir:";
+                    if (text.StartsWith(gitDirPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var gitDir = text.Substring(gitDirPrefix.Length).Trim();
+                        gitPath = Path.IsPathRooted(gitDir)
+                            ? gitDir
+                            : Path.GetFullPath(Path.Combine(projectRoot, gitDir.Replace('/', Path.DirectorySeparatorChar)));
+                    }
+                }
+
+                var headPath = Path.Combine(gitPath, "HEAD");
+                if (!File.Exists(headPath))
+                {
+                    return "";
+                }
+
+                var head = File.ReadAllText(headPath).Trim();
+                const string refPrefix = "ref: refs/heads/";
+                return head.StartsWith(refPrefix, StringComparison.OrdinalIgnoreCase)
+                    ? head.Substring(refPrefix.Length)
+                    : "";
             }
             catch
             {
                 return "";
-            }
-        }
-
-        private static ProcessCaptureResult RunProcessCapture(string executable, IEnumerable<string> args, string workingDirectory)
-        {
-            var cleanArgs = CleanArgs(args);
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = executable,
-                Arguments = ConfigSheetForgeEditorUtility.JoinArguments(cleanArgs),
-                WorkingDirectory = workingDirectory,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8
-            };
-
-            using (var process = Process.Start(startInfo))
-            {
-                if (process == null)
-                {
-                    return new ProcessCaptureResult { ExitCode = -1, Stderr = "Could not start process." };
-                }
-
-                var stdout = process.StandardOutput.ReadToEnd();
-                var stderr = process.StandardError.ReadToEnd();
-                process.WaitForExit();
-                return new ProcessCaptureResult { ExitCode = process.ExitCode, Stdout = stdout, Stderr = stderr };
             }
         }
 
@@ -1770,6 +2033,831 @@ namespace ConfigSheetForge.Unity.Editor
                 default:
                     return c;
             }
+        }
+    }
+
+    public sealed class ConfigSheetForgeBackgroundJob
+    {
+        private readonly object _sync = new object();
+        private readonly Queue<string> _pendingLines = new Queue<string>();
+        private readonly Func<ConfigSheetForgeBackgroundJob, Task> _body;
+        private readonly CancellationTokenSource _cancellation = new CancellationTokenSource();
+        private Process _currentProcess;
+        private bool _started;
+        private volatile bool _isFinished;
+
+        private ConfigSheetForgeBackgroundJob(Func<ConfigSheetForgeBackgroundJob, Task> body)
+        {
+            _body = body;
+        }
+
+        public string Operation { get; private set; } = "";
+        public bool DryRun { get; private set; }
+        public string CommandLine { get; private set; } = "";
+        public string StartOutput { get; private set; } = "";
+        public string Status { get; private set; } = "等待启动";
+        public string ResultPath { get; private set; } = "";
+        public string LifecycleDirectory { get; private set; } = "";
+        public string FinalSummary { get; private set; } = "";
+        public bool Success { get; private set; }
+        public bool WasCancelled { get; private set; }
+        public bool RefreshReadonlyStatusOnComplete { get; private set; }
+
+        public bool IsFinished
+        {
+            get { return _isFinished; }
+        }
+
+        public static ConfigSheetForgeBackgroundJob CreateSingleProcess(
+            string operation,
+            bool dryRun,
+            string commandLine,
+            string executable,
+            string[] arguments,
+            string workingDirectory,
+            string resultPath,
+            string lifecycleDirectory,
+            bool refreshReadonlyStatusOnComplete,
+            ProjectConfigSummary projectConfig)
+        {
+            var job = new ConfigSheetForgeBackgroundJob(async self =>
+            {
+                self.SetStatus("正在启动 config-sheet-forge CLI");
+                var result = await self.RunProcessAsync(
+                    executable,
+                    arguments,
+                    workingDirectory,
+                    commandLine,
+                    "正在运行 " + operation).ConfigureAwait(false);
+                self.Success = result.ExitCode == 0;
+                self.SetStatus(self.Success ? "完成" : "失败");
+                self.FinalSummary = BuildSummaryFromResult(
+                    operation,
+                    dryRun,
+                    resultPath,
+                    File.Exists(resultPath) ? File.ReadAllText(resultPath) : "",
+                    result.Stdout + Environment.NewLine + result.Stderr,
+                    BuildBranchNodeFallback(projectConfig),
+                    result.ExitCode,
+                    wasCancelled: false);
+            });
+            job.Operation = operation;
+            job.DryRun = dryRun;
+            job.CommandLine = commandLine ?? "";
+            job.ResultPath = resultPath ?? "";
+            job.LifecycleDirectory = lifecycleDirectory ?? "";
+            job.RefreshReadonlyStatusOnComplete = refreshReadonlyStatusOnComplete;
+            job.StartOutput = BuildStartOutput(operation, dryRun, commandLine);
+            job.FinalSummary = job.BuildLiveSummary();
+            return job;
+        }
+
+        public static ConfigSheetForgeBackgroundJob CreateLifecycle(
+            string operation,
+            bool dryRun,
+            string projectRoot,
+            string requestPath,
+            string inputsPath,
+            string resultPath,
+            string finalGateReportPath,
+            string adapterExecutable,
+            string[] adapterArguments,
+            string adapterCommandLine,
+            string cliExecutable,
+            string[] cliArguments,
+            string cliCommandLine,
+            string fullCommandLine,
+            ProjectConfigSummary projectConfig)
+        {
+            var lifecycleDirectory = Path.GetDirectoryName(resultPath) ?? "";
+            var job = new ConfigSheetForgeBackgroundJob(async self =>
+            {
+                self.SetStatus("正在生成 contract");
+                self.AppendLine("Inputs: " + inputsPath);
+                var adapterResult = await self.RunProcessAsync(
+                    adapterExecutable,
+                    adapterArguments,
+                    projectRoot,
+                    adapterCommandLine,
+                    "正在生成 contract").ConfigureAwait(false);
+                if (adapterResult.ExitCode != 0)
+                {
+                    self.Success = false;
+                    self.SetStatus("失败");
+                    self.FinalSummary = BuildFailureSummary(operation, dryRun, resultPath, "adapter 没有成功生成 contract，请展开详细日志处理。");
+                    return;
+                }
+
+                if (!File.Exists(requestPath))
+                {
+                    self.Success = false;
+                    self.SetStatus("失败");
+                    self.AppendLine("adapter 运行成功，但没有生成 contract request: " + requestPath);
+                    self.FinalSummary = BuildFailureSummary(operation, dryRun, resultPath, "adapter 没有生成 contract request。请检查项目 config 的 contractArgs/contractRequestPath 设置。");
+                    return;
+                }
+
+                self.AppendLine("Contract request: " + requestPath);
+                self.SetStatus("正在启动 config-sheet-forge CLI");
+                var applyResult = await self.RunProcessAsync(
+                    cliExecutable,
+                    cliArguments,
+                    projectRoot,
+                    cliCommandLine,
+                    "正在运行 apply-contract").ConfigureAwait(false);
+
+                var resultJson = File.Exists(resultPath) ? File.ReadAllText(resultPath) : "";
+                if (!string.IsNullOrWhiteSpace(resultJson))
+                {
+                    self.AppendLine("Lifecycle result: " + resultPath);
+                    self.AppendLine(resultJson);
+                }
+
+                if (string.Equals(operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
+                {
+                    self.AppendLine("Final gate report: " + finalGateReportPath);
+                    if (File.Exists(finalGateReportPath))
+                    {
+                        self.AppendLine(GateReportSummaryView.FromJson(finalGateReportPath, File.ReadAllText(finalGateReportPath)).DetailText);
+                    }
+                }
+
+                self.Success = applyResult.ExitCode == 0 && !ResultJsonDeclaresFailure(resultJson);
+                self.SetStatus(self.Success ? "完成" : "失败");
+                self.FinalSummary = BuildSummaryFromResult(
+                    operation,
+                    dryRun,
+                    resultPath,
+                    resultJson,
+                    applyResult.Stdout + Environment.NewLine + applyResult.Stderr,
+                    BuildBranchNodeFallback(projectConfig),
+                    applyResult.ExitCode,
+                    wasCancelled: false);
+            });
+            job.Operation = operation;
+            job.DryRun = dryRun;
+            job.CommandLine = fullCommandLine ?? "";
+            job.ResultPath = resultPath ?? "";
+            job.LifecycleDirectory = lifecycleDirectory;
+            job.RefreshReadonlyStatusOnComplete = true;
+            job.StartOutput = BuildStartOutput(operation, dryRun, fullCommandLine);
+            job.FinalSummary = job.BuildLiveSummary();
+            return job;
+        }
+
+        public void Start()
+        {
+            if (_started)
+            {
+                return;
+            }
+
+            _started = true;
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await _body(this).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    WasCancelled = true;
+                    Success = false;
+                    SetStatus("已取消");
+                    FinalSummary = "已取消，未写本地 cache。" + Environment.NewLine +
+                                   "操作: " + Operation + Environment.NewLine +
+                                   "模式: " + (DryRun ? "dry-run" : "apply") + Environment.NewLine +
+                                   "Result path: " + FirstNonEmpty(ResultPath, "未生成");
+                    AppendLine("已取消，未写本地 cache。");
+                }
+                catch (Exception ex)
+                {
+                    Success = false;
+                    SetStatus("失败");
+                    FinalSummary = BuildFailureSummary(Operation, DryRun, ResultPath, ex.Message);
+                    AppendLine("错误: " + ex.Message);
+                }
+                finally
+                {
+                    _isFinished = true;
+                }
+            });
+        }
+
+        public void Cancel(string message)
+        {
+            WasCancelled = true;
+            SetStatus("正在取消");
+            AppendLine(message);
+            _cancellation.Cancel();
+            KillCurrentProcessTree();
+        }
+
+        public List<string> DrainLines()
+        {
+            var lines = new List<string>();
+            lock (_sync)
+            {
+                while (_pendingLines.Count > 0)
+                {
+                    lines.Add(_pendingLines.Dequeue());
+                }
+            }
+
+            return lines;
+        }
+
+        public string BuildLiveSummary()
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("状态: " + Status);
+            builder.AppendLine("操作: " + Operation);
+            builder.AppendLine("模式: " + (DryRun ? "dry-run / 生成预览" : "apply / 执行写入"));
+            if (DryRun)
+            {
+                builder.AppendLine("安全性: 只生成预览，不写飞书、不改本地 cache、不改 ProjectSettings。");
+                builder.AppendLine("是否写本地 cache: 否");
+            }
+            else
+            {
+                builder.AppendLine("安全性: apply 会读取在线 Sheet、导出 xlsx、三方一致后才可能更新本地 cache。");
+            }
+
+            if (!string.IsNullOrWhiteSpace(ResultPath))
+            {
+                builder.AppendLine("Result path: " + ResultPath);
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        private async Task<ProcessCaptureResult> RunProcessAsync(
+            string executable,
+            string[] arguments,
+            string workingDirectory,
+            string commandLine,
+            string runningStatus)
+        {
+            _cancellation.Token.ThrowIfCancellationRequested();
+            SetStatus(runningStatus);
+            AppendLine("");
+            AppendLine("== " + runningStatus + " ==");
+            AppendLine("Command: " + commandLine);
+
+            var result = new ProcessCaptureResult();
+            var stdout = new StringBuilder();
+            var stderr = new StringBuilder();
+            var stdoutDone = new ManualResetEventSlim(false);
+            var stderrDone = new ManualResetEventSlim(false);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                Arguments = ConfigSheetForgeEditorUtility.JoinArguments(arguments ?? new string[0]),
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+
+            using (var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true })
+            {
+                process.OutputDataReceived += (sender, e) =>
+                {
+                    if (e.Data == null)
+                    {
+                        stdoutDone.Set();
+                        return;
+                    }
+
+                    lock (stdout)
+                    {
+                        stdout.AppendLine(e.Data);
+                    }
+
+                    UpdateStatusFromLine(e.Data);
+                    AppendLine(e.Data);
+                };
+                process.ErrorDataReceived += (sender, e) =>
+                {
+                    if (e.Data == null)
+                    {
+                        stderrDone.Set();
+                        return;
+                    }
+
+                    lock (stderr)
+                    {
+                        stderr.AppendLine(e.Data);
+                    }
+
+                    UpdateStatusFromLine(e.Data);
+                    AppendLine("stderr: " + e.Data);
+                };
+
+                try
+                {
+                    if (!process.Start())
+                    {
+                        result.ExitCode = -1;
+                        result.Stderr = "Could not start process.";
+                        return result;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result.ExitCode = -1;
+                    result.Stderr = ex.Message;
+                    AppendLine(ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(commandLine, ex.Message));
+                    return result;
+                }
+
+                _currentProcess = process;
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                while (!process.HasExited)
+                {
+                    if (_cancellation.Token.WaitHandle.WaitOne(100))
+                    {
+                        KillCurrentProcessTree();
+                        throw new OperationCanceledException();
+                    }
+                }
+
+                stdoutDone.Wait(2000);
+                stderrDone.Wait(2000);
+                result.ExitCode = process.ExitCode;
+                lock (stdout)
+                {
+                    result.Stdout = stdout.ToString();
+                }
+
+                lock (stderr)
+                {
+                    result.Stderr = stderr.ToString();
+                }
+
+                AppendLine("ExitCode: " + result.ExitCode);
+                _currentProcess = null;
+                return result;
+            }
+        }
+
+        private void KillCurrentProcessTree()
+        {
+            var process = _currentProcess;
+            if (process == null || process.HasExited)
+            {
+                return;
+            }
+
+            try
+            {
+                if (Path.DirectorySeparatorChar == '\\')
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "taskkill",
+                        Arguments = "/PID " + process.Id.ToString() + " /T /F",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    });
+                }
+                else
+                {
+                    process.Kill();
+                }
+            }
+            catch
+            {
+                try
+                {
+                    process.Kill();
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private void UpdateStatusFromLine(string line)
+        {
+            line = line ?? "";
+            if (line.IndexOf("正在读取在线 Sheet", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("read online", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("sheets +read", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                SetStatus("正在读取在线 Sheet");
+            }
+            else if (line.IndexOf("正在导出 xlsx", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     line.IndexOf("export", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                SetStatus("正在导出 xlsx");
+            }
+            else if (line.IndexOf("三方", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     line.IndexOf("triangulation", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                SetStatus("正在三方一致性检查");
+            }
+            else if (line.IndexOf("hash", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     line.IndexOf("cache updated", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     line.IndexOf("无变化", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                SetStatus("正在 hash gate");
+            }
+        }
+
+        private void SetStatus(string status)
+        {
+            Status = status ?? "";
+        }
+
+        private void AppendLine(string line)
+        {
+            lock (_sync)
+            {
+                _pendingLines.Enqueue(line ?? "");
+            }
+        }
+
+        private static string BuildStartOutput(string operation, bool dryRun, string commandLine)
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("已清空上一次输出，后台任务已启动。");
+            builder.AppendLine("操作: " + operation);
+            builder.AppendLine("模式: " + (dryRun ? "dry-run / 生成预览" : "apply / 执行写入"));
+            if (dryRun)
+            {
+                builder.AppendLine("dry-run：只生成预览，不写飞书、不改本地 cache、不改 ProjectSettings。");
+            }
+            else
+            {
+                builder.AppendLine("apply：已通过 UI 确认，三方一致和 hash gate 通过后才可能写本地 cache。");
+            }
+
+            builder.AppendLine("正在启动后台进程，Unity 窗口可以继续滚动和切换 tab。");
+            builder.AppendLine("Command:");
+            builder.AppendLine(commandLine ?? "");
+            return builder.ToString();
+        }
+
+        private static string BuildSummaryFromResult(string operation, bool dryRun, string resultPath, string resultJson, string processOutput, string branchFallback, int exitCode, bool wasCancelled)
+        {
+            if (wasCancelled)
+            {
+                return "已取消，未写本地 cache。";
+            }
+
+            var success = ExtractBoolean(resultJson, "success");
+            var finalSuccess = success.HasValue ? success.Value : exitCode == 0;
+            var plannedActions = CountArrayObjects(resultJson, "actions");
+            var branchNode = FirstNonEmpty(
+                ExtractString(resultJson, "branchWikiNodeTitle"),
+                ExtractString(resultJson, "wikiNodeTitle"),
+                ExtractString(resultJson, "nodeTitle"),
+                branchFallback);
+            var failures = ExtractStringArray(resultJson, "humanReadableFailures");
+            var builder = new StringBuilder();
+            builder.AppendLine(finalSuccess ? "成功" : "失败");
+            builder.AppendLine("操作: " + operation);
+            builder.AppendLine("模式: " + (dryRun ? "dry-run / 生成预览" : "apply / 执行写入"));
+            builder.AppendLine("planned action 数量: " + (plannedActions >= 0 ? plannedActions.ToString() : "未记录"));
+            builder.AppendLine("branch node: " + FirstNonEmpty(branchNode, "未记录"));
+            builder.AppendLine("result path: " + FirstNonEmpty(resultPath, "未生成"));
+            builder.AppendLine("是否写本地 cache: " + BuildCacheWriteText(dryRun, processOutput));
+            if (failures.Count > 0)
+            {
+                builder.AppendLine("需要处理:");
+                foreach (var failure in failures)
+                {
+                    builder.AppendLine("- " + failure);
+                }
+            }
+            else if (!finalSuccess && string.IsNullOrWhiteSpace(resultJson))
+            {
+                builder.AppendLine("原因: 进程退出码 " + exitCode.ToString() + "。请展开详细日志查看命令、stderr 和下一步。");
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        private static string BuildFailureSummary(string operation, bool dryRun, string resultPath, string reason)
+        {
+            return "失败" + Environment.NewLine +
+                   "操作: " + operation + Environment.NewLine +
+                   "模式: " + (dryRun ? "dry-run / 生成预览" : "apply / 执行写入") + Environment.NewLine +
+                   "planned action 数量: 未生成" + Environment.NewLine +
+                   "branch node: 未生成" + Environment.NewLine +
+                   "result path: " + FirstNonEmpty(resultPath, "未生成") + Environment.NewLine +
+                   "是否写本地 cache: 否" + Environment.NewLine +
+                   "原因: " + reason;
+        }
+
+        private static string BuildCacheWriteText(bool dryRun, string processOutput)
+        {
+            if (dryRun)
+            {
+                return "否";
+            }
+
+            processOutput = processOutput ?? "";
+            if (processOutput.IndexOf("cache updated", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "是（内容变化后已更新）";
+            }
+
+            if (processOutput.IndexOf("无变化", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                processOutput.IndexOf("cache unchanged", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "否（无变化，未重写 cache）";
+            }
+
+            return "请展开详细日志确认";
+        }
+
+        private static bool ResultJsonDeclaresFailure(string resultJson)
+        {
+            var success = ExtractBoolean(resultJson, "success");
+            return success.HasValue && !success.Value;
+        }
+
+        private static string BuildBranchNodeFallback(ProjectConfigSummary projectConfig)
+        {
+            if (projectConfig == null)
+            {
+                return "";
+            }
+
+            return FirstNonEmpty(projectConfig.BranchWikiNodeTitle, projectConfig.BranchWikiNodeUrl, projectConfig.BranchWikiNodeToken);
+        }
+
+        private static bool? ExtractBoolean(string json, string propertyName)
+        {
+            var property = "\"" + propertyName + "\"";
+            var propertyIndex = (json ?? "").IndexOf(property, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return null;
+            }
+
+            var colon = json.IndexOf(':', propertyIndex + property.Length);
+            if (colon < 0)
+            {
+                return null;
+            }
+
+            var rest = json.Substring(colon + 1).TrimStart();
+            if (rest.StartsWith("true", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (rest.StartsWith("false", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return null;
+        }
+
+        private static string ExtractString(string json, string propertyName)
+        {
+            var property = "\"" + propertyName + "\"";
+            var propertyIndex = (json ?? "").IndexOf(property, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return "";
+            }
+
+            var colon = json.IndexOf(':', propertyIndex + property.Length);
+            if (colon < 0)
+            {
+                return "";
+            }
+
+            var quote = json.IndexOf('"', colon + 1);
+            if (quote < 0)
+            {
+                return "";
+            }
+
+            int end;
+            return ParseJsonString(json, quote, out end);
+        }
+
+        private static List<string> ExtractStringArray(string json, string propertyName)
+        {
+            var values = new List<string>();
+            var arrayStart = FindArrayStart(json, propertyName);
+            if (arrayStart < 0)
+            {
+                return values;
+            }
+
+            var arrayEnd = FindArrayEnd(json, arrayStart);
+            if (arrayEnd < 0)
+            {
+                return values;
+            }
+
+            for (var i = arrayStart + 1; i < arrayEnd; i++)
+            {
+                if (json[i] != '"')
+                {
+                    continue;
+                }
+
+                int stringEnd;
+                values.Add(ParseJsonString(json, i, out stringEnd));
+                i = stringEnd;
+            }
+
+            return values;
+        }
+
+        private static int CountArrayObjects(string json, string propertyName)
+        {
+            var arrayStart = FindArrayStart(json, propertyName);
+            if (arrayStart < 0)
+            {
+                return -1;
+            }
+
+            var arrayEnd = FindArrayEnd(json, arrayStart);
+            if (arrayEnd < 0)
+            {
+                return -1;
+            }
+
+            var count = 0;
+            var depth = 0;
+            var inString = false;
+            var escaped = false;
+            for (var i = arrayStart + 1; i < arrayEnd; i++)
+            {
+                var c = json[i];
+                if (escaped)
+                {
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\' && inString)
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = !inString;
+                    continue;
+                }
+
+                if (inString)
+                {
+                    continue;
+                }
+
+                if (c == '{')
+                {
+                    if (depth == 0)
+                    {
+                        count++;
+                    }
+
+                    depth++;
+                }
+                else if (c == '}')
+                {
+                    depth--;
+                }
+            }
+
+            return count;
+        }
+
+        private static int FindArrayStart(string json, string propertyName)
+        {
+            var property = "\"" + propertyName + "\"";
+            var propertyIndex = (json ?? "").IndexOf(property, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return -1;
+            }
+
+            return json.IndexOf('[', propertyIndex + property.Length);
+        }
+
+        private static int FindArrayEnd(string json, int start)
+        {
+            var depth = 0;
+            var inString = false;
+            var escaped = false;
+            for (var i = start; i < json.Length; i++)
+            {
+                var c = json[i];
+                if (escaped)
+                {
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\' && inString)
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = !inString;
+                    continue;
+                }
+
+                if (inString)
+                {
+                    continue;
+                }
+
+                if (c == '[')
+                {
+                    depth++;
+                }
+                else if (c == ']')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        return i;
+                    }
+                }
+            }
+
+            return -1;
+        }
+
+        private static string ParseJsonString(string json, int start, out int end)
+        {
+            var builder = new StringBuilder();
+            var escaped = false;
+            for (var i = start + 1; i < json.Length; i++)
+            {
+                var c = json[i];
+                if (escaped)
+                {
+                    builder.Append(Unescape(c));
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    end = i;
+                    return builder.ToString();
+                }
+
+                builder.Append(c);
+            }
+
+            end = json.Length - 1;
+            return builder.ToString();
+        }
+
+        private static char Unescape(char c)
+        {
+            switch (c)
+            {
+                case 'n':
+                    return '\n';
+                case 'r':
+                    return '\r';
+                case 't':
+                    return '\t';
+                default:
+                    return c;
+            }
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return "";
         }
     }
 

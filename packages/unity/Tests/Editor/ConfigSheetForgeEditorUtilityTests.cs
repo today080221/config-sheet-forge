@@ -1,4 +1,6 @@
 using System.IO;
+using System.Diagnostics;
+using System.Threading;
 using ConfigSheetForge.Core;
 using ConfigSheetForge.Unity.Editor;
 using NUnit.Framework;
@@ -92,6 +94,44 @@ namespace ConfigSheetForge.Unity.Editor.Tests
             Assert.That(message, Does.Contain("无法运行 Config Sheet Forge CLI"));
             Assert.That(message, Does.Contain("下一步"));
             Assert.That(message, Does.Contain("CONFIG_SHEET_FORGE_CLI"));
+        }
+
+        [Test]
+        public void BackgroundJobStartDoesNotWaitForProcessExit()
+        {
+            var isWindows = Path.DirectorySeparatorChar == '\\';
+            var executable = isWindows ? "cmd.exe" : "/bin/sh";
+            var arguments = isWindows
+                ? new[] { "/C", "ping -n 3 127.0.0.1 > nul" }
+                : new[] { "-c", "sleep 2" };
+            var job = ConfigSheetForgeBackgroundJob.CreateSingleProcess(
+                "test-sleep",
+                dryRun: true,
+                commandLine: ConfigSheetForgeEditorUtility.BuildCommandLine(executable, arguments),
+                executable: executable,
+                arguments: arguments,
+                workingDirectory: Path.GetTempPath(),
+                resultPath: "",
+                lifecycleDirectory: Path.GetTempPath(),
+                refreshReadonlyStatusOnComplete: false,
+                projectConfig: new ProjectConfigSummary());
+
+            var stopwatch = Stopwatch.StartNew();
+            job.Start();
+            stopwatch.Stop();
+            try
+            {
+                Assert.That(stopwatch.ElapsedMilliseconds, Is.LessThan(250), "Start must return immediately instead of blocking IMGUI MouseUp.");
+                Assert.That(job.IsFinished, Is.False, "The background job should still be running right after Start.");
+            }
+            finally
+            {
+                job.Cancel("test cleanup");
+                for (var i = 0; i < 30 && !job.IsFinished; i++)
+                {
+                    Thread.Sleep(100);
+                }
+            }
         }
     }
 }
