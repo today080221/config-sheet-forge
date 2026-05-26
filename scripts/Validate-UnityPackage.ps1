@@ -217,9 +217,21 @@ foreach ($requiredUiMarker in @("DrawOnboardingCard", "BuildRecommendationText",
   }
 }
 
-foreach ($requiredV413Marker in @("DrawTargetBranchPicker", "GitHub PR 识别", "DrawOwnerRolePicker", "DrawStructuredFieldEditor", "DrawEnumValuesEditor", "AdvancedModePrefKey", "已用时间", "后台任务运行中，完成后自动恢复")) {
+foreach ($requiredV413Marker in @("DrawTargetBranchPicker", "GitHub PR 识别", "DrawOwnerRolePicker", "DrawStructuredFieldEditor", "DrawEnumValuesEditor", "已用时间", "后台任务运行中，完成后自动恢复")) {
   if ($window -notlike "*$requiredV413Marker*") {
     throw "Unity v0.4.13 UX source marker is missing: $requiredV413Marker"
+  }
+}
+
+foreach ($requiredV415Marker in @("ProgramViewPrefKey", "RiskModePrefKey", "策划视图", "程序视图", "DrawViewModeToggle", "DrawRiskModeToggle", "风险配置")) {
+  if ($window -notlike "*$requiredV415Marker*") {
+    throw "Unity v0.4.15 view/risk mode source marker is missing: $requiredV415Marker"
+  }
+}
+
+foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
+  if ($window -like "*$retiredViewText*") {
+    throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"
   }
 }
 

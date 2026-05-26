@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.15
+
+- Unity 顶部显示模式从“高级模式”拆为 `策划视图 / 程序视图`：策划视图默认使用人话摘要，程序视图补充内部 key、canonical 类型、路径和命令摘要。
+- 新增独立 `高级` 开关，用于解锁手动路径覆盖、raw 字段模板、手动覆盖 PR 目标分支、单表比较和输出路径等风险配置入口；开启时会先弹出确认。
+- 高级入口不等同于写入权限：创建在线表、Seed apply、写回 main 等危险写入仍保留预览成功、勾选确认和二次确认链路。
+- 新建配表与合并页的风险配置不再因为进入程序视图自动出现，避免“只想看内部 key”时顺手暴露危险操作。
+- Unity package smoke 增加 v0.4.15 源码断言，防止 `策划视图 / 程序视图 / 高级` 三层语义回退到旧“高级模式”。
+
 ## 0.4.14
 
 - Unity 合并页的 GitHub PR preflight 和远端分支读取改为后台 probe + TTL 缓存；打开窗口、切 tab、刷新合并上下文不再在 IMGUI/Repaint 链路同步等待 `git` / `gh`。
@@ -15,9 +23,9 @@
 - 合并页目标分支改为可搜索列表，支持按分支名过滤；识别到 GitHub PR 时主界面固定使用 PR base branch，手动覆盖只放在高级选项。
 - 新增 GitHub PR 识别 preflight：明确提示 git、GitHub remote、gh 安装和 gh 登录状态；gh 缺失时不阻断同步/新建/seed，只提示手动选择目标分支。
 - 新建配表页改为结构化表单：负责人角色从项目 `roles` 读取并显示中文名，审批规则只读展示；字段用行编辑器增删、排序、选择类型。
-- 字段类型支持普通视图和高级模式：普通视图显示文本、整数、小数、是/否、日期、日期时间、枚举、JSON；高级模式显示 canonical 类型和内部 key。
+- 字段类型支持策划视图和程序视图：策划视图显示文本、整数、小数、是/否、日期、日期时间、枚举、JSON；程序视图显示 canonical 类型和内部 key。
 - 枚举字段提供结构化枚举值编辑，并按现有 `enum:a,b,c` 模板写入 contract；字段 key、中文名、说明、类型、枚举值和唯一 ID 都会实时校验。
-- 新建配表本地 Excel cache 路径在普通界面只读自动推导，高级模式才允许覆盖，避免和旧 Excel Seed 混淆。
+- 新建配表本地 Excel cache 路径在普通界面只读自动推导，高级入口才允许覆盖，避免和旧 Excel Seed 混淆。
 - 运行中状态卡增强：显示操作、人话阶段、安全性、已用时间、取消按钮，并在耗时较长时提示可切到输出页查看日志。
 - Project config summary 新增可选读取 `roles`、`newTable.defaultOwnerRole`、`newTable.supportedFieldTypes`、`newTable.defaultFields`、`github.requiredForPrAutoDetect` 和 `github.installHelpUrl`。
 - Unity package smoke 增加 v0.4.13 源码断言，防止目标分支选择器、新建配表表单、运行中状态和旧 debug 文案回退。

@@ -14,7 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.14";
+        private const string PackageVersion = "v0.4.15";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -23,7 +23,9 @@ namespace ConfigSheetForge.Unity.Editor
         private const string BottomOutputExpandedPrefKey = "ConfigSheetForge.Unity.BottomOutputExpanded";
         private const string BottomOutputHeightPrefKey = "ConfigSheetForge.Unity.BottomOutputHeight";
         private const string OnboardingDismissedPrefKey = "ConfigSheetForge.Unity.OnboardingDismissed";
-        private const string AdvancedModePrefKey = "ConfigSheetForge.Unity.AdvancedMode";
+        private const string ProgramViewPrefKey = "ConfigSheetForge.Unity.ProgramView";
+        private const string LegacyAdvancedModePrefKey = "ConfigSheetForge.Unity.AdvancedMode";
+        private const string RiskModePrefKey = "ConfigSheetForge.Unity.RiskMode";
         private const float CollapsedOutputBarHeight = 34f;
         private const float MinBottomDrawerHeight = 220f;
         private const float DefaultBottomDrawerHeight = 260f;
@@ -128,7 +130,8 @@ namespace ConfigSheetForge.Unity.Editor
         private bool _showOnboarding;
         private bool _showWorkflowGuide;
         private bool _showBottomOutput;
-        private bool _advancedMode;
+        private bool _programView;
+        private bool _riskModeUnlocked;
         private bool _isResizingOutputPanel;
         private float _bottomOutputHeight = 260f;
         private string _output = "";
@@ -210,7 +213,8 @@ namespace ConfigSheetForge.Unity.Editor
             _showBottomOutput = EditorPrefs.GetBool(BottomOutputExpandedPrefKey, false);
             _bottomOutputHeight = EditorPrefs.HasKey(BottomOutputHeightPrefKey) ? EditorPrefs.GetFloat(BottomOutputHeightPrefKey, DefaultBottomDrawerHeight) : 0f;
             _showOnboarding = !EditorPrefs.GetBool(OnboardingDismissedPrefKey, false);
-            _advancedMode = EditorPrefs.GetBool(AdvancedModePrefKey, false);
+            _programView = EditorPrefs.GetBool(ProgramViewPrefKey, EditorPrefs.GetBool(LegacyAdvancedModePrefKey, false));
+            _riskModeUnlocked = EditorPrefs.GetBool(RiskModePrefKey, false);
             RefreshReadonlyStatus();
             EnsureNewTableDefaults();
             _resultSummary = "配表 Source of Truth 窗口已打开。" + Environment.NewLine +
@@ -276,12 +280,8 @@ namespace ConfigSheetForge.Unity.Editor
             GUILayout.Space(6);
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField("配表 Source of Truth", EditorStyles.boldLabel);
-            var oldAdvanced = _advancedMode;
-            _advancedMode = GUILayout.Toggle(_advancedMode, new GUIContent("高级模式", "显示内部 key、canonical 类型、路径和完整命令。高级区仍默认折叠。"), EditorStyles.toolbarButton, GUILayout.Width(82));
-            if (oldAdvanced != _advancedMode)
-            {
-                EditorPrefs.SetBool(AdvancedModePrefKey, _advancedMode);
-            }
+            DrawViewModeToggle();
+            DrawRiskModeToggle();
 
             if (GUILayout.Button(new GUIContent("教程", "打开 5 分钟入门、项目文档或飞书入口。"), GUILayout.Width(64)))
             {
@@ -295,6 +295,50 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.LabelField("飞书在线 Sheet 是 Source of Truth，本地 Excel 只是兼容缓存。", EditorStyles.miniLabel);
             GUILayout.Space(4);
+        }
+
+        private void DrawViewModeToggle()
+        {
+            var oldProgramView = _programView;
+            EditorGUILayout.BeginHorizontal(GUILayout.Width(132));
+            if (GUILayout.Toggle(!_programView, new GUIContent("策划视图", "默认视图：用人话说明当前状态、下一步和安全性。"), EditorStyles.toolbarButton, GUILayout.Width(66)))
+            {
+                _programView = false;
+            }
+
+            if (GUILayout.Toggle(_programView, new GUIContent("程序视图", "显示内部 key、canonical 类型、路径和命令摘要，但不自动解锁危险配置。"), EditorStyles.toolbarButton, GUILayout.Width(66)))
+            {
+                _programView = true;
+            }
+            EditorGUILayout.EndHorizontal();
+            if (oldProgramView != _programView)
+            {
+                EditorPrefs.SetBool(ProgramViewPrefKey, _programView);
+            }
+        }
+
+        private void DrawRiskModeToggle()
+        {
+            var oldRiskMode = _riskModeUnlocked;
+            var tooltip = "解锁风险配置入口，例如手动覆盖路径、raw 字段模板、手动覆盖目标分支。危险写入仍需要预览成功、勾选确认和二次确认。";
+            _riskModeUnlocked = GUILayout.Toggle(_riskModeUnlocked, new GUIContent("高级", tooltip), EditorStyles.toolbarButton, GUILayout.Width(54));
+            if (oldRiskMode != _riskModeUnlocked)
+            {
+                if (_riskModeUnlocked)
+                {
+                    var confirmed = EditorUtility.DisplayDialog(
+                        "开启高级入口",
+                        "高级入口会显示手动路径、raw 模板、目标分支覆盖等容易误操作的配置项。它不会自动执行写入；危险操作仍需要预览成功、勾选确认和二次确认。",
+                        "开启",
+                        "取消");
+                    if (!confirmed)
+                    {
+                        _riskModeUnlocked = false;
+                    }
+                }
+
+                EditorPrefs.SetBool(RiskModePrefKey, _riskModeUnlocked);
+            }
         }
 
         private void ShowHelpMenu()
@@ -608,7 +652,7 @@ namespace ConfigSheetForge.Unity.Editor
                 label += "  " + option.LastCommitText;
             }
 
-            if (_advancedMode && !string.IsNullOrWhiteSpace(option.Source))
+            if (_programView && !string.IsNullOrWhiteSpace(option.Source))
             {
                 label += "  source=" + option.Source;
             }
@@ -661,7 +705,7 @@ namespace ConfigSheetForge.Unity.Editor
                 Application.OpenURL(FirstNonEmpty(_githubPreflight.InstallHelpUrl, "https://cli.github.com/"));
             }
 
-            if (_advancedMode)
+            if (_programView)
             {
                 DrawReadonlyRow("GitHub remote", _githubPreflight.RemoteIsGitHub ? FirstNonEmpty(_githubRepository, "已识别") : "未识别", "来自项目 config 或 git remote。");
                 DrawReadonlyRow("gh", _githubPreflight.GhAvailable ? (_githubPreflight.GhAuthenticated ? "已安装且已登录" : "已安装但未登录") : "未安装/不可用", "用于自动识别 GitHub PR。");
@@ -1382,22 +1426,34 @@ namespace ConfigSheetForge.Unity.Editor
 
             _sheetName = EditorGUILayout.TextField(new GUIContent("工作表名", "普通用户可以不管。留空时默认使用显示名称，显示名称为空时使用配表ID。"), _sheetName);
             DrawReadonlyRow("本地 Excel cache", EffectiveNewTableExcelPath(), "普通新表自动生成到本地 cache。旧 Excel 迁移请使用“本地 Excel Seed”。");
-            if (_advancedMode)
+            if (_riskModeUnlocked)
             {
                 _excelPath = EditorGUILayout.TextField(new GUIContent("高级：覆盖本地 Excel cache 路径", "普通用户不需要改。仅在项目 cache 路径规则异常时覆盖。"), _excelPath);
             }
+            else if (_programView)
+            {
+                EditorGUILayout.LabelField("高级未开启：本地 Excel cache 路径按项目规则自动推导。", EditorStyles.wordWrappedMiniLabel);
+            }
 
             DrawStructuredFieldEditor();
-            _showFieldTemplateEditor = EditorGUILayout.Foldout(_showFieldTemplateEditor, "高级：编辑原始模板文本", true);
-            if (_showFieldTemplateEditor)
+            if (_riskModeUnlocked)
             {
-                EditorGUILayout.LabelField("每行一个字段：字段 key | 显示名 | 类型 | 说明。枚举类型写 enum:a,b,c。修改后会解析回上面的结构化字段。", EditorStyles.wordWrappedMiniLabel);
-                var previous = _fieldsText;
-                _fieldsText = EditorGUILayout.TextArea(_fieldsText, GUILayout.MinHeight(72));
-                if (!string.Equals(previous, _fieldsText, StringComparison.Ordinal))
+                _showFieldTemplateEditor = EditorGUILayout.Foldout(_showFieldTemplateEditor, "高级：编辑原始模板文本", true);
+                if (_showFieldTemplateEditor)
                 {
-                    ReplaceFieldRows(ParseFieldsText(_fieldsText));
+                    EditorGUILayout.HelpBox("风险配置：raw 模板文本容易写错字段类型或覆盖结构化编辑结果。普通用户请继续使用上面的字段表格。", MessageType.Warning);
+                    EditorGUILayout.LabelField("每行一个字段：字段 key | 显示名 | 类型 | 说明。枚举类型写 enum:a,b,c。修改后会解析回上面的结构化字段。", EditorStyles.wordWrappedMiniLabel);
+                    var previous = _fieldsText;
+                    _fieldsText = EditorGUILayout.TextArea(_fieldsText, GUILayout.MinHeight(72));
+                    if (!string.Equals(previous, _fieldsText, StringComparison.Ordinal))
+                    {
+                        ReplaceFieldRows(ParseFieldsText(_fieldsText));
+                    }
                 }
+            }
+            else if (_programView)
+            {
+                EditorGUILayout.LabelField("raw 模板文本在“高级”开启后才显示；日常新建配表请使用结构化字段表格。", EditorStyles.wordWrappedMiniLabel);
             }
             EditorGUILayout.EndVertical();
         }
@@ -1417,7 +1473,7 @@ namespace ConfigSheetForge.Unity.Editor
             for (var i = 0; i < _projectConfig.Roles.Count; i++)
             {
                 var role = _projectConfig.Roles[i];
-                labels[i] = FirstNonEmpty(role.DisplayName, role.Key) + (_advancedMode ? " (" + role.Key + ")" : "");
+                labels[i] = FirstNonEmpty(role.DisplayName, role.Key) + (_programView ? " (" + role.Key + ")" : "");
                 if (string.Equals(role.Key, _ownerRole, StringComparison.OrdinalIgnoreCase))
                 {
                     selected = i;
@@ -1453,7 +1509,7 @@ namespace ConfigSheetForge.Unity.Editor
                               string.Equals(kind, "main", StringComparison.OrdinalIgnoreCase) && role.CanApproveMainWriteBack;
                 if (include)
                 {
-                    values.Add(FirstNonEmpty(role.DisplayName, role.Key) + (_advancedMode ? " (" + role.Key + ")" : ""));
+                    values.Add(FirstNonEmpty(role.DisplayName, role.Key) + (_programView ? " (" + role.Key + ")" : ""));
                 }
             }
 
@@ -1463,7 +1519,7 @@ namespace ConfigSheetForge.Unity.Editor
         private void DrawStructuredFieldEditor()
         {
             EditorGUILayout.LabelField("字段", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField(_advancedMode ? "高级模式：显示 canonical 类型；提交时仍写入 lifecycle inputs fields。" : "普通视图：选择字段类型即可，不需要手写模板。", EditorStyles.wordWrappedMiniLabel);
+            EditorGUILayout.LabelField(_programView ? "程序视图：显示 canonical 类型；提交时仍写入 lifecycle inputs fields。" : "策划视图：选择字段类型即可，不需要手写模板。", EditorStyles.wordWrappedMiniLabel);
             var validation = ValidateNewTableInputs();
             for (var i = 0; i < _fieldRows.Count; i++)
             {
@@ -1510,7 +1566,7 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.BeginHorizontal();
             field.Key = EditorGUILayout.TextField(new GUIContent("key", "英文、数字、下划线，不能以数字开头。"), field.Key, GUILayout.MinWidth(110));
             field.DisplayName = EditorGUILayout.TextField(new GUIContent("中文名", "策划看到的字段名。"), field.DisplayName, GUILayout.MinWidth(110));
-            field.ValueKind = DrawFieldTypePopup(field.ValueKind, GUILayout.Width(_advancedMode ? 120 : 96));
+            field.ValueKind = DrawFieldTypePopup(field.ValueKind, GUILayout.Width(_programView ? 120 : 96));
             if (index == 0)
             {
                 field.IsPrimary = true;
@@ -1556,7 +1612,7 @@ namespace ConfigSheetForge.Unity.Editor
                 DrawEnumValuesEditor(field);
             }
 
-            if (_advancedMode)
+            if (_programView)
             {
                 EditorGUILayout.LabelField("内部类型：" + ValueKindForContract(field), EditorStyles.miniLabel);
             }
@@ -1573,7 +1629,7 @@ namespace ConfigSheetForge.Unity.Editor
             var labels = new string[specs.Count];
             for (var i = 0; i < specs.Count; i++)
             {
-                labels[i] = _advancedMode ? specs[i].Canonical : specs[i].Label;
+                labels[i] = _programView ? specs[i].Canonical : specs[i].Label;
                 if (string.Equals(specs[i].Canonical, canonical, StringComparison.OrdinalIgnoreCase))
                 {
                     selected = i;
@@ -2175,15 +2231,22 @@ namespace ConfigSheetForge.Unity.Editor
                 DrawReadonlyRow("共同祖先", FirstNonEmpty(_mergeBase, "待推导"), "source/head 与 target/base 的 merge-base。");
                 DrawReadonlyRow("目标 Feishu", FirstNonEmpty(_targetFeishuProfile, "按目标分支推导中"), "目标分支对应的 Feishu profile。");
                 DrawReadonlyRow("目标 Wiki", BuildTargetWikiText(), "目标分支对应的 Wiki branch 节点。");
-                if (!string.IsNullOrWhiteSpace(_prNumber))
+                if (_riskModeUnlocked)
                 {
-                    EditorGUILayout.HelpBox("一般不需要改目标分支。只有 PR 目标分支异常时，才在这里手动覆盖。", MessageType.Info);
-                    DrawTargetBranchPicker("手动覆盖目标分支", "高级选项：覆盖 GitHub PR base branch。", manualOverride: true);
-                }
+                    if (!string.IsNullOrWhiteSpace(_prNumber))
+                    {
+                        EditorGUILayout.HelpBox("风险配置：一般不需要改目标分支。只有 PR 目标分支异常时，才在这里手动覆盖。", MessageType.Warning);
+                        DrawTargetBranchPicker("手动覆盖目标分支", "高级选项：覆盖 GitHub PR base branch。", manualOverride: true);
+                    }
 
-                _mergeTableId = EditorGUILayout.TextField(new GUIContent("只比较单表", "可选；留空时 adapter 可比较当前分支所有在线表。"), _mergeTableId);
-                _mergeReportPath = EditorGUILayout.TextField(new GUIContent("报告路径", "写入 inputs.mergeReportPath。"), _mergeReportPath);
-                _mergedPath = EditorGUILayout.TextField(new GUIContent("合并结果路径", "写入 inputs.mergedPath。"), _mergedPath);
+                    _mergeTableId = EditorGUILayout.TextField(new GUIContent("只比较单表", "可选；留空时 adapter 可比较当前分支所有在线表。"), _mergeTableId);
+                    _mergeReportPath = EditorGUILayout.TextField(new GUIContent("报告路径", "写入 inputs.mergeReportPath。"), _mergeReportPath);
+                    _mergedPath = EditorGUILayout.TextField(new GUIContent("合并结果路径", "写入 inputs.mergedPath。"), _mergedPath);
+                }
+                else if (_programView)
+                {
+                    EditorGUILayout.LabelField("手动覆盖目标分支、单表比较和输出路径属于风险配置；开启顶部“高级”后才显示。", EditorStyles.wordWrappedMiniLabel);
+                }
             }
             _writeBackToMain = EditorGUILayout.Toggle(new GUIContent("申请写回 main", "默认关闭；关闭时只生成 merge.preview。"), _writeBackToMain);
             if (_writeBackToMain)

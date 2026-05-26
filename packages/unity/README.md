@@ -18,7 +18,9 @@
 
 顶部 `教程` 菜单会优先读取项目配置里的 `documentationTargets`、`localDocs`、`feishuRootUrl`，也会 fallback 到 config-sheet-forge 通用教程。
 
-新建配表页默认是表单，而不是工程模板文本。负责人角色来自项目 `roles` 的中文显示名；字段逐行编辑，类型在普通视图里显示为文本、整数、小数、是/否、日期、日期时间、枚举、JSON。高级模式会额外显示内部 key、canonical 类型、路径和完整命令。
+新建配表页默认是表单，而不是工程模板文本。负责人角色来自项目 `roles` 的中文显示名；字段逐行编辑，类型在 `策划视图` 里显示为文本、整数、小数、是/否、日期、日期时间、枚举、JSON。`程序视图` 会额外显示内部 key、canonical 类型、路径和命令摘要。
+
+顶部 `高级` 开关和 `策划视图 / 程序视图` 是两回事：视图只改变信息展示口径；高级入口才解锁手动路径覆盖、raw 字段模板、手动覆盖 PR 目标分支、单表比较和输出路径等风险配置。危险写入仍然需要预览成功、勾选确认和二次确认。
 
 合并页会做 GitHub PR 识别 preflight：git 是必需的；`gh` 可选但推荐，用于自动找到当前 PR 的目标分支。未安装或未登录 `gh` 时，窗口会提示安装 GitHub CLI 或运行 `gh auth login`，并允许手动搜索目标分支。
 
@@ -153,7 +155,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.14
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.15
 ```
 
 ## 测试
