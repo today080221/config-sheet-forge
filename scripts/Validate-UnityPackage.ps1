@@ -254,6 +254,20 @@ foreach ($requiredV417UiMarker in @("DrawTargetBranchBootstrapCard", "初始化�
   }
 }
 
+$seedLifecycle = Get-Content -Raw packages/unity/Runtime/Core/SeedLifecycle.cs
+$cliProgram = Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs
+foreach ($requiredV418Marker in @("RequiredPreviewFingerprint", "target_branch.bootstrap.postflight", "requestFingerprint", "ValidateTargetBranchBootstrapPostflightAsync", "RequireMatchingTargetBootstrapPreviewAsync", "--preview-result")) {
+  if (($coreContracts + "`n" + $seedLifecycle + "`n" + $cliProgram) -notlike "*$requiredV418Marker*") {
+    throw "Unity v0.4.18 target-branch apply guard marker is missing: $requiredV418Marker"
+  }
+}
+
+foreach ($requiredV418UiMarker in @("将写飞书", "--preview-result", "request fingerprint", "postflight: 已通过")) {
+  if ($window -notlike "*$requiredV418UiMarker*") {
+    throw "Unity v0.4.18 bootstrap apply wizard marker is missing: $requiredV418UiMarker"
+  }
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

@@ -49,8 +49,13 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("apply-contract sync-cache apply requires confirmation", ApplyContractSyncCacheApplyRequiresConfirmation),
     ("seed dry-run plans xlsx migration without writes", SeedDryRunPlansXlsxMigrationWithoutWrites),
     ("target branch bootstrap dry-run overrides seed target", TargetBranchBootstrapDryRunOverridesSeedTarget),
+    ("target branch bootstrap safe apply skips all local writes", TargetBranchBootstrapSafeApplySkipsAllLocalWrites),
     ("target branch bootstrap apply skips project config without confirmation", TargetBranchBootstrapSkipsProjectConfigWithoutConfirmation),
     ("target branch bootstrap apply skips excel to so without confirmation", TargetBranchBootstrapSkipsExcelToSoWithoutConfirmation),
+    ("target branch bootstrap repeated apply reuses online sheets", TargetBranchBootstrapRepeatedApplyReusesOnlineSheets),
+    ("target branch bootstrap postflight failure blocks apply result", TargetBranchBootstrapPostflightFailureBlocksApplyResult),
+    ("apply-contract target branch bootstrap requires preview result", ApplyContractTargetBranchBootstrapRequiresPreviewResult),
+    ("apply-contract target branch bootstrap rejects preview fingerprint mismatch", ApplyContractTargetBranchBootstrapRejectsPreviewFingerprintMismatch),
     ("seed manifest does not treat cache excelPath as source", SeedManifestDoesNotTreatCacheExcelPathAsSource),
     ("seed dry-run blocks merged xlsx cells", SeedDryRunBlocksMergedCells),
     ("sheet write ranges support columns past z", () => RunSync(SheetWriteRangeSupportsColumnsPastZ)),
@@ -86,6 +91,16 @@ static Task RunSync(Action action)
 {
     action();
     return Task.CompletedTask;
+}
+
+static JsonSerializerOptions CamelJsonOptions()
+{
+    return new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = true
+    };
 }
 
 static void SemanticHashIsStableAcrossRowOrder()
@@ -1406,6 +1421,33 @@ static async Task TargetBranchBootstrapDryRunOverridesSeedTarget()
     AssertEqual("", table.SpreadsheetToken, "Source branch spreadsheet locator must not leak into target bootstrap.");
     AssertTrue(result.Actions.Any(a => a.Action == "target_branch.bootstrap.plan"), "Result should expose a target bootstrap plan action.");
     AssertTrue(result.Actions.Any(a => a.Details.TryGetValue("tableCount", out var count) && count == "1"), "Plan should include table count.");
+    AssertTrue(result.Actions.Any(a => a.Details.TryGetValue("requestFingerprint", out var fingerprint) && !string.IsNullOrWhiteSpace(fingerprint)), "Plan should include a request fingerprint for apply proof.");
+}
+
+static async Task TargetBranchBootstrapSafeApplySkipsAllLocalWrites()
+{
+    var request = SampleTargetBootstrapRequest(dryRun: false);
+    request.TargetBranchBootstrap.ConfirmCreateOnlineSheets = true;
+    request.TargetBranchBootstrap.ConfirmRegistryUpsert = true;
+    request.TargetBranchBootstrap.ConfirmSchemaReviews = true;
+    request.TargetBranchBootstrap.ConfirmWriteLocalCache = false;
+    request.TargetBranchBootstrap.ConfirmWriteProjectConfig = false;
+    request.TargetBranchBootstrap.ConfirmExcelToSoSettings = false;
+    request.SeedFromLocalXlsx.Tables[0].UnityExcelToSo.SettingsPath = "ProjectSettings/ExcelToSO.json";
+    var platform = new SeedRecordingPlatform();
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
+
+    AssertTrue(result.Success, "Safe target bootstrap apply should succeed with only online sheets, registry, and schema reviews confirmed.");
+    AssertTrue(platform.Calls.Contains("ensure-online"), "Online sheet create/reuse must run.");
+    AssertTrue(platform.Calls.Contains("branch-binding"), "BranchBindings upsert must run.");
+    AssertTrue(platform.Calls.Contains("seed-registry"), "ConfigSheets upsert must run.");
+    AssertTrue(platform.Calls.Contains("seed-schema"), "SchemaReviews upsert must run.");
+    AssertTrue(!platform.Calls.Contains("cache"), "Local cache must not be written when confirmWriteLocalCache=false.");
+    AssertTrue(!platform.Calls.Contains("project-config"), "ProjectSettings must not be written when confirmWriteProjectConfig=false.");
+    AssertTrue(!platform.Calls.Contains("excel-to-so"), "ExcelToSO settings must not be written when confirmExcelToSoSettings=false.");
+    AssertTrue(result.Actions.Any(a => a.Action == "target_branch.bootstrap.summary" && a.Details["localCacheWrite"] == "skipped" && a.Details["projectConfigWrite"] == "skipped" && a.Details["excelToSoWrite"] == "skipped"), "Summary should clearly mark local writes as skipped.");
+    AssertTrue(result.Actions.Any(a => a.Action == "target_branch.bootstrap.postflight" && a.Status == "passed"), "Apply should run and pass postflight.");
 }
 
 static async Task TargetBranchBootstrapSkipsProjectConfigWithoutConfirmation()
@@ -1441,6 +1483,106 @@ static async Task TargetBranchBootstrapSkipsExcelToSoWithoutConfirmation()
     AssertTrue(result.Success, "Target bootstrap apply should not require ExcelToSO when that write is not confirmed.");
     AssertTrue(!platform.Calls.Contains("excel-to-so"), "ExcelToSO updater must not run when confirmExcelToSoSettings=false.");
     AssertTrue(result.Actions.Any(a => a.Action == "seed.unity.excel_to_so.upsert" && a.Status == "skipped"), "Result should make skipped ExcelToSO write visible.");
+}
+
+static async Task TargetBranchBootstrapRepeatedApplyReusesOnlineSheets()
+{
+    var platform = new SeedRecordingPlatform();
+    var first = SampleTargetBootstrapRequest(dryRun: false);
+    first.TargetBranchBootstrap.ConfirmCreateOnlineSheets = true;
+    first.TargetBranchBootstrap.ConfirmRegistryUpsert = true;
+    first.TargetBranchBootstrap.ConfirmSchemaReviews = true;
+    var firstResult = await LifecycleExecutor.ExecuteAsync(first, platform, CancellationToken.None);
+    AssertTrue(firstResult.Success, "First target bootstrap apply should pass.");
+
+    var second = SampleTargetBootstrapRequest(dryRun: false);
+    second.TargetBranchBootstrap.ConfirmCreateOnlineSheets = true;
+    second.TargetBranchBootstrap.ConfirmRegistryUpsert = true;
+    second.TargetBranchBootstrap.ConfirmSchemaReviews = true;
+    var secondResult = await LifecycleExecutor.ExecuteAsync(second, platform, CancellationToken.None);
+
+    AssertTrue(secondResult.Success, "Repeated target bootstrap apply should be idempotent in the platform contract.");
+    var importAction = secondResult.SeedTables[0].Actions.First(a => a.Action == "seed.sheet.import_or_create");
+    AssertEqual("true", importAction.Details["reused"], "Second run should reuse an existing online Sheet instead of reporting a new create.");
+}
+
+static async Task TargetBranchBootstrapPostflightFailureBlocksApplyResult()
+{
+    var request = SampleTargetBootstrapRequest(dryRun: false);
+    request.TargetBranchBootstrap.ConfirmCreateOnlineSheets = true;
+    request.TargetBranchBootstrap.ConfirmRegistryUpsert = true;
+    request.TargetBranchBootstrap.ConfirmSchemaReviews = true;
+    var platform = new SeedRecordingPlatform { PostflightMissingLocator = true };
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
+
+    AssertTrue(!result.Success, "Postflight missing locator should fail the lifecycle result.");
+    AssertTrue(result.Actions.Any(a => a.Action == "target_branch.bootstrap.postflight" && a.Status == "failed"), "Failed postflight action should be visible.");
+    AssertTrue(result.HumanReadableFailures.Any(f => f.Contains("postflight")), "Failure should be human-readable and mention postflight.");
+}
+
+static async Task ApplyContractTargetBranchBootstrapRequiresPreviewResult()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-bootstrap-preview-required-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        Directory.CreateDirectory(root);
+        var request = SampleTargetBootstrapRequest(dryRun: false);
+        request.TargetBranchBootstrap.ConfirmCreateOnlineSheets = true;
+        request.TargetBranchBootstrap.ConfirmRegistryUpsert = true;
+        request.TargetBranchBootstrap.ConfirmSchemaReviews = true;
+        var requestPath = Path.Combine(root, "request.json");
+        var resultPath = Path.Combine(root, "result.json");
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request, CamelJsonOptions()));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "apply-contract", "--request", requestPath, "--out", resultPath });
+
+        AssertEqual("2", exitCode.ToString(), "Target bootstrap apply-contract must require a matching dry-run result.");
+        AssertTrue(!File.Exists(resultPath), "Blocked apply should not emit a lifecycle result after preview validation failure.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task ApplyContractTargetBranchBootstrapRejectsPreviewFingerprintMismatch()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-bootstrap-preview-mismatch-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        Directory.CreateDirectory(root);
+        var request = SampleTargetBootstrapRequest(dryRun: false);
+        request.TargetBranchBootstrap.ConfirmCreateOnlineSheets = true;
+        request.TargetBranchBootstrap.ConfirmRegistryUpsert = true;
+        request.TargetBranchBootstrap.ConfirmSchemaReviews = true;
+        var requestPath = Path.Combine(root, "request.json");
+        var resultPath = Path.Combine(root, "result.json");
+        var previewPath = Path.Combine(root, "preview.json");
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request, CamelJsonOptions()));
+        await File.WriteAllTextAsync(previewPath, JsonSerializer.Serialize(new LifecycleContractResult
+        {
+            Operation = "bootstrap-target-branch-from-local-xlsx",
+            DryRun = true,
+            Success = true,
+            RequestFingerprint = "wrong-fingerprint"
+        }, CamelJsonOptions()));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "apply-contract", "--request", requestPath, "--out", resultPath, "--preview-result", previewPath });
+
+        AssertEqual("2", exitCode.ToString(), "Target bootstrap apply-contract should reject mismatched dry-run fingerprints.");
+        AssertTrue(!File.Exists(resultPath), "Blocked mismatch apply should not write a result file.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }
 
 static async Task SeedManifestDoesNotTreatCacheExcelPathAsSource()
@@ -2023,9 +2165,11 @@ sealed class RecordingLifecyclePlatform : ILifecyclePlatform
     }
 }
 
-sealed class SeedRecordingPlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform, IBranchWorkspacePlatform
+sealed class SeedRecordingPlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform, IBranchWorkspacePlatform, ITargetBranchBootstrapPostflightPlatform
 {
     public List<string> Calls { get; } = new();
+    public bool PostflightMissingLocator { get; set; }
+    private readonly HashSet<string> _knownSheets = new(StringComparer.OrdinalIgnoreCase);
 
     public Task<RegistrySnapshot> GetRegistrySnapshotAsync(RegistryContract registry, CancellationToken cancellationToken)
     {
@@ -2107,13 +2251,16 @@ sealed class SeedRecordingPlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatf
     public Task<SeedOnlineSheetResult> EnsureOnlineSheetAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, WorkbookDocument localWorkbook, string semanticHash, CancellationToken cancellationToken)
     {
         Calls.Add("ensure-online");
+        var profile = !string.IsNullOrWhiteSpace(table.Profile) ? table.Profile : !string.IsNullOrWhiteSpace(table.Branch) ? table.Branch : "main";
+        var reused = !_knownSheets.Add(profile + "/" + table.TableId);
         return Task.FromResult(new SeedOnlineSheetResult
         {
             SpreadsheetToken = "sht_" + table.TableId,
             SpreadsheetUrl = "https://example.feishu.cn/sheets/sht_" + table.TableId,
             SheetId = "sheet_" + table.TableId,
             WikiNodeToken = "wik_" + table.TableId,
-            Created = true,
+            Created = !reused,
+            Reused = reused,
             UsedRowCount = 2,
             UsedColumnCount = 2,
             ImportMode = "mock"
@@ -2169,6 +2316,23 @@ sealed class SeedRecordingPlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatf
     {
         Calls.Add("excel-to-so");
         return Task.FromResult(new LifecycleActionResult { Action = "seed.unity.excel_to_so.upsert", Status = "done", Message = "mock excel to so" });
+    }
+
+    public Task<LifecycleActionResult> ValidateTargetBranchBootstrapPostflightAsync(LifecycleContractRequest request, BranchWorkspaceResolution branchWorkspace, IList<SeedTableLifecycleResult> seedTables, CancellationToken cancellationToken)
+    {
+        Calls.Add("postflight");
+        var action = new LifecycleActionResult
+        {
+            Action = "target_branch.bootstrap.postflight",
+            Status = PostflightMissingLocator ? "failed" : "passed",
+            Message = PostflightMissingLocator
+                ? "postflight 发现目标分支缺少 ConfigSheets 定位：ItemsData。请确认 registry upsert 成功后重跑。"
+                : "postflight 通过：mock 目标分支定位完整。"
+        };
+        action.Details["postflightPassed"] = (!PostflightMissingLocator).ToString().ToLowerInvariant();
+        action.Details["verifiedConfigSheetCount"] = PostflightMissingLocator ? "0" : seedTables.Count.ToString();
+        action.Details["missingConfigSheetLocators"] = PostflightMissingLocator ? "ItemsData" : "";
+        return Task.FromResult(action);
     }
 
     private static WorkbookDocument MinimalWorkbook(SeedTableContract table)

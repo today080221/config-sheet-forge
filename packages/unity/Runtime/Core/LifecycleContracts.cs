@@ -27,6 +27,7 @@ namespace ConfigSheetForge.Core
         public BranchWorkspaceContract BranchWorkspace { get; set; } = new BranchWorkspaceContract();
         public string GateReportPath { get; set; } = "";
         public string ReportPath { get; set; } = "";
+        public string RequiredPreviewFingerprint { get; set; } = "";
         public List<BranchBindingContract> BranchBindings { get; set; } = new List<BranchBindingContract>();
         public Dictionary<string, string> DocumentationLinks { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
@@ -145,6 +146,8 @@ namespace ConfigSheetForge.Core
         public bool ConfirmWriteLocalCache { get; set; }
         public bool ConfirmWriteProjectConfig { get; set; }
         public bool ConfirmExcelToSoSettings { get; set; }
+        public string PreviewResultPath { get; set; } = "";
+        public string RequiredPreviewFingerprint { get; set; } = "";
     }
 
     public sealed class BranchBindingContract
@@ -193,6 +196,8 @@ namespace ConfigSheetForge.Core
         public List<LifecycleActionResult> Actions { get; set; } = new List<LifecycleActionResult>();
         public List<string> HumanReadableFailures { get; set; } = new List<string>();
         public Dictionary<string, string> DocumentationTargets { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        public string RequestFingerprint { get; set; } = "";
+        public Dictionary<string, string> RequestSummary { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public PrGateReport PrGateReport { get; set; } = new PrGateReport();
         public string GateReportPath { get; set; } = "";
         public List<SeedTableLifecycleResult> SeedTables { get; set; } = new List<SeedTableLifecycleResult>();

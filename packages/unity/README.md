@@ -33,9 +33,19 @@
 | 刷新状态 / 预览同步计划 / 预览新建配表 / 生成合并预览 / 运行 PR 检查 | 安全 | 只读取或生成报告，不写飞书、不改本地 cache |
 | 写入本地 cache | 中风险 | 会更新本地 cache，需要勾选确认 |
 | 创建在线表并登记 / 本地 Excel Seed apply / 确认写回 main | 高风险 | 会写飞书、项目状态或目标工作区，需要预览成功 + 勾选 + 二次确认 |
-| 初始化目标分支 | 高风险 | 先 dry-run；apply 拆分确认在线 Sheet、Base 注册、SchemaReviews、本地 cache、ProjectSettings、ExcelToSO |
+| 初始化目标分支 | 高风险 | 先 dry-run；apply 必须校验同输入 dry-run result，再拆分确认在线 Sheet、Base 注册、SchemaReviews、本地 cache、ProjectSettings、ExcelToSO |
 
 Editor assembly 引用 `ConfigSheetForge.Core`，也就是 CLI 编译的同一份语义工作簿 core。Provider 访问不放在 Unity 里，统一交给已安装的 `config-sheet-forge` CLI。
+
+## 首次初始化目标分支
+
+当 `compare-merge` 提示目标分支（通常是 `main`）缺 BranchBindings 或 ConfigSheets 定位时，程序视图会出现 `初始化目标分支 main（先 dry-run）`。推荐流程：
+
+1. 先生成 dry-run，确认目标节点、每张表的本地 xlsx 来源、目标在线 Sheet 标题，以及会写哪些 Base 表。
+2. apply 前只勾选 `在线 Sheet`、`BranchBindings / ConfigSheets`、`SchemaReviews baseline`。本地 cache、ProjectSettings、ExcelToSO 默认不勾。
+3. Unity 会把刚刚通过的 dry-run result 传给 CLI；CLI 会校验 `requestFingerprint`，输入不一致会拒绝写入。
+4. apply 完成后会 postflight：重新读 BranchBindings / ConfigSheets / SchemaReviews，确认每张表都有 SpreadsheetToken + SheetId，并确认在线回读、xlsx 导出和三方一致性检查完成。
+5. 如果中途失败，修复权限或重复记录后可以重跑；同一目标节点下已有同名在线 Sheet 会被复用，重复 registry 记录会列出 record_id 并阻断。
 
 稳定菜单契约：
 
@@ -166,7 +176,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.17
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.18
 ```
 
 ## 测试

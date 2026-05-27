@@ -14,7 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.17";
+        private const string PackageVersion = "v0.4.18";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -2346,7 +2346,7 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 GUILayout.Space(4);
                 EditorGUILayout.LabelField("执行初始化（分项确认）", EditorStyles.boldLabel);
-                EditorGUILayout.HelpBox("apply 会严格使用 bot 身份；不会静默 fallback 到 user。cache、ProjectSettings、ExcelToSO settings 都是单独确认，默认不写。", MessageType.Warning);
+                EditorGUILayout.HelpBox("apply 会严格使用 bot 身份；不会静默 fallback 到 user。执行前会校验最近一次同输入 dry-run result。cache、ProjectSettings、ExcelToSO settings 都是单独确认，默认不写。", MessageType.Warning);
                 _confirmTargetCreateOnlineSheets = EditorGUILayout.Toggle(new GUIContent("确认创建/复用在线 Sheet 和目标节点", "允许创建/复用 项目配置表/" + targetTitle + " 以及各表在线 Sheet。"), _confirmTargetCreateOnlineSheets);
                 _confirmTargetRegistryUpsert = EditorGUILayout.Toggle(new GUIContent("确认登记 BranchBindings / ConfigSheets", "允许 upsert Base 注册中心中的分支绑定和配表定位。"), _confirmTargetRegistryUpsert);
                 _confirmTargetSchemaReviews = EditorGUILayout.Toggle(new GUIContent("确认登记 SchemaReviews baseline", "允许为目标分支初始化 schema 审查记录。"), _confirmTargetSchemaReviews);
@@ -2361,7 +2361,7 @@ namespace ConfigSheetForge.Unity.Editor
 
                 if (DrawJobButton(new GUIContent("执行目标分支初始化", "危险操作：创建/复用在线 Sheet，并按确认项写 Base/cache/ProjectSettings/ExcelToSO。"), applyReady, GUILayout.Height(28)))
                 {
-                    var message = "将初始化目标分支 " + targetBranch + "。会创建/复用在线 Sheet，并写入已勾选的 Base/cache/ProjectSettings/ExcelToSO 项。请确认 dry-run 已通过。";
+                    var message = "将写飞书 " + targetBranch + "：创建/复用在线 Sheet，并写入 BranchBindings / ConfigSheets / SchemaReviews。默认不会改本地 Excel、ProjectSettings 或 ExcelToSO；只有勾选对应项才会写本地。执行前会校验最近一次同输入 dry-run。";
                     if (EditorUtility.DisplayDialog("确认初始化目标分支", message, "确认执行", "取消"))
                     {
                         RunProjectLifecycle("bootstrap-target-branch-from-local-xlsx", dryRun: false);
@@ -3800,6 +3800,12 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 if (!dryRun)
                 {
+                    if (!string.IsNullOrWhiteSpace(_lastResultPath))
+                    {
+                        args.Add("--preview-result");
+                        args.Add(_lastResultPath);
+                    }
+
                     if (_confirmTargetCreateOnlineSheets)
                     {
                         args.Add("--confirm-create-online-sheets");
@@ -4226,6 +4232,7 @@ namespace ConfigSheetForge.Unity.Editor
             AppendJsonProperty(builder, "targetGitBranch", FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main"), comma: true);
             AppendJsonProperty(builder, "targetProfile", FirstNonEmpty(_targetFeishuProfile, _targetBranch, "main"), comma: true);
             AppendJsonProperty(builder, "sourceMode", string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ? "local-xlsx" : "", comma: true);
+            AppendJsonProperty(builder, "previewResultPath", string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase) && !dryRun ? _lastResultPath : "", comma: true);
             AppendJsonProperty(builder, "confirmCreateOnlineSheets", _confirmTargetCreateOnlineSheets, comma: true);
             AppendJsonProperty(builder, "confirmRegistryUpsert", _confirmTargetRegistryUpsert, comma: true);
             AppendJsonProperty(builder, "confirmSchemaReviews", _confirmTargetSchemaReviews, comma: true);
@@ -6061,6 +6068,26 @@ namespace ConfigSheetForge.Unity.Editor
             builder.AppendLine("planned action 数量: " + (plannedActions >= 0 ? plannedActions.ToString() : "未记录"));
             builder.AppendLine("branch node: " + FirstNonEmpty(branchNode, "未记录"));
             builder.AppendLine("result path: " + FirstNonEmpty(resultPath, "未生成"));
+            var requestFingerprint = ExtractString(resultJson, "requestFingerprint");
+            if (!string.IsNullOrWhiteSpace(requestFingerprint))
+            {
+                builder.AppendLine("request fingerprint: " + requestFingerprint);
+            }
+
+            if (string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase) && !dryRun)
+            {
+                var postflightPassed = ExtractString(resultJson, "postflightPassed");
+                if (resultJson.IndexOf("\"target_branch.bootstrap.postflight\"", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    string.Equals(postflightPassed, "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    builder.AppendLine("postflight: 已通过");
+                }
+                else if (resultJson.IndexOf("\"target_branch.bootstrap.postflight\"", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    builder.AppendLine("postflight: 请展开详细日志查看");
+                }
+            }
+
             builder.AppendLine("是否写本地 cache: " + BuildCacheWriteText(dryRun, processOutput));
             if (failures.Count > 0)
             {

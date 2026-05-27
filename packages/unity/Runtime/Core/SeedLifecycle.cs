@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -125,6 +127,17 @@ namespace ConfigSheetForge.Core
         public List<ValidationFinding> Findings { get; set; } = new List<ValidationFinding>();
     }
 
+    public sealed class TargetBranchBootstrapInputSummary
+    {
+        public string Fingerprint { get; set; } = "";
+        public string TargetGitBranch { get; set; } = "";
+        public string TargetFeishuProfile { get; set; } = "";
+        public string TargetBranchWikiNodeTitle { get; set; } = "";
+        public string SourceMode { get; set; } = "local-xlsx";
+        public List<string> TableIds { get; set; } = new List<string>();
+        public string TableIdsText { get; set; } = "";
+    }
+
     public interface ISeedFromLocalXlsxPlatform
     {
         Task<SeedLocalWorkbookResult> ReadLocalXlsxAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, CancellationToken cancellationToken);
@@ -135,6 +148,11 @@ namespace ConfigSheetForge.Core
         Task<LifecycleActionResult> UpsertSeedRegistryRecordAsync(RegistryContract registry, SeedFromLocalXlsxContract seed, SeedTableContract table, SeedOnlineSheetResult sheet, CancellationToken cancellationToken);
         Task<LifecycleActionResult> UpsertSeedSchemaReviewAsync(RegistryContract registry, SeedFromLocalXlsxContract seed, SeedTableContract table, ContractGitSpec git, bool schemaChangeDetected, string reason, CancellationToken cancellationToken);
         Task<LifecycleActionResult> UpdateExcelToSoSettingsAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, CancellationToken cancellationToken);
+    }
+
+    public interface ITargetBranchBootstrapPostflightPlatform
+    {
+        Task<LifecycleActionResult> ValidateTargetBranchBootstrapPostflightAsync(LifecycleContractRequest request, BranchWorkspaceResolution branchWorkspace, IList<SeedTableLifecycleResult> seedTables, CancellationToken cancellationToken);
     }
 
     public static class SeedFromLocalXlsxLifecycle
@@ -162,6 +180,12 @@ namespace ConfigSheetForge.Core
             }
 
             seed.Tables = tables;
+
+            if (IsTargetBranchBootstrap(request))
+            {
+                var inputSummary = BuildTargetBranchBootstrapInputSummary(request);
+                ApplyTargetBootstrapRequestSummary(result, inputSummary, request, seed);
+            }
 
             if (!request.DryRun && !IsTargetBranchBootstrap(request) && !seed.ConfirmApply)
             {
@@ -247,6 +271,15 @@ namespace ConfigSheetForge.Core
             {
                 ApplyBranchWorkspace(seed, table, branchWorkspace);
                 await ExecuteTableAsync(request, seedPlatform, seed, table, result, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (IsTargetBranchBootstrap(request))
+            {
+                AddTargetBootstrapSummaryAction(request, seed, result, branchWorkspace);
+                if (!request.DryRun && result.Success)
+                {
+                    await RunTargetBootstrapPostflightAsync(request, platform, result, branchWorkspace, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
 
@@ -355,8 +388,11 @@ namespace ConfigSheetForge.Core
             createAction.Details["spreadsheetUrl"] = online.SpreadsheetUrl;
             createAction.Details["sheetId"] = online.SheetId;
             createAction.Details["wikiNodeToken"] = online.WikiNodeToken;
+            createAction.Details["wikiNodeUrl"] = table.WikiNodeUrl;
             createAction.Details["importMode"] = online.ImportMode;
             createAction.Details["capabilityDifference"] = online.CapabilityDifference;
+            createAction.Details["created"] = online.Created.ToString().ToLowerInvariant();
+            createAction.Details["reused"] = online.Reused.ToString().ToLowerInvariant();
             if (HasErrors(online.Findings))
             {
                 Fail(tableResult, result, "配表 “" + FirstNonEmpty(table.DisplayName, table.TableId) + "” 创建/导入飞书在线 Sheet 失败。请检查 bot scope、目标目录权限和导入权限。");
@@ -635,6 +671,7 @@ namespace ConfigSheetForge.Core
             }
 
             var action = result.AddAction("target_branch.bootstrap.plan", "planned", "预览：初始化目标分支 “" + branchWorkspace.GitBranch + "” 的在线工作区和表定位；dry-run 不写飞书、不改本地文件。");
+            action.Details["requestFingerprint"] = result.RequestFingerprint;
             action.Details["targetGitBranch"] = branchWorkspace.GitBranch;
             action.Details["targetFeishuProfile"] = FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch);
             action.Details["targetBranchWikiNodeTitle"] = branchWorkspace.NodeTitle;
@@ -670,6 +707,169 @@ namespace ConfigSheetForge.Core
             }
 
             return result;
+        }
+
+        public static TargetBranchBootstrapInputSummary BuildTargetBranchBootstrapInputSummary(LifecycleContractRequest request)
+        {
+            request = request ?? new LifecycleContractRequest();
+            var seed = request.SeedFromLocalXlsx ?? new SeedFromLocalXlsxContract();
+            var bootstrap = request.TargetBranchBootstrap ?? new TargetBranchBootstrapContract();
+            var workspace = request.BranchWorkspace ?? new BranchWorkspaceContract();
+            var merge = request.MergeInputs ?? new MergeInputsContract();
+            var targetBranch = FirstNonEmpty(bootstrap.TargetGitBranch, seed.TargetGitBranch, merge.TargetBranch, workspace.MainGitBranch, "main");
+            var mainBranch = FirstNonEmpty(workspace.MainGitBranch, "main");
+            var targetProfile = FirstNonEmpty(bootstrap.TargetFeishuProfile, seed.TargetFeishuProfile, merge.TargetFeishuProfile, string.Equals(targetBranch, mainBranch, StringComparison.OrdinalIgnoreCase) ? FirstNonEmpty(workspace.MainFeishuBranch, "main") : targetBranch);
+            var targetTitle = FirstNonEmpty(bootstrap.TargetBranchWikiNodeTitle, seed.TargetBranchWikiNodeTitle, merge.TargetBranchWikiNodeTitle, string.Equals(targetBranch, mainBranch, StringComparison.OrdinalIgnoreCase) ? FirstNonEmpty(workspace.MainNodeTitle, targetProfile, "main") : targetProfile);
+            var sourceMode = FirstNonEmpty(bootstrap.SourceMode, seed.SourceMode, "local-xlsx");
+            var selected = BuildSelectedTableSet(bootstrap.TableIds, seed.TableIds);
+            var tableLines = new List<string>();
+            var tableIds = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            var sourceTables = seed.Tables != null && seed.Tables.Count > 0
+                ? seed.Tables
+                : BuildSingleTableList(request);
+            foreach (var table in sourceTables)
+            {
+                if (table == null || string.IsNullOrWhiteSpace(table.TableId))
+                {
+                    continue;
+                }
+
+                if (selected.Count > 0 && !selected.Contains(table.TableId))
+                {
+                    continue;
+                }
+
+                tableIds.Add(table.TableId);
+                tableLines.Add(string.Join("|", new[]
+                {
+                    NormalizeFingerprintValue(table.TableId),
+                    NormalizeFingerprintValue(table.DisplayName),
+                    NormalizeFingerprintValue(FirstNonEmpty(table.SourceXlsxPath, seed.SourceXlsxPath)),
+                    NormalizeFingerprintValue(table.SheetName),
+                    table.FieldRow.ToString(CultureInfo.InvariantCulture),
+                    table.TypeRow.ToString(CultureInfo.InvariantCulture),
+                    table.DescriptionRow.ToString(CultureInfo.InvariantCulture),
+                    table.DataStartRow.ToString(CultureInfo.InvariantCulture),
+                    NormalizeFingerprintValue(table.TreatUnknownTypesAsEnum.ToString().ToLowerInvariant())
+                }));
+            }
+
+            tableLines.Sort(StringComparer.OrdinalIgnoreCase);
+            var basis = new StringBuilder();
+            basis.AppendLine("operation=bootstrap-target-branch-from-local-xlsx");
+            basis.AppendLine("targetGitBranch=" + NormalizeFingerprintValue(targetBranch));
+            basis.AppendLine("targetFeishuProfile=" + NormalizeFingerprintValue(targetProfile));
+            basis.AppendLine("targetBranchWikiNodeTitle=" + NormalizeFingerprintValue(targetTitle));
+            basis.AppendLine("sourceMode=" + NormalizeFingerprintValue(sourceMode));
+            basis.AppendLine("tables=" + string.Join(",", tableLines));
+
+            return new TargetBranchBootstrapInputSummary
+            {
+                Fingerprint = Sha256Hex(basis.ToString()),
+                TargetGitBranch = targetBranch,
+                TargetFeishuProfile = targetProfile,
+                TargetBranchWikiNodeTitle = targetTitle,
+                SourceMode = sourceMode,
+                TableIds = tableIds.ToList(),
+                TableIdsText = string.Join(", ", tableIds)
+            };
+        }
+
+        private static List<SeedTableContract> BuildSingleTableList(LifecycleContractRequest request)
+        {
+            var result = new List<SeedTableContract>();
+            if (request == null || request.Table == null || string.IsNullOrWhiteSpace(request.Table.TableId))
+            {
+                return result;
+            }
+
+            result.Add(new SeedTableContract
+            {
+                TableId = request.Table.TableId,
+                DisplayName = request.Table.DisplayName,
+                SourceXlsxPath = FirstNonEmpty(request.Table.SourceXlsxPath, request.Table.ExcelPath),
+                SheetName = request.Table.SheetName,
+                FieldRow = request.Table.FieldRow,
+                TypeRow = request.Table.TypeRow,
+                DescriptionRow = request.Table.DescriptionRow,
+                DataStartRow = request.Table.DataStartRow,
+                TreatUnknownTypesAsEnum = request.Table.TreatUnknownTypesAsEnum
+            });
+            return result;
+        }
+
+        private static void ApplyTargetBootstrapRequestSummary(LifecycleContractResult result, TargetBranchBootstrapInputSummary inputSummary, LifecycleContractRequest request, SeedFromLocalXlsxContract seed)
+        {
+            result.RequestFingerprint = inputSummary.Fingerprint;
+            result.RequestSummary["targetGitBranch"] = inputSummary.TargetGitBranch;
+            result.RequestSummary["targetFeishuProfile"] = inputSummary.TargetFeishuProfile;
+            result.RequestSummary["targetBranchWikiNodeTitle"] = inputSummary.TargetBranchWikiNodeTitle;
+            result.RequestSummary["sourceMode"] = inputSummary.SourceMode;
+            result.RequestSummary["tableIds"] = inputSummary.TableIdsText;
+            result.RequestSummary["confirmCreateOnlineSheets"] = CanCreateOnlineSheets(request, seed).ToString().ToLowerInvariant();
+            result.RequestSummary["confirmRegistryUpsert"] = CanRegistryUpsert(request, seed).ToString().ToLowerInvariant();
+            result.RequestSummary["confirmSchemaReviews"] = CanSchemaReviews(request, seed).ToString().ToLowerInvariant();
+            result.RequestSummary["confirmWriteLocalCache"] = CanWriteLocalCache(request, seed).ToString().ToLowerInvariant();
+            result.RequestSummary["confirmWriteProjectConfig"] = CanWriteProjectConfig(request, seed).ToString().ToLowerInvariant();
+            result.RequestSummary["confirmExcelToSoSettings"] = CanExcelToSoSettings(request, seed).ToString().ToLowerInvariant();
+        }
+
+        private static void AddTargetBootstrapSummaryAction(LifecycleContractRequest request, SeedFromLocalXlsxContract seed, LifecycleContractResult result, BranchWorkspaceResolution branchWorkspace)
+        {
+            var created = result.SeedTables.Count(t => t.Actions.Any(a => a.Action == "seed.sheet.import_or_create" && string.Equals(GetDetail(a, "created"), "true", StringComparison.OrdinalIgnoreCase)));
+            var reused = result.SeedTables.Count(t => t.Actions.Any(a => a.Action == "seed.sheet.import_or_create" && string.Equals(GetDetail(a, "reused"), "true", StringComparison.OrdinalIgnoreCase)));
+            var action = result.AddAction("target_branch.bootstrap.summary", result.Success ? (request.DryRun ? "planned" : "done") : "blocked", result.Success ? "目标分支初始化摘要已生成。" : "目标分支初始化未完成，请先处理失败原因。");
+            action.Details["requestFingerprint"] = result.RequestFingerprint;
+            action.Details["targetBranch"] = branchWorkspace.GitBranch;
+            action.Details["targetProfile"] = FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch);
+            action.Details["branchNode"] = FirstNonEmpty(branchWorkspace.RootWikiTitle, seed.WikiParentTitle, "项目配置表") + "/" + branchWorkspace.NodeTitle;
+            action.Details["branchWikiNodeToken"] = branchWorkspace.WikiNodeToken;
+            action.Details["branchWikiNodeUrl"] = branchWorkspace.WikiNodeUrl;
+            action.Details["tableCount"] = result.SeedTables.Count.ToString(CultureInfo.InvariantCulture);
+            action.Details["createdTables"] = created.ToString(CultureInfo.InvariantCulture);
+            action.Details["reusedTables"] = reused.ToString(CultureInfo.InvariantCulture);
+            action.Details["tableIds"] = string.Join(", ", result.SeedTables.Select(t => t.TableId));
+            action.Details["localCacheWrite"] = CanWriteLocalCache(request, seed) ? "confirmed" : "skipped";
+            action.Details["projectConfigWrite"] = CanWriteProjectConfig(request, seed) ? "confirmed" : "skipped";
+            action.Details["excelToSoWrite"] = CanExcelToSoSettings(request, seed) ? "confirmed" : "skipped";
+        }
+
+        private static async Task RunTargetBootstrapPostflightAsync(LifecycleContractRequest request, ILifecyclePlatform platform, LifecycleContractResult result, BranchWorkspaceResolution branchWorkspace, CancellationToken cancellationToken)
+        {
+            var postflightPlatform = platform as ITargetBranchBootstrapPostflightPlatform;
+            if (postflightPlatform == null)
+            {
+                var skipped = result.AddAction("target_branch.bootstrap.postflight", "skipped", "当前平台没有实现 postflight；CLI apply 会重新读取注册中心做校验。");
+                skipped.Details["postflightPassed"] = "unknown";
+                return;
+            }
+
+            var action = await postflightPlatform.ValidateTargetBranchBootstrapPostflightAsync(request, branchWorkspace, result.SeedTables, cancellationToken).ConfigureAwait(false);
+            result.Actions.Add(action);
+            if (string.Equals(action.Status, "failed", StringComparison.OrdinalIgnoreCase))
+            {
+                result.AddFailure(action.Message);
+            }
+        }
+
+        private static string NormalizeFingerprintValue(string value)
+        {
+            return (value ?? "").Replace("\\", "/").Trim();
+        }
+
+        private static string Sha256Hex(string value)
+        {
+            using (var sha = SHA256.Create())
+            {
+                var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value ?? ""));
+                var builder = new StringBuilder(bytes.Length * 2);
+                foreach (var b in bytes)
+                {
+                    builder.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+                }
+
+                return builder.ToString();
+            }
         }
 
         private static bool IsTargetBranchBootstrap(LifecycleContractRequest request)

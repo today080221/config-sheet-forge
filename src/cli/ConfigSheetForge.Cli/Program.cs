@@ -517,6 +517,7 @@ public static class Program
         request.DryRun = args.HasFlag("dry-run") || request.DryRun;
         ApplySeedConfirmationFlags(request, args);
         ApplyTargetBranchBootstrapArgs(request, args);
+        await RequireMatchingTargetBootstrapPreviewAsync(request, args);
 
         var result = await LifecycleExecutor.ExecuteAsync(request, new CliLifecyclePlatform(args, request), CancellationToken.None);
         await EmitLifecycleResultAsync(args, result);
@@ -659,6 +660,9 @@ public static class Program
         request.TargetBranchBootstrap.TargetFeishuProfile = FirstNonEmpty(args.Get("target-profile", ""), args.Get("target-feishu-profile", ""), request.TargetBranchBootstrap.TargetFeishuProfile, request.MergeInputs.TargetFeishuProfile);
         request.TargetBranchBootstrap.TargetBranchWikiNodeTitle = FirstNonEmpty(args.Get("target-branch-wiki-node-title", ""), args.Get("target-node-title", ""), request.TargetBranchBootstrap.TargetBranchWikiNodeTitle, request.MergeInputs.TargetBranchWikiNodeTitle);
         request.TargetBranchBootstrap.SourceMode = FirstNonEmpty(args.Get("source-mode", ""), request.TargetBranchBootstrap.SourceMode, "local-xlsx");
+        request.TargetBranchBootstrap.PreviewResultPath = FirstNonEmpty(args.Get("preview-result", ""), args.Get("require-preview", ""), request.TargetBranchBootstrap.PreviewResultPath);
+        request.TargetBranchBootstrap.RequiredPreviewFingerprint = FirstNonEmpty(args.Get("required-preview-fingerprint", ""), request.TargetBranchBootstrap.RequiredPreviewFingerprint, request.RequiredPreviewFingerprint);
+        request.RequiredPreviewFingerprint = FirstNonEmpty(request.RequiredPreviewFingerprint, request.TargetBranchBootstrap.RequiredPreviewFingerprint);
 
         var tableIds = args.Get("table-ids", "");
         if (!string.IsNullOrWhiteSpace(tableIds))
@@ -673,6 +677,83 @@ public static class Program
                 }
             }
         }
+    }
+
+    private static async Task RequireMatchingTargetBootstrapPreviewAsync(LifecycleContractRequest request, ParsedArgs args)
+    {
+        if (!TargetBranchBootstrapOperationRequested(request.Operation) || request.DryRun)
+        {
+            return;
+        }
+
+        request.TargetBranchBootstrap ??= new TargetBranchBootstrapContract();
+        var expected = SeedFromLocalXlsxLifecycle.BuildTargetBranchBootstrapInputSummary(request);
+        var requiredFingerprint = FirstNonEmpty(
+            args.Get("required-preview-fingerprint", ""),
+            request.TargetBranchBootstrap.RequiredPreviewFingerprint,
+            request.RequiredPreviewFingerprint);
+        if (!string.IsNullOrWhiteSpace(requiredFingerprint) &&
+            !string.Equals(requiredFingerprint, expected.Fingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException(
+                "初始化目标分支 apply 的输入和指定 dry-run fingerprint 不一致，已阻断写入。请重新生成 dry-run，再用新的 result.json 执行 apply。",
+                2,
+                "expected=" + expected.Fingerprint + "\nprovided=" + requiredFingerprint + "\ntargetBranch=" + expected.TargetGitBranch + "\ntables=" + expected.TableIdsText);
+        }
+
+        var previewPath = FirstNonEmpty(
+            args.Get("preview-result", ""),
+            args.Get("require-preview", ""),
+            request.TargetBranchBootstrap.PreviewResultPath);
+        if (string.IsNullOrWhiteSpace(previewPath))
+        {
+            throw new CliException(
+                "初始化目标分支 apply 必须带最近一次同输入 dry-run 结果。请先运行 bootstrap-target-branch-from-local-xlsx --dry-run，并在 apply 时传 --preview-result <dry-run-result.json>。",
+                2,
+                "targetBranch=" + expected.TargetGitBranch + "\ntargetProfile=" + expected.TargetFeishuProfile + "\ntables=" + expected.TableIdsText + "\nfingerprint=" + expected.Fingerprint);
+        }
+
+        var fullPreviewPath = Path.GetFullPath(previewPath);
+        if (!File.Exists(fullPreviewPath))
+        {
+            throw new CliException(
+                "找不到 dry-run result 文件，初始化目标分支 apply 已阻断。请重新生成 dry-run，并确认 --preview-result 指向正确文件。",
+                2,
+                fullPreviewPath);
+        }
+
+        var preview = await ReadJsonAsync<LifecycleContractResult>(fullPreviewPath);
+        if (!string.Equals(preview.Operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException("dry-run result 不是目标分支初始化操作，已阻断 apply。请重新生成“初始化目标分支”的 dry-run。", 2, fullPreviewPath);
+        }
+
+        if (!preview.DryRun)
+        {
+            throw new CliException("preview-result 不是 dry-run 结果，不能作为 apply 前置证明。请先生成 dry-run 预览。", 2, fullPreviewPath);
+        }
+
+        if (!preview.Success)
+        {
+            throw new CliException("最近一次目标分支初始化 dry-run 没有通过，不能 apply。请先处理 dry-run 中的失败原因。", 2, string.Join(Environment.NewLine, preview.HumanReadableFailures));
+        }
+
+        if (string.IsNullOrWhiteSpace(preview.RequestFingerprint))
+        {
+            throw new CliException("dry-run result 缺少 requestFingerprint，无法确认 apply 输入是否一致。请使用 v0.4.18 或更新版本重新生成 dry-run。", 2, fullPreviewPath);
+        }
+
+        if (!string.Equals(preview.RequestFingerprint, expected.Fingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException(
+                "初始化目标分支 apply 的输入和最近一次 dry-run 不一致，已阻断写入。请重新生成 dry-run，再执行 apply。",
+                2,
+                "dryRunFingerprint=" + preview.RequestFingerprint + "\napplyFingerprint=" + expected.Fingerprint + "\ntargetBranch=" + expected.TargetGitBranch + "\ntables=" + expected.TableIdsText);
+        }
+
+        request.RequiredPreviewFingerprint = expected.Fingerprint;
+        request.TargetBranchBootstrap.RequiredPreviewFingerprint = expected.Fingerprint;
+        request.TargetBranchBootstrap.PreviewResultPath = fullPreviewPath;
     }
 
     private static async Task HydrateSyncCacheRequestFromRegistryAsync(LifecycleContractRequest request, ParsedArgs args, string selectedTable)
@@ -1290,6 +1371,7 @@ public static class Program
 
             ApplySeedConfirmationFlags(request, args);
             ApplyTargetBranchBootstrapArgs(request, args);
+            await RequireMatchingTargetBootstrapPreviewAsync(request, args);
         }
 
         if (SyncCacheOperationRequested(request.Operation))
@@ -2664,6 +2746,7 @@ public static class Program
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --table <id> --source-xlsx <path> --dry-run");
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --all --manifest <project-config-or-contract> --dry-run");
         Console.WriteLine("  config-sheet-forge bootstrap-target-branch-from-local-xlsx --all --manifest <project-config-or-contract> --target-branch main --dry-run");
+        Console.WriteLine("  config-sheet-forge bootstrap-target-branch-from-local-xlsx --all --manifest <project-config-or-contract> --target-branch main --preview-result <dry-run-result.json> --confirm-create-online-sheets --confirm-registry-upsert --confirm-schema-reviews");
         Console.WriteLine("    apply flags: --confirm-create-online-sheets --confirm-registry-upsert --confirm-schema-reviews [--confirm-write-local-cache] [--confirm-write-project-config] [--confirm-excel-to-so]");
         Console.WriteLine("  config-sheet-forge merge --base <file> --ours <file> --theirs <file> [--out <report.md>]");
         Console.WriteLine("  config-sheet-forge gate [--cache <dir>] [--details] [--annotations github]");
@@ -2911,7 +2994,7 @@ public static class Program
         return value.Length <= 8 ? "********" : value.Substring(0, 4) + "..." + value.Substring(value.Length - 4);
     }
 
-    private sealed class CliLifecyclePlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform, IBranchWorkspacePlatform
+    private sealed class CliLifecyclePlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform, IBranchWorkspacePlatform, ITargetBranchBootstrapPostflightPlatform
     {
         private readonly ParsedArgs _args;
         private readonly LifecycleContractRequest _request;
@@ -2927,6 +3010,252 @@ public static class Program
         public async Task<RegistrySnapshot> GetRegistrySnapshotAsync(RegistryContract registry, CancellationToken cancellationToken)
         {
             return await LoadRegistrySnapshotFromLarkAsync(_gateway, registry.BaseToken, _request.Locale, _args);
+        }
+
+        public async Task<LifecycleActionResult> ValidateTargetBranchBootstrapPostflightAsync(LifecycleContractRequest request, BranchWorkspaceResolution branchWorkspace, IList<SeedTableLifecycleResult> seedTables, CancellationToken cancellationToken)
+        {
+            var action = new LifecycleActionResult
+            {
+                Action = "target_branch.bootstrap.postflight",
+                Status = "running",
+                Message = "正在重新读取 BranchBindings / ConfigSheets / SchemaReviews，确认目标分支初始化结果。"
+            };
+
+            var bootstrap = request.TargetBranchBootstrap ?? new TargetBranchBootstrapContract();
+            var targetBranch = FirstNonEmpty(branchWorkspace.GitBranch, bootstrap.TargetGitBranch, request.Git.Branch, "main");
+            var targetProfile = FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch, bootstrap.TargetFeishuProfile, request.Git.Profile, targetBranch);
+            var tableIds = seedTables
+                .Where(t => !string.IsNullOrWhiteSpace(t.TableId))
+                .Select(t => t.TableId)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(t => t, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var failures = new List<string>();
+
+            action.Details["targetBranch"] = targetBranch;
+            action.Details["targetProfile"] = targetProfile;
+            action.Details["branchNode"] = FirstNonEmpty(branchWorkspace.RootWikiTitle, "项目配置表") + "/" + FirstNonEmpty(branchWorkspace.NodeTitle, targetProfile);
+            action.Details["branchWikiNodeToken"] = branchWorkspace.WikiNodeToken;
+            action.Details["branchWikiNodeUrl"] = branchWorkspace.WikiNodeUrl;
+            action.Details["tableCount"] = tableIds.Count.ToString(CultureInfo.InvariantCulture);
+            action.Details["tableIds"] = string.Join(", ", tableIds);
+
+            if (string.IsNullOrWhiteSpace(request.Registry.BaseToken))
+            {
+                failures.Add("postflight 无法读取注册中心：ProjectSettings/contract 没有 registry.baseToken。请先补项目配置里的 live registry。");
+            }
+            else
+            {
+                RegistrySnapshot snapshot;
+                try
+                {
+                    snapshot = await LoadRegistrySnapshotFromLarkAsync(_gateway, request.Registry.BaseToken, request.Locale, _args);
+                }
+                catch (CliException ex)
+                {
+                    failures.Add("postflight 读取注册中心失败：" + ex.Message + "。请确认 lark-cli、bot scope、Base 共享权限都正常。");
+                    snapshot = new RegistrySnapshot();
+                }
+
+                ValidatePostflightBranchBinding(snapshot, request, targetBranch, targetProfile, action, failures);
+                ValidatePostflightConfigSheets(snapshot, request, targetProfile, tableIds, action, failures);
+                ValidatePostflightSchemaReviews(snapshot, request, targetProfile, tableIds, action, failures);
+            }
+
+            var failedOnlineRead = seedTables
+                .Where(t => !HasTableAction(t, "seed.online_read", "done") ||
+                            !HasTableAction(t, "seed.export_xlsx", "done") ||
+                            !HasTableAction(t, "seed.triangulation_compare", "passed") ||
+                            string.IsNullOrWhiteSpace(t.SpreadsheetToken) ||
+                            string.IsNullOrWhiteSpace(t.SheetId))
+                .Select(t => t.TableId)
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (failedOnlineRead.Count > 0)
+            {
+                failures.Add("postflight 发现这些表没有完成在线回读、xlsx 导出或三方一致性检查：" + string.Join(", ", failedOnlineRead) + "。不会把本次初始化视为完成，请检查对应表的 bot 读取/导出权限后重跑。");
+            }
+
+            action.Details["onlineReadAndExportVerified"] = (failedOnlineRead.Count == 0).ToString().ToLowerInvariant();
+            action.Details["postflightPassed"] = (failures.Count == 0).ToString().ToLowerInvariant();
+            if (failures.Count == 0)
+            {
+                action.Status = "passed";
+                action.Message = "postflight 通过：已重新读取注册中心，目标分支 “" + targetBranch + "” 下 " + tableIds.Count.ToString(CultureInfo.InvariantCulture) + " 张表都有在线 Sheet 定位，并且 apply 阶段已完成在线回读、导出和三方一致性检查。";
+            }
+            else
+            {
+                action.Status = "failed";
+                action.Message = string.Join(" ", failures);
+                action.Details["failureCount"] = failures.Count.ToString(CultureInfo.InvariantCulture);
+            }
+
+            return action;
+        }
+
+        private static bool HasTableAction(SeedTableLifecycleResult table, string actionName, string expectedStatus)
+        {
+            return table.Actions.Any(a =>
+                string.Equals(a.Action, actionName, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(a.Status, expectedStatus, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static void ValidatePostflightBranchBinding(RegistrySnapshot snapshot, LifecycleContractRequest request, string targetBranch, string targetProfile, LifecycleActionResult action, IList<string> failures)
+        {
+            var branchTable = FindRegistryTable(snapshot, "BranchBindings", request.Locale);
+            if (branchTable == null)
+            {
+                failures.Add("postflight 没有读到 BranchBindings 表。请确认 registry.tableIds.BranchBindings 配置正确，或先运行 registry-migrate。");
+                return;
+            }
+
+            var bindings = branchTable.Records
+                .Where(r => !r.IsEmpty)
+                .Where(r => string.Equals(GetRegistryRecordValue(r, "GitBranch", request.Locale, request.Registry), targetBranch, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(FirstNonEmpty(GetRegistryRecordValue(r, "Profile", request.Locale, request.Registry), GetRegistryRecordValue(r, "FeishuBranch", request.Locale, request.Registry)), targetProfile, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            action.Details["branchBindingRecordIds"] = string.Join(", ", bindings.Select(r => FirstNonEmpty(r.RecordId, "(无 record_id)")));
+            if (bindings.Count == 0)
+            {
+                failures.Add("postflight 没有读到目标分支 BranchBindings：GitBranch=" + targetBranch + "，Profile=" + targetProfile + "。请确认 registry upsert 成功。");
+                return;
+            }
+
+            if (bindings.Count > 1)
+            {
+                failures.Add("postflight 发现目标分支 BranchBindings 重复（record_id: " + action.Details["branchBindingRecordIds"] + "）。请先清理重复记录后重跑，工具不会静默任选一条。");
+                return;
+            }
+
+            var binding = bindings[0];
+            action.Details["branchBindingRecordId"] = binding.RecordId;
+            action.Details["verifiedBranchWikiNodeToken"] = GetRegistryRecordValue(binding, "WikiNodeToken", request.Locale, request.Registry);
+            action.Details["verifiedBranchWikiNodeUrl"] = GetRegistryRecordValue(binding, "WikiNodeUrl", request.Locale, request.Registry);
+        }
+
+        private static void ValidatePostflightConfigSheets(RegistrySnapshot snapshot, LifecycleContractRequest request, string targetProfile, IList<string> tableIds, LifecycleActionResult action, IList<string> failures)
+        {
+            var configTable = FindRegistryTable(snapshot, "ConfigSheets", request.Locale);
+            if (configTable == null)
+            {
+                failures.Add("postflight 没有读到 ConfigSheets 表。请确认 registry.tableIds.ConfigSheets 配置正确。");
+                return;
+            }
+
+            var missing = new List<string>();
+            var missingLocators = new List<string>();
+            var duplicates = new List<string>();
+            var recordIds = new List<string>();
+            foreach (var tableId in tableIds)
+            {
+                var matches = FindPostflightTableRows(configTable, request, tableId, targetProfile);
+                if (matches.Count == 0)
+                {
+                    missing.Add(tableId);
+                    continue;
+                }
+
+                if (matches.Count > 1)
+                {
+                    duplicates.Add(tableId + "(" + string.Join(", ", matches.Select(m => FirstNonEmpty(m.RecordId, "(无 record_id)"))) + ")");
+                    continue;
+                }
+
+                var row = matches[0];
+                var spreadsheetToken = GetRegistryRecordValue(row, "SpreadsheetToken", request.Locale, request.Registry);
+                var sheetId = GetRegistryRecordValue(row, "SheetId", request.Locale, request.Registry);
+                if (string.IsNullOrWhiteSpace(spreadsheetToken) || string.IsNullOrWhiteSpace(sheetId))
+                {
+                    missingLocators.Add(tableId + "(record_id: " + FirstNonEmpty(row.RecordId, "(无 record_id)") + ")");
+                    continue;
+                }
+
+                recordIds.Add(tableId + ":" + FirstNonEmpty(row.RecordId, "(无 record_id)"));
+            }
+
+            action.Details["configSheetRecordIds"] = string.Join(", ", recordIds);
+            action.Details["verifiedConfigSheetCount"] = recordIds.Count.ToString(CultureInfo.InvariantCulture);
+            action.Details["missingConfigSheets"] = string.Join(", ", missing);
+            action.Details["missingConfigSheetLocators"] = string.Join(", ", missingLocators);
+            action.Details["duplicateConfigSheets"] = string.Join(", ", duplicates);
+            if (missing.Count > 0)
+            {
+                failures.Add("postflight 发现目标分支缺少 ConfigSheets 记录：" + string.Join(", ", missing) + "。请确认 registry upsert 成功后重跑。");
+            }
+
+            if (missingLocators.Count > 0)
+            {
+                failures.Add("postflight 发现目标分支这些 ConfigSheets 缺 SpreadsheetToken 或 SheetId：" + string.Join(", ", missingLocators) + "。请检查在线 Sheet 创建/导入是否成功。");
+            }
+
+            if (duplicates.Count > 0)
+            {
+                failures.Add("postflight 发现 ConfigSheets 重复记录：" + string.Join(", ", duplicates) + "。请先清理重复记录后重跑，工具不会静默任选一条。");
+            }
+        }
+
+        private static void ValidatePostflightSchemaReviews(RegistrySnapshot snapshot, LifecycleContractRequest request, string targetProfile, IList<string> tableIds, LifecycleActionResult action, IList<string> failures)
+        {
+            if (request.TargetBranchBootstrap != null && !request.TargetBranchBootstrap.ConfirmSchemaReviews)
+            {
+                action.Details["schemaReviewsPostflight"] = "skipped";
+                return;
+            }
+
+            var schemaTable = FindRegistryTable(snapshot, "SchemaReviews", request.Locale);
+            if (schemaTable == null)
+            {
+                failures.Add("postflight 没有读到 SchemaReviews 表。请确认 registry.tableIds.SchemaReviews 配置正确。");
+                return;
+            }
+
+            var missing = new List<string>();
+            var duplicates = new List<string>();
+            var recordIds = new List<string>();
+            foreach (var tableId in tableIds)
+            {
+                var matches = FindPostflightTableRows(schemaTable, request, tableId, targetProfile);
+                if (matches.Count == 0)
+                {
+                    missing.Add(tableId);
+                    continue;
+                }
+
+                if (matches.Count > 1)
+                {
+                    duplicates.Add(tableId + "(" + string.Join(", ", matches.Select(m => FirstNonEmpty(m.RecordId, "(无 record_id)"))) + ")");
+                    continue;
+                }
+
+                recordIds.Add(tableId + ":" + FirstNonEmpty(matches[0].RecordId, "(无 record_id)"));
+            }
+
+            action.Details["schemaReviewRecordIds"] = string.Join(", ", recordIds);
+            action.Details["verifiedSchemaReviewCount"] = recordIds.Count.ToString(CultureInfo.InvariantCulture);
+            action.Details["missingSchemaReviews"] = string.Join(", ", missing);
+            action.Details["duplicateSchemaReviews"] = string.Join(", ", duplicates);
+            if (missing.Count > 0)
+            {
+                failures.Add("postflight 发现目标分支缺少 SchemaReviews baseline：" + string.Join(", ", missing) + "。请确认 confirmSchemaReviews=true 并重跑。");
+            }
+
+            if (duplicates.Count > 0)
+            {
+                failures.Add("postflight 发现 SchemaReviews 重复记录：" + string.Join(", ", duplicates) + "。请先清理重复记录后重跑。");
+            }
+        }
+
+        private static List<RegistryRecordSnapshot> FindPostflightTableRows(RegistryTableSnapshot table, LifecycleContractRequest request, string tableId, string targetProfile)
+        {
+            return table.Records
+                .Where(r => !r.IsEmpty)
+                .Where(r => string.Equals(GetRegistryRecordValue(r, "TableId", request.Locale, request.Registry), tableId, StringComparison.OrdinalIgnoreCase))
+                .Where(r => string.Equals(FirstNonEmpty(
+                    GetRegistryRecordValue(r, "Profile", request.Locale, request.Registry),
+                    GetRegistryRecordValue(r, "Branch", request.Locale, request.Registry),
+                    GetRegistryRecordValue(r, "FeishuBranch", request.Locale, request.Registry)), targetProfile, StringComparison.OrdinalIgnoreCase))
+                .ToList();
         }
 
         public Task<LifecycleActionResult> EnsureRegistryAsync(RegistryContract registry, RegistryDisplayMapping mapping, CancellationToken cancellationToken)

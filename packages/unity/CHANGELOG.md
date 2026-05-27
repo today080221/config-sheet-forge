@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.18
+
+- 目标分支初始化 apply 增加最后护栏：必须传入最近一次同输入 dry-run result，CLI 会校验 `requestFingerprint`，输入不一致或 dry-run 未通过时直接阻断写入。
+- `bootstrap-target-branch-from-local-xlsx` result 现在输出 `requestFingerprint`、目标 branch/profile/tableIds 和全部确认项摘要，方便负责人复核“这次 apply 到底是不是刚刚预览的那一份”。
+- CLI apply 增加 postflight：完成后重新读取 BranchBindings、ConfigSheets、SchemaReviews，验证目标分支每张表都有 SpreadsheetToken + SheetId，并确认 apply 阶段已完成在线回读、xlsx 导出和三方一致性检查。
+- 目标分支初始化摘要会明确列出本地 cache、ProjectSettings、ExcelToSO settings 是 confirmed 还是 skipped；安全 apply 模式可只写飞书在线资产、Base 注册中心和 SchemaReviews。
+- postflight 若发现 BranchBindings / ConfigSheets / SchemaReviews 重复记录，会列出 record_id 并阻断，不会静默任选一条；重跑会优先复用目标节点下已有在线 Sheet。
+- Unity 初始化 main 向导在 apply 前会把 `--preview-result` 传给 `apply-contract`，二次确认文案明确“将写飞书 main，不会改本地 Excel/ProjectSettings/ExcelToSO（除非勾选）”。
+- 测试新增安全 apply、本地写入 skipped、重复 apply 复用、postflight 缺定位阻断，以及 apply-contract preview proof 校验。
+
 ## 0.4.17
 
 - 新增 `bootstrap-target-branch-from-local-xlsx` lifecycle operation，用于把目标分支（例如 PR base `main`）从本地 xlsx 正式初始化为在线 Source of Truth 工作区，不再需要项目侧手动 patch seed contract。
