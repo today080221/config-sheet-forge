@@ -55,6 +55,18 @@ namespace ConfigSheetForge.Core
         public List<ProjectConfigTableSummary> CurrentBranchTables { get; set; } = new List<ProjectConfigTableSummary>();
         public List<BranchBindingContract> BranchBindings { get; set; } = new List<BranchBindingContract>();
         public List<string> Diagnostics { get; set; } = new List<string>();
+        public string LiveBranchBindingStatus { get; set; } = "";
+        public string LiveNextRecommendedAction { get; set; } = "";
+        public int LiveExpectedTableCount { get; set; }
+        public int LiveRegisteredTableCount { get; set; }
+        public List<string> LiveMissingTables { get; set; } = new List<string>();
+        public List<string> LiveMissingLocators { get; set; } = new List<string>();
+        public List<string> LiveDuplicateConfigSheets { get; set; } = new List<string>();
+        public string SyncCacheStatus { get; set; } = "";
+        public List<string> SyncCacheChangedTables { get; set; } = new List<string>();
+        public List<string> SyncCacheMissingCacheTables { get; set; } = new List<string>();
+        public List<string> SyncCacheUpToDateTables { get; set; } = new List<string>();
+        public List<string> SyncCacheBlockedTables { get; set; } = new List<string>();
 
         public bool HasLifecycleAdapter
         {
@@ -130,6 +142,7 @@ namespace ConfigSheetForge.Core
         public string UpdatedAt { get; set; } = "";
         public string OwnerRole { get; set; } = "";
         public string Status { get; set; } = "";
+        public string RecordId { get; set; } = "";
         public string SemanticCachePath { get; set; } = "";
         public string HashCachePath { get; set; } = "";
         public string CacheXlsxPath { get; set; } = "";
@@ -207,6 +220,7 @@ namespace ConfigSheetForge.Core
 
             var liveTables = ParseConfigSheetArrays(root);
             ApplyBranchContext(summary, currentGitBranch, root);
+            ApplyLiveLifecycleStatus(summary, root);
             ApplyCurrentBranchTables(summary, liveTables);
             return summary;
         }
@@ -678,7 +692,7 @@ namespace ConfigSheetForge.Core
         private static List<ProjectConfigTableSummary> ParseConfigSheetArrays(SimpleJsonValue root)
         {
             var result = new List<ProjectConfigTableSummary>();
-            foreach (var item in FindArraysDeep(root, "configSheets", "seedTables"))
+            foreach (var item in FindArraysDeep(root, "configSheets", "seedTables", "resolvedOnlineTables", "registeredOnlineTables"))
             {
                 foreach (var child in item.ArrayValue)
                 {
@@ -732,11 +746,44 @@ namespace ConfigSheetForge.Core
             table.UpdatedAt = FirstNonEmpty(GetString(item, "updatedAt", "lastUpdatedAt", "syncedAt"), GetString(feishu, "updatedAt", "lastUpdatedAt", "syncedAt"));
             table.OwnerRole = FirstNonEmpty(GetString(item, "ownerRole"), GetString(feishu, "ownerRole"));
             table.Status = FirstNonEmpty(GetString(item, "status"), GetString(feishu, "status"));
+            table.RecordId = FirstNonEmpty(GetString(item, "recordId", "record_id", "registryRecordId"), GetString(feishu, "recordId", "record_id", "registryRecordId"));
             table.SemanticCachePath = GetString(item, "semanticCachePath", "semanticPath");
             table.HashCachePath = GetString(item, "hashCachePath", "sha256Path");
             table.CacheXlsxPath = GetString(item, "cacheXlsxPath", "excelPath");
             table.SchemaStatus = ReadSchemaStatus(item);
             return table;
+        }
+
+        private static void ApplyLiveLifecycleStatus(ProjectConfigSummary summary, SimpleJsonValue root)
+        {
+            var branchStatus = GetObject(root, "branchStatus");
+            if (branchStatus != null && branchStatus.Kind == SimpleJsonKind.Object && branchStatus.ObjectValue.Count > 0)
+            {
+                summary.LiveBranchBindingStatus = GetString(branchStatus, "branchBindingStatus", "status");
+                summary.LiveNextRecommendedAction = GetString(branchStatus, "nextRecommendedAction");
+                summary.LiveExpectedTableCount = GetInt(branchStatus, "tableCountExpected", "expectedTableCount") ?? summary.LiveExpectedTableCount;
+                summary.LiveRegisteredTableCount = GetInt(branchStatus, "tableCountRegistered", "registeredTableCount") ?? summary.LiveRegisteredTableCount;
+                summary.LiveMissingTables = GetStringArray(branchStatus, "missingTables");
+                summary.LiveMissingLocators = GetStringArray(branchStatus, "missingLocators");
+                summary.LiveDuplicateConfigSheets = GetStringArray(branchStatus, "duplicateConfigSheets");
+                summary.BranchWikiNodeTitle = FirstNonEmpty(summary.BranchWikiNodeTitle, GetString(branchStatus, "branchWikiNodeTitle"));
+                summary.BranchWikiNodeUrl = FirstNonEmpty(summary.BranchWikiNodeUrl, GetString(branchStatus, "branchWikiNodeUrl"));
+                summary.BranchWikiNodeToken = FirstNonEmpty(summary.BranchWikiNodeToken, GetString(branchStatus, "branchWikiNodeToken"));
+                summary.Profile = FirstNonEmpty(summary.Profile, GetString(branchStatus, "currentProfile"));
+                summary.GitBranch = FirstNonEmpty(summary.GitBranch, GetString(branchStatus, "currentGitBranch"));
+            }
+
+            var syncSummary = GetObject(root, "syncCacheSummary");
+            if (syncSummary != null && syncSummary.Kind == SimpleJsonKind.Object && syncSummary.ObjectValue.Count > 0)
+            {
+                summary.SyncCacheStatus = GetString(syncSummary, "cacheStatus");
+                summary.SyncCacheChangedTables = GetStringArray(syncSummary, "changedTables");
+                summary.SyncCacheMissingCacheTables = GetStringArray(syncSummary, "missingCacheTables");
+                summary.SyncCacheUpToDateTables = GetStringArray(syncSummary, "upToDateTables");
+                summary.SyncCacheBlockedTables = GetStringArray(syncSummary, "blockedTables");
+            }
+
+            summary.SyncCacheStatus = FirstNonEmpty(summary.SyncCacheStatus, GetString(root, "cacheStatus"));
         }
 
         private static string ReadSchemaStatus(SimpleJsonValue item)
@@ -994,6 +1041,13 @@ namespace ConfigSheetForge.Core
             }
 
             return result;
+        }
+
+        private static int? GetInt(SimpleJsonValue parent, params string[] names)
+        {
+            var text = GetString(parent, names);
+            int value;
+            return int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) ? value : (int?)null;
         }
 
         private static bool? GetBoolean(SimpleJsonValue parent, params string[] names)

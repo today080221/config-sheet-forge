@@ -304,6 +304,12 @@ foreach ($requiredV422Marker in @("NormalizeReviewStatus", "GetRegistryStatusVal
   }
 }
 
+foreach ($requiredV423Marker in @("BranchStatusSummary", "SyncCacheSummary", "registry-status", "ResolvedOnlineTables", "bootstrap-current-branch-from-target", "ProjectConfigProbeTrustsLiveRegistryLocatorsOverEmptyProjectSettings")) {
+  if (($coreContracts + "`n" + $cliProgram + "`n" + $window + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV423Marker*") {
+    throw "Unity v0.4.23 live registry/source-of-truth marker is missing: $requiredV423Marker"
+  }
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

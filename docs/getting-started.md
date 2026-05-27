@@ -1,6 +1,14 @@
 # 入门指南
 
-Config Sheet Forge 会在项目根目录下维护本地配置和表注册表。它们位于 `.config-sheet-forge/`，可能包含租户文档 ID 或私有 URL，因此默认不进 git。
+Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本地 Excel/cache 只是给 Unity 和 PR 使用的物化结果。
+
+在 Unity 项目里，推荐把共享规则放在 `ProjectSettings/*ConfigSheetForge*.json`，把 live Sheet 定位放在飞书 Base 注册中心：
+
+- `ProjectSettings`：表 ID、分支/profile 命名规则、默认路径、负责人角色、adapter。
+- 飞书 Base 注册中心：BranchBindings、ConfigSheets、MergeReviews、SchemaReviews、Waivers。
+- `.config-sheet-forge/`：本机状态和 cache，可重建，默认不进 git。
+
+不要要求项目把每张表的 `SpreadsheetToken` / `SheetId` 写回 `ProjectSettings`。Unity 窗口会通过只读 `registry-status` 从 Base 注册中心读取 live locator。
 
 ## 安装要求
 
@@ -72,6 +80,18 @@ config-sheet-forge new-table --id items --name Items --spreadsheet "<sheet-url-o
 config-sheet-forge sync --table items --details
 config-sheet-forge gate --details --annotations github
 ```
+
+## 日常分支 Source of Truth 流程
+
+普通分支的日常流程是：
+
+1. 在飞书在线表改数据。
+2. Unity 点 `预览同步计划`。这会读取注册中心、在线 Sheet，并临时导出 xlsx 做三方检查；不会写正式 cache。
+3. 如果结果是 `upToDate`，不用写 cache，继续合并预览或 PR 检查。
+4. 如果结果是 `needsUpdate` 或 `missingCache`，再确认 `写入本地 cache`。
+5. 合并 PR 前生成合并预览、提交合并审查记录、运行 PR gate。
+
+新建 git 分支如果还没有在线工作区，应从 PR base/main 派生当前分支在线表。这个流程叫 `bootstrap-current-branch-from-target`。`本地 Excel Seed` 只用于历史迁移，不是日常功能分支入口。
 
 ## 从旧本地 xlsx seed
 

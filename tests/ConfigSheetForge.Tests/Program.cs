@@ -34,6 +34,10 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("branch binding one-to-one conflict blocks lifecycle", BranchBindingOneToOneConflictBlocksLifecycle),
     ("duplicate branch bindings block lifecycle with record ids", DuplicateBranchBindingsBlockLifecycleWithRecordIds),
     ("sync-cache hydrates branch workspace from registry snapshot", SyncCacheHydratesBranchWorkspaceFromRegistrySnapshot),
+    ("sync-cache exposes live registry branch status", SyncCacheExposesLiveRegistryBranchStatus),
+    ("project config probe trusts live registry locators over empty project settings", () => RunSync(ProjectConfigProbeTrustsLiveRegistryLocatorsOverEmptyProjectSettings)),
+    ("sync-cache dry-run summary drives next action", () => RunSync(SyncCacheDryRunSummaryDrivesNextAction)),
+    ("current branch bootstrap from target plans instead of seed", CurrentBranchBootstrapFromTargetPlansInsteadOfSeed),
     ("compare-merge dry-run hydrates workspaces and table scope", CompareMergeDryRunHydratesWorkspacesAndTableScope),
     ("compare-merge dry-run fails without target workspace", CompareMergeDryRunFailsWithoutTargetWorkspace),
     ("compare-merge dry-run fingerprints merge review input", CompareMergeDryRunFingerprintsMergeReviewInput),
@@ -887,6 +891,199 @@ static async Task SyncCacheHydratesBranchWorkspaceFromRegistrySnapshot()
     AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.export_xlsx" && a.Status == "planned"), "sync-cache dry-run should plan export.");
     AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.triangulation_compare" && a.Status == "planned"), "sync-cache dry-run should plan triangulation.");
     AssertTrue(result.Actions.Any(a => a.Action == "sync-cache.cache_hash_gate" && a.Status == "planned"), "sync-cache dry-run should plan hash gate.");
+}
+
+static async Task SyncCacheExposesLiveRegistryBranchStatus()
+{
+    var request = new LifecycleContractRequest
+    {
+        Operation = "sync-cache",
+        DryRun = true,
+        Locale = "zh-Hans",
+        Git = new ContractGitSpec { Branch = "feature/config", Profile = "feature-config" },
+        BranchWorkspace = new BranchWorkspaceContract { RequireOneToOneBinding = true },
+        Registry = new RegistryContract { BaseToken = "base_mock" }
+    };
+
+    request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract { TableId = "ItemsData", DisplayName = "Items" });
+    request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract { TableId = "SkillsData", DisplayName = "Skills" });
+    var snapshot = SampleBranchStatusSnapshot();
+    ConfigSheetForge.Cli.Program.HydrateSyncCacheRequestFromRegistrySnapshot(request, snapshot, "");
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+
+    AssertTrue(result.Success, "Live BranchBindings + ConfigSheets should make sync-cache preview valid even when ProjectSettings locators are empty.");
+    AssertEqual("ok", result.BranchStatus.BranchBindingStatus, "Branch status should be ok.");
+    AssertEqual("2", result.BranchStatus.TableCountRegistered.ToString(), "Branch status should count registered online tables.");
+    AssertEqual("2", result.ResolvedOnlineTables.Count.ToString(), "Result should expose resolvedOnlineTables for Unity UI.");
+    AssertTrue(result.SeedTables.Any(t => t.TableId == "ItemsData" && t.SpreadsheetToken == "sht_items" && t.SheetId == "sheet_items"), "Result seedTables should carry hydrated live locators.");
+}
+
+static void ProjectConfigProbeTrustsLiveRegistryLocatorsOverEmptyProjectSettings()
+{
+    var json = """
+{
+  "git": { "branch": "feature/config", "profile": "feature-config" },
+  "branchWorkspace": {
+    "profileNameTemplate": "{gitBranch}",
+    "branchNodeTitleTemplate": "branch-{slug}",
+    "mainGitBranch": "main",
+    "mainFeishuBranch": "main"
+  },
+  "tables": [
+    { "tableId": "ItemsData", "displayName": "Items", "profile": "feature-config" },
+    { "tableId": "SkillsData", "displayName": "Skills", "profile": "feature-config" }
+  ],
+  "branchStatus": {
+    "currentGitBranch": "feature/config",
+    "currentProfile": "feature-config",
+    "branchBindingStatus": "ok",
+    "branchWikiNodeToken": "wik_feature",
+    "branchWikiNodeUrl": "https://example.feishu.cn/wiki/wik_feature",
+    "tableCountExpected": 2,
+    "tableCountRegistered": 2,
+    "missingTables": [],
+    "missingLocators": [],
+    "resolvedOnlineTables": [
+      { "tableId": "ItemsData", "displayName": "Items", "profile": "feature-config", "spreadsheetToken": "sht_items", "sheetId": "sheet_items", "onlineSheetUrl": "https://example.feishu.cn/sheets/sht_items" },
+      { "tableId": "SkillsData", "displayName": "Skills", "profile": "feature-config", "spreadsheetToken": "sht_skills", "sheetId": "sheet_skills", "onlineSheetUrl": "https://example.feishu.cn/sheets/sht_skills" }
+    ]
+  }
+}
+""";
+    var summary = ProjectConfigProbe.ProbeJson("Temp/registry-status.result.json", json, "feature/config");
+
+    AssertEqual("2", summary.CurrentBranchTableCount.ToString(), "Live registry tables should override empty ProjectSettings locators.");
+    AssertEqual("live-registry", summary.CurrentBranchTableSource, "Current branch table source should be live registry.");
+    AssertTrue(summary.CurrentBranchTables.All(t => string.IsNullOrWhiteSpace(t.BlockingReason)), "Hydrated live tables should not be marked as missing online locators.");
+    AssertEqual("ok", summary.LiveBranchBindingStatus, "Probe should read branch status.");
+}
+
+static void SyncCacheDryRunSummaryDrivesNextAction()
+{
+    var json = """
+{
+  "operation": "sync-cache",
+  "dryRun": true,
+  "success": true,
+  "branchWorkspace": { "wikiNodeToken": "wik_feature", "wikiNodeUrl": "https://example.feishu.cn/wiki/wik_feature", "nodeTitle": "branch-feature-config", "profile": "feature-config" },
+  "branchStatus": {
+    "currentGitBranch": "feature/config",
+    "currentProfile": "feature-config",
+    "branchBindingStatus": "ok",
+    "tableCountExpected": 1,
+    "tableCountRegistered": 1,
+    "missingTables": [],
+    "missingLocators": [],
+    "resolvedOnlineTables": [
+      { "tableId": "ItemsData", "profile": "feature-config", "spreadsheetToken": "sht_items", "sheetId": "sheet_items" }
+    ]
+  },
+  "syncCacheSummary": {
+    "cacheStatus": "upToDate",
+    "upToDateTables": [ "ItemsData" ],
+    "changedTables": [],
+    "missingCacheTables": [],
+    "blockedTables": []
+  }
+}
+""";
+    var summary = ProjectConfigProbe.ProbeJson("Temp/sync-cache.result.json", json, "feature/config");
+    AssertEqual("upToDate", summary.SyncCacheStatus, "Probe should read sync cache status.");
+    AssertEqual("1", summary.SyncCacheUpToDateTables.Count.ToString(), "Probe should read up-to-date tables.");
+    AssertTrue(summary.LiveMissingTables.Count == 0 && summary.LiveMissingLocators.Count == 0, "Live status should not invent missing tables.");
+}
+
+static async Task CurrentBranchBootstrapFromTargetPlansInsteadOfSeed()
+{
+    var request = new LifecycleContractRequest
+    {
+        Operation = "bootstrap-current-branch-from-target",
+        DryRun = true,
+        Git = new ContractGitSpec { Branch = "feature/config", Profile = "feature-config" },
+        BranchWorkspace = new BranchWorkspaceContract
+        {
+            MainGitBranch = "main",
+            MainFeishuBranch = "main",
+            ProfileNameTemplate = "{gitBranch}",
+            BranchNodeTitleTemplate = "branch-{slug}"
+        },
+        MergeInputs = new MergeInputsContract { TargetBranch = "main", TargetFeishuProfile = "main" }
+    };
+    request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract { TableId = "ItemsData", DisplayName = "Items" });
+    request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract { TableId = "SkillsData", DisplayName = "Skills" });
+    request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract { TableId = "ItemsData", DisplayName = "Items", Profile = "main", SpreadsheetToken = "sht_items_main", SheetId = "sheet_items" });
+    request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract { TableId = "SkillsData", DisplayName = "Skills", Profile = "main", SpreadsheetToken = "sht_skills_main", SheetId = "sheet_skills" });
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+
+    AssertTrue(result.Success, "Current branch bootstrap dry-run should be a first-class safe plan.");
+    AssertTrue(result.Actions.Any(a => a.Action == "current_branch.bootstrap_from_target.plan" && a.Details["targetBranch"] == "main"), "Plan should identify target branch.");
+    AssertTrue(result.Actions.Any(a => a.Action == "current_branch.sheets.copy_from_target"), "Plan should describe deriving online sheets from target branch, not local Excel Seed.");
+}
+
+static RegistrySnapshot SampleBranchStatusSnapshot()
+{
+    var snapshot = new RegistrySnapshot();
+    snapshot.Tables.Add(new RegistryTableSnapshot
+    {
+        MachineKey = "BranchBindings",
+        TableId = "tbl_branch",
+        DisplayName = "分支绑定",
+        Records =
+        {
+            new RegistryRecordSnapshot
+            {
+                RecordId = "rec_branch",
+                Values =
+                {
+                    ["Git分支"] = "feature/config",
+                    ["配置Profile"] = "feature-config",
+                    ["Wiki节点Token"] = "wik_feature",
+                    ["Wiki节点链接"] = "https://example.feishu.cn/wiki/wik_feature",
+                    ["状态"] = "active"
+                }
+            }
+        }
+    });
+    snapshot.Tables.Add(new RegistryTableSnapshot
+    {
+        MachineKey = "ConfigSheets",
+        TableId = "tbl_config",
+        DisplayName = "配表清单",
+        Records =
+        {
+            new RegistryRecordSnapshot
+            {
+                RecordId = "rec_items",
+                Values =
+                {
+                    ["配表ID"] = "ItemsData",
+                    ["显示名称"] = "Items",
+                    ["配置Profile"] = "feature-config",
+                    ["在线表Token"] = "sht_items",
+                    ["工作表ID"] = "sheet_items",
+                    ["在线表链接"] = "https://example.feishu.cn/sheets/sht_items",
+                    ["Wiki节点Token"] = "wik_feature"
+                }
+            },
+            new RegistryRecordSnapshot
+            {
+                RecordId = "rec_skills",
+                Values =
+                {
+                    ["配表ID"] = "SkillsData",
+                    ["显示名称"] = "Skills",
+                    ["配置Profile"] = "feature-config",
+                    ["在线表Token"] = "sht_skills",
+                    ["工作表ID"] = "sheet_skills",
+                    ["在线表链接"] = "https://example.feishu.cn/sheets/sht_skills",
+                    ["Wiki节点Token"] = "wik_feature"
+                }
+            }
+        }
+    });
+    return snapshot;
 }
 
 static async Task CompareMergeDryRunHydratesWorkspacesAndTableScope()

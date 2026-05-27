@@ -49,6 +49,11 @@ public static class Program
                 "new-table" => await NewTableAsync(parsed),
                 "sync" => await SyncAsync(parsed),
                 "sync-cache" => await SyncCacheLifecycleAsync(parsed),
+                "registry-status" => await RegistryStatusAsync(parsed, "registry-status"),
+                "branch-status" => await RegistryStatusAsync(parsed, "branch-status"),
+                "sync-status" => await RegistryStatusAsync(parsed, "sync-status"),
+                "bootstrap-current-branch-from-target" => await CurrentBranchBootstrapFromTargetAsync(parsed, "bootstrap-current-branch-from-target"),
+                "branch-workspace-bootstrap-from-target" => await CurrentBranchBootstrapFromTargetAsync(parsed, "branch-workspace-bootstrap-from-target"),
                 "seed-from-xlsx" => await SeedFromXlsxAsync(parsed),
                 "bootstrap-target-branch-from-local-xlsx" => await SeedFromXlsxAsync(parsed, "bootstrap-target-branch-from-local-xlsx"),
                 "merge" => await MergeAsync(parsed),
@@ -337,10 +342,22 @@ public static class Program
         return hasError ? 1 : 0;
     }
 
-    private static async Task<int> SyncTableConfigsAsync(Workspace workspace, ParsedArgs args, IList<TableConfig> tables, string cacheDirectory, string excelCacheDirectory)
+    private static async Task<SyncCacheSummary> SyncTableConfigsAsync(Workspace workspace, ParsedArgs args, IList<TableConfig> tables, string cacheDirectory, string excelCacheDirectory, bool writeFormalCache)
     {
-        Directory.CreateDirectory(cacheDirectory);
-        Directory.CreateDirectory(excelCacheDirectory);
+        var summary = new SyncCacheSummary
+        {
+            CacheStatus = "unknown",
+            TableCount = tables.Count,
+            WillWriteFiles = writeFormalCache,
+            NoChangeKeepsMtime = true
+        };
+
+        if (writeFormalCache)
+        {
+            Directory.CreateDirectory(cacheDirectory);
+            Directory.CreateDirectory(excelCacheDirectory);
+        }
+
         var hasError = false;
         foreach (var table in tables)
         {
@@ -367,6 +384,7 @@ public static class Program
             foreach (var finding in result.Findings)
             {
                 PrintFinding(finding, args.HasFlag("details"));
+                summary.PortableSubsetFindings.Add(table.Id + ": " + finding.Code + " " + finding.Message);
                 if (finding.Severity == FindingSeverity.Error)
                 {
                     hasError = true;
@@ -377,6 +395,7 @@ public static class Program
             if (result.Workbook == null)
             {
                 hasError = true;
+                summary.BlockedTables.Add(table.Id);
                 continue;
             }
 
@@ -393,6 +412,7 @@ public static class Program
                 PrintFinding(finding, args.HasFlag("details"));
                 hasError = true;
                 tableHasError = true;
+                summary.PortableSubsetFindings.Add(table.Id + ": " + finding.Code + " " + finding.Message);
             }
             else
             {
@@ -400,6 +420,7 @@ public static class Program
                 foreach (var finding in structureReport.Findings)
                 {
                     PrintValidation(finding, args.HasFlag("details"));
+                    summary.PortableSubsetFindings.Add(table.Id + ": " + finding.Code + " " + finding.Message);
                     if (finding.Severity == FindingSeverity.Error)
                     {
                         hasError = true;
@@ -423,6 +444,7 @@ public static class Program
                 foreach (var finding in xlsxImport.Report.Findings)
                 {
                     PrintValidation(finding, args.HasFlag("details"));
+                    summary.PortableSubsetFindings.Add(table.Id + ": " + finding.Code + " " + finding.Message);
                     if (finding.Severity == FindingSeverity.Error)
                     {
                         hasError = true;
@@ -435,10 +457,15 @@ public static class Program
                 {
                     hasError = true;
                     tableHasError = true;
+                    summary.TriangulationFailedCount++;
                     foreach (var diff in triangulation.DiffSummary)
                     {
                         Console.WriteLine("[error] " + diff + " (sync.triangulation_failed)");
                     }
+                }
+                else
+                {
+                    summary.TriangulationPassedCount++;
                 }
             }
 
@@ -446,13 +473,141 @@ public static class Program
             {
                 Console.WriteLine("[stage] 正在 hash gate: " + table.Id);
                 var hash = SemanticHasher.ComputeHash(result.Workbook);
-                var cacheWrite = await WriteCacheIfChangedAsync(cacheDirectory, table.Id, result.Workbook, hash, xlsxPath, excelCacheDirectory);
+                var cacheState = await InspectCacheStateAsync(cacheDirectory, excelCacheDirectory, table.Id, hash, xlsxPath);
+                if (cacheState.Missing)
+                {
+                    summary.MissingCacheTables.Add(table.Id);
+                }
+                else if (cacheState.Changed)
+                {
+                    summary.ChangedTables.Add(table.Id);
+                }
+                else
+                {
+                    summary.UpToDateTables.Add(table.Id);
+                }
+
+                bool cacheWrite = false;
+                if (writeFormalCache)
+                {
+                    cacheWrite = await WriteCacheIfChangedAsync(cacheDirectory, table.Id, result.Workbook, hash, xlsxPath, excelCacheDirectory);
+                    if (cacheWrite)
+                    {
+                        summary.WillWriteFilePaths.AddRange(BuildCacheFilePaths(cacheDirectory, excelCacheDirectory, table.Id));
+                    }
+                }
+
                 Console.WriteLine(table.Id + ": " + hash);
-                Console.WriteLine(cacheWrite ? "  cache updated" : "  无变化，未重写 cache");
+                if (writeFormalCache)
+                {
+                    Console.WriteLine(cacheWrite ? "  cache updated" : "  无变化，未重写 cache");
+                }
+                else
+                {
+                    Console.WriteLine(cacheState.Fresh ? "  dry-run: cache 已是最新，不会写本地文件" : "  dry-run: cache 需要更新，但本次不写本地文件");
+                }
+            }
+            else
+            {
+                summary.BlockedTables.Add(table.Id);
             }
         }
 
-        return hasError ? 1 : 0;
+        summary.ChangedTables = DistinctSorted(summary.ChangedTables);
+        summary.MissingCacheTables = DistinctSorted(summary.MissingCacheTables);
+        summary.UpToDateTables = DistinctSorted(summary.UpToDateTables);
+        summary.BlockedTables = DistinctSorted(summary.BlockedTables);
+        summary.WillWriteFilePaths = DistinctSorted(summary.WillWriteFilePaths);
+        summary.PortableSubsetFindings = DistinctSorted(summary.PortableSubsetFindings);
+        summary.CacheStatus = ComputeSyncCacheStatus(summary, hasError);
+        summary.WillWriteFiles = writeFormalCache && (summary.ChangedTables.Count > 0 || summary.MissingCacheTables.Count > 0);
+        return summary;
+    }
+
+    private static async Task<CacheState> InspectCacheStateAsync(string cacheDirectory, string excelCacheDirectory, string tableId, string hash, string tempXlsxPath)
+    {
+        var semanticPath = Path.Combine(cacheDirectory, tableId + ".semantic.json");
+        var shaPath = Path.Combine(cacheDirectory, tableId + ".sha256");
+        var xlsxRoot = FirstNonEmpty(excelCacheDirectory, cacheDirectory);
+        var xlsxPath = Path.Combine(xlsxRoot, MakeSafeFileName(tableId) + ".xlsx");
+        var existingHash = await ReadExistingHashAsync(shaPath);
+        var requiresXlsx = !string.IsNullOrWhiteSpace(tempXlsxPath);
+        var missing = string.IsNullOrWhiteSpace(existingHash) || !File.Exists(semanticPath) || (requiresXlsx && !File.Exists(xlsxPath));
+        var changed = !missing && !string.Equals(existingHash, hash, StringComparison.Ordinal);
+        return new CacheState { Missing = missing, Changed = changed, Fresh = !missing && !changed };
+    }
+
+    private static List<string> BuildCacheFilePaths(string cacheDirectory, string excelCacheDirectory, string tableId)
+    {
+        var xlsxRoot = FirstNonEmpty(excelCacheDirectory, cacheDirectory);
+        return new List<string>
+        {
+            Path.Combine(cacheDirectory, tableId + ".semantic.json"),
+            Path.Combine(cacheDirectory, tableId + ".sha256"),
+            Path.Combine(xlsxRoot, MakeSafeFileName(tableId) + ".xlsx")
+        };
+    }
+
+    private static List<string> DistinctSorted(IEnumerable<string> values)
+    {
+        return values
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Select(v => v.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string ComputeSyncCacheStatus(SyncCacheSummary summary, bool hasError)
+    {
+        if (hasError || summary.BlockedTables.Count > 0)
+        {
+            return "blocked";
+        }
+
+        if (summary.MissingCacheTables.Count > 0)
+        {
+            return "missingCache";
+        }
+
+        if (summary.ChangedTables.Count > 0)
+        {
+            return "needsUpdate";
+        }
+
+        if (summary.UpToDateTables.Count > 0 && summary.UpToDateTables.Count == summary.TableCount)
+        {
+            return "upToDate";
+        }
+
+        return "unknown";
+    }
+
+    private static void ApplySyncCacheSummary(LifecycleContractResult result, SyncCacheSummary summary)
+    {
+        result.SyncCacheSummary = summary ?? new SyncCacheSummary();
+        if (result.BranchStatus != null && result.BranchStatus.RegisteredOnlineTables.Count > 0)
+        {
+            result.SyncCacheSummary.ResolvedOnlineTables = new List<ResolvedOnlineTableStatus>(result.BranchStatus.RegisteredOnlineTables);
+        }
+
+        foreach (var action in result.Actions.Where(a => string.Equals(a.Action, "sync-cache.cache_hash_gate", StringComparison.OrdinalIgnoreCase)))
+        {
+            action.Details["cacheStatus"] = result.SyncCacheSummary.CacheStatus;
+            action.Details["changedTables"] = string.Join(", ", result.SyncCacheSummary.ChangedTables);
+            action.Details["missingCacheTables"] = string.Join(", ", result.SyncCacheSummary.MissingCacheTables);
+            action.Details["upToDateTables"] = string.Join(", ", result.SyncCacheSummary.UpToDateTables);
+            action.Details["blockedTables"] = string.Join(", ", result.SyncCacheSummary.BlockedTables);
+            action.Details["willWriteFiles"] = result.SyncCacheSummary.WillWriteFiles.ToString().ToLowerInvariant();
+            action.Details["noChangeKeepsMtime"] = result.SyncCacheSummary.NoChangeKeepsMtime.ToString().ToLowerInvariant();
+        }
+    }
+
+    private sealed class CacheState
+    {
+        public bool Missing { get; set; }
+        public bool Changed { get; set; }
+        public bool Fresh { get; set; }
     }
 
     private static async Task<int> SyncLocalInputAsync(Workspace workspace, string input, string tableId)
@@ -557,7 +712,7 @@ public static class Program
 
         await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
         var result = await LifecycleExecutor.ExecuteAsync(request, new CliLifecyclePlatform(args, request), CancellationToken.None);
-        if (result.Success && !request.DryRun)
+        if (result.Success)
         {
             var tables = BuildSyncCacheTables(request, args.Get("table", ""));
             if (tables.Count == 0)
@@ -566,14 +721,81 @@ public static class Program
             }
             else
             {
-                var exit = await SyncTableConfigsAsync(workspace, args, tables, request.SyncCache.CacheDirectory, request.SyncCache.ExcelCacheDirectory);
-                if (exit != 0)
+                var summary = await SyncTableConfigsAsync(workspace, args, tables, request.SyncCache.CacheDirectory, request.SyncCache.ExcelCacheDirectory, writeFormalCache: !request.DryRun);
+                ApplySyncCacheSummary(result, summary);
+                if (string.Equals(summary.CacheStatus, "blocked", StringComparison.OrdinalIgnoreCase))
                 {
-                    result.AddFailure("sync-cache apply 没有通过在线读取 / xlsx 导出 / 三方一致性检查，已阻断 cache 更新。");
+                    result.AddFailure((request.DryRun ? "sync-cache dry-run" : "sync-cache apply") + " 没有通过在线读取 / xlsx 导出 / 三方一致性检查。" + (request.DryRun ? "本次没有写本地 cache。" : "已阻断 cache 更新。"));
                 }
             }
         }
 
+        await EmitLifecycleResultAsync(args, result);
+        foreach (var failure in result.HumanReadableFailures)
+        {
+            Console.Error.WriteLine("[error] " + failure);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> RegistryStatusAsync(ParsedArgs args, string operation)
+    {
+        if (args.HasFlag("allow-user-fallback"))
+        {
+            throw new CliException(operation + " 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+        }
+
+        var workspace = await LoadWorkspaceAsync(requireConfig: false);
+        var request = args.TryGet("manifest", out var manifestPath)
+            ? await ReadSeedManifestAsync(workspace, manifestPath, args)
+            : NewSeedRequestFromWorkspace(workspace, args);
+        request.Operation = operation;
+        request.DryRun = true;
+        request.SyncCache ??= new SyncCacheContract();
+        request.SyncCache.TableId = args.Get("table", request.SyncCache.TableId);
+        await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
+        var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+        await EmitLifecycleResultAsync(args, result);
+        foreach (var failure in result.HumanReadableFailures)
+        {
+            Console.Error.WriteLine("[error] " + failure);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task HydrateCurrentBranchBootstrapRequestFromRegistryAsync(LifecycleContractRequest request, ParsedArgs args, string selectedTable)
+    {
+        if (request == null || request.Registry == null || string.IsNullOrWhiteSpace(request.Registry.BaseToken))
+        {
+            return;
+        }
+
+        var gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
+        var snapshot = await LoadRegistrySnapshotFromLarkAsync(gateway, request.Registry.BaseToken, request.Locale, args);
+        HydrateCompareMergeRequestFromRegistrySnapshot(request, snapshot, selectedTable);
+    }
+
+    private static async Task<int> CurrentBranchBootstrapFromTargetAsync(ParsedArgs args, string operation)
+    {
+        if (args.HasFlag("allow-user-fallback"))
+        {
+            throw new CliException(operation + " 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+        }
+
+        var workspace = await LoadWorkspaceAsync(requireConfig: false);
+        var request = args.TryGet("manifest", out var manifestPath)
+            ? await ReadSeedManifestAsync(workspace, manifestPath, args)
+            : NewSeedRequestFromWorkspace(workspace, args);
+        request.Operation = operation;
+        request.DryRun = args.HasFlag("dry-run") || !args.HasFlag("yes");
+        request.SyncCache ??= new SyncCacheContract();
+        request.MergeInputs ??= new MergeInputsContract();
+        request.MergeInputs.TargetBranch = FirstNonEmpty(args.Get("target-branch", ""), request.MergeInputs.TargetBranch, request.BranchWorkspace.MainGitBranch, "main");
+        request.MergeInputs.TargetFeishuProfile = FirstNonEmpty(args.Get("target-profile", ""), args.Get("target-feishu-profile", ""), request.MergeInputs.TargetFeishuProfile, request.BranchWorkspace.MainFeishuBranch, request.MergeInputs.TargetBranch);
+        await HydrateCurrentBranchBootstrapRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
+        var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
         await EmitLifecycleResultAsync(args, result);
         foreach (var failure in result.HumanReadableFailures)
         {
@@ -1794,6 +2016,17 @@ public static class Program
             await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
         }
 
+        if (BranchStatusOperationRequested(request.Operation))
+        {
+            request.SyncCache ??= new SyncCacheContract();
+            if (args.HasFlag("allow-user-fallback"))
+            {
+                throw new CliException(request.Operation + " 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+            }
+
+            await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
+        }
+
         if (CompareMergeOperationRequested(request.Operation))
         {
             request.MergeInputs ??= new MergeInputsContract();
@@ -1837,7 +2070,7 @@ public static class Program
             ? new PreviewLifecyclePlatform()
             : new CliLifecyclePlatform(args, request);
         var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
-        if (SyncCacheOperationRequested(request.Operation) && result.Success && !request.DryRun)
+        if (SyncCacheOperationRequested(request.Operation) && result.Success)
         {
             request.SyncCache ??= new SyncCacheContract();
             var workspace = await LoadWorkspaceAsync(requireConfig: false);
@@ -1848,10 +2081,11 @@ public static class Program
             }
             else
             {
-                var exit = await SyncTableConfigsAsync(workspace, args, tables, request.SyncCache.CacheDirectory, request.SyncCache.ExcelCacheDirectory);
-                if (exit != 0)
+                var summary = await SyncTableConfigsAsync(workspace, args, tables, request.SyncCache.CacheDirectory, request.SyncCache.ExcelCacheDirectory, writeFormalCache: !request.DryRun);
+                ApplySyncCacheSummary(result, summary);
+                if (string.Equals(summary.CacheStatus, "blocked", StringComparison.OrdinalIgnoreCase))
                 {
-                    result.AddFailure("sync-cache apply 没有通过在线读取 / xlsx 导出 / 三方一致性检查，已阻断 cache 更新。");
+                    result.AddFailure((request.DryRun ? "sync-cache dry-run" : "sync-cache apply") + " 没有通过在线读取 / xlsx 导出 / 三方一致性检查。" + (request.DryRun ? "本次没有写本地 cache。" : "已阻断 cache 更新。"));
                 }
             }
         }
@@ -2976,6 +3210,13 @@ public static class Program
                string.Equals(operation, "sync-from-online-sheet", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool BranchStatusOperationRequested(string operation)
+    {
+        return string.Equals(operation, "registry-status", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(operation, "branch-status", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(operation, "sync-status", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool CompareMergeOperationRequested(string operation)
     {
         return string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase);
@@ -3375,7 +3616,9 @@ public static class Program
         Console.WriteLine("  config-sheet-forge discover-root --query <name>");
         Console.WriteLine("  config-sheet-forge new-table --id <id> --name <name> [--spreadsheet <url-or-token>] [--sheet-id <id>] [--range <A1>] [--field-row <0>] [--type-row <1>] [--description-row <2>] [--data-start-row <3>]");
         Console.WriteLine("  config-sheet-forge sync [--table <id>] [--input <semantic.json>]");
+        Console.WriteLine("  config-sheet-forge registry-status [--manifest <project-config-or-contract>] [--details]");
         Console.WriteLine("  config-sheet-forge sync-cache [--table <id>] [--manifest <project-config-or-contract>] [--dry-run] [--yes]");
+        Console.WriteLine("  config-sheet-forge bootstrap-current-branch-from-target --manifest <project-config-or-contract> --target-branch main --dry-run");
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --table <id> --source-xlsx <path> --dry-run");
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --all --manifest <project-config-or-contract> --dry-run");
         Console.WriteLine("  config-sheet-forge bootstrap-target-branch-from-local-xlsx --all --manifest <project-config-or-contract> --target-branch main --dry-run");

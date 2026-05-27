@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.22";
+        private const string PackageVersion = "v0.4.23";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -31,6 +31,7 @@ namespace ConfigSheetForge.Unity.Editor
         private const float MinBottomDrawerHeight = 220f;
         private const float DefaultBottomDrawerHeight = 260f;
         private const double MergeProbeCacheSeconds = 30;
+        private const double RegistryStatusProbeCacheSeconds = 60;
         private const double ReadonlyRefreshThrottleSeconds = 1.5;
         private const int MaxOutputCharacters = 120000;
 
@@ -176,6 +177,8 @@ namespace ConfigSheetForge.Unity.Editor
         private Vector2 _mainScroll;
         private Vector2 _outputScroll;
         private DateTime _lastReadonlyRefreshUtc;
+        private DateTime _lastRegistryStatusProbeUtc;
+        private string _lastRegistryStatusProbeKey = "";
 
         [MenuItem("Tools/Config Sheet Forge", false, 1000)]
         public static void OpenStatusWindow()
@@ -245,6 +248,7 @@ namespace ConfigSheetForge.Unity.Editor
                              "这里只刷新本地状态，不会下载、不导出、不改文件。" + Environment.NewLine +
                              "主流程只保留刷新状态、预览同步计划、运行 PR 检查。";
             SetOutputText("");
+            StartRegistryStatusProbeIfNeeded(force: false);
         }
 
         private void OnDisable()
@@ -497,6 +501,13 @@ namespace ConfigSheetForge.Unity.Editor
                 return "预览同步计划 / 写入本地 cache";
             }
 
+            if (string.Equals(operation, "registry-status", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(operation, "branch-status", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(operation, "sync-status", StringComparison.OrdinalIgnoreCase))
+            {
+                return "读取在线注册中心状态";
+            }
+
             if (string.Equals(operation, "new-table", StringComparison.OrdinalIgnoreCase))
             {
                 return "新建配表";
@@ -510,6 +521,12 @@ namespace ConfigSheetForge.Unity.Editor
             if (string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
             {
                 return "初始化目标分支";
+            }
+
+            if (string.Equals(operation, "bootstrap-current-branch-from-target", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(operation, "branch-workspace-bootstrap-from-target", StringComparison.OrdinalIgnoreCase))
+            {
+                return "从目标分支初始化当前分支";
             }
 
             if (string.Equals(operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
@@ -551,6 +568,13 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (job.DryRun)
             {
+                if (string.Equals(job.Operation, "registry-status", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(job.Operation, "branch-status", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(job.Operation, "sync-status", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "安全性：只读注册中心状态，不读取/导出在线 Sheet，不写飞书、不改本地 cache。";
+                }
+
                 return "安全性：dry-run 只读取和生成预览，不写飞书、不改本地 cache、不改 ProjectSettings。";
             }
 
@@ -572,6 +596,12 @@ namespace ConfigSheetForge.Unity.Editor
             if (string.Equals(job.Operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
             {
                 return "安全性：初始化目标分支按分项确认写入；未勾选的 cache、ProjectSettings、ExcelToSO 不会写。";
+            }
+
+            if (string.Equals(job.Operation, "bootstrap-current-branch-from-target", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(job.Operation, "branch-workspace-bootstrap-from-target", StringComparison.OrdinalIgnoreCase))
+            {
+                return "安全性：当前入口先生成从目标分支派生当前分支的预览，不写本地 cache、不改 ProjectSettings。";
             }
 
             if (string.Equals(job.Operation, "submit-merge-review", StringComparison.OrdinalIgnoreCase) ||
@@ -925,6 +955,16 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             var next = BuildNextStepText(projectRoot);
+            if (string.Equals(next, "初始化当前分支在线表", StringComparison.OrdinalIgnoreCase))
+            {
+                return "当前 Git 分支还没有完整在线工作区；下一步从 main/目标分支初始化当前分支在线表，先生成预览，不写本地文件。";
+            }
+
+            if (string.Equals(next, "写入本地 cache", StringComparison.OrdinalIgnoreCase))
+            {
+                return "最近一次同步预览发现本地 cache 需要更新；确认后才会写入本地 cache。";
+            }
+
             if (string.Equals(next, "预览同步计划", StringComparison.OrdinalIgnoreCase))
             {
                 return "当前最稳妥的下一步是先预览同步计划：只读取在线信息，不写飞书、不改本地 cache。";
@@ -973,6 +1013,24 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             var next = BuildNextStepText(projectRoot);
+            if (string.Equals(next, "初始化当前分支在线表", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DashboardAction(
+                    "初始化当前分支在线表",
+                    "从 main/目标分支为当前 Git 分支创建或复用在线工作区；先生成 dry-run 预览。",
+                    "安全：先预览，不写飞书、不改本地 cache、不改 ProjectSettings。",
+                    RunCurrentBranchBootstrapPreview);
+            }
+
+            if (string.Equals(next, "写入本地 cache", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DashboardAction(
+                    "去写入本地 cache",
+                    "跳到配表页；写入前仍需要勾选确认。",
+                    "中风险：会更新本地 cache，必须勾选确认且预览通过。",
+                    () => { _selectedTab = TablesTab; _showSyncSection = true; });
+            }
+
             if (string.Equals(next, "运行 PR 检查", StringComparison.OrdinalIgnoreCase))
             {
                 return new DashboardAction(
@@ -1039,6 +1097,7 @@ namespace ConfigSheetForge.Unity.Editor
             RefreshReadonlyStatus(force: true);
             _lastCommand = "只读刷新状态";
             SetImmediateOutput("已刷新状态。没有下载、导出或写入任何文件。", "");
+            StartRegistryStatusProbeIfNeeded(force: true);
         }
 
         private void DrawWorkflowGuideCards()
@@ -1638,13 +1697,18 @@ namespace ConfigSheetForge.Unity.Editor
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("同步当前分支 cache", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("预览同步计划只读取在线注册中心并生成计划，不写飞书、不改本地 cache、不改 ProjectSettings。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("预览同步计划会从在线注册中心定位当前分支 16 张表，读取/导出到 Temp 并做三方检查；不会写飞书、不改正式 cache、不改 ProjectSettings。", EditorStyles.wordWrappedLabel);
             EditorGUILayout.LabelField("写入本地 cache 只有在预览通过、勾选确认并通过弹窗后才会执行；它会读取在线 Sheet、导出 xlsx、完成三方一致性检查和 hash gate 后更新本地 cache。", EditorStyles.wordWrappedLabel);
+            DrawReadonlyRow("最近同步结论", BuildSyncCacheStatusText(), "来自最近一次 sync-cache dry-run/apply result。");
             _confirmSyncApply = EditorGUILayout.Toggle(new GUIContent("确认写入本地 cache", "允许更新 .config-sheet-forge/cache 和 excel-cache；必须先预览通过。"), _confirmSyncApply);
-            var syncApplyReady = _confirmSyncApply && LastPreviewPassed("sync-cache");
+            var syncApplyReady = _confirmSyncApply && LastPreviewPassed("sync-cache") && SyncPreviewRequiresCacheWrite();
             if (_confirmSyncApply && !LastPreviewPassed("sync-cache"))
             {
                 EditorGUILayout.HelpBox("请先预览同步计划，并确认预览成功后再写入本地 cache。", MessageType.Warning);
+            }
+            else if (_confirmSyncApply && LastPreviewPassed("sync-cache") && !SyncPreviewRequiresCacheWrite())
+            {
+                EditorGUILayout.HelpBox("最近一次同步预览显示 cache 已是最新，无需写入本地 cache。", MessageType.Info);
             }
             EditorGUILayout.BeginHorizontal();
             if (DrawJobButton(new GUIContent("预览同步计划", "读取在线注册中心并生成同步计划，不改本地 cache。"), GUILayout.Height(28)))
@@ -3056,10 +3120,13 @@ namespace ConfigSheetForge.Unity.Editor
                 changed = DrainActiveJobOutput() || changed;
                 var refresh = _activeJob.RefreshReadonlyStatusOnComplete;
                 _resultSummary = _activeJob.FinalSummary;
-                _lastCompletedOperation = _activeJob.Operation;
-                _lastCompletedDryRun = _activeJob.DryRun;
-                _lastCompletedSuccess = _activeJob.Success;
-                _lastCompletedInputFingerprint = _activeJob.InputFingerprint;
+                if (!IsReadonlyStatusOperation(_activeJob.Operation))
+                {
+                    _lastCompletedOperation = _activeJob.Operation;
+                    _lastCompletedDryRun = _activeJob.DryRun;
+                    _lastCompletedSuccess = _activeJob.Success;
+                    _lastCompletedInputFingerprint = _activeJob.InputFingerprint;
+                }
                 CaptureCompletedLifecycleResult(_activeJob);
                 SetBottomOutputExpanded(false, persist: false);
                 _showDetailedLogs = false;
@@ -3218,6 +3285,13 @@ namespace ConfigSheetForge.Unity.Editor
                    _lastCompletedDryRun &&
                    string.Equals(_lastCompletedOperation, operation, StringComparison.OrdinalIgnoreCase) &&
                    string.Equals(_lastCompletedInputFingerprint, BuildOperationFingerprint(operation), StringComparison.Ordinal);
+        }
+
+        private static bool IsReadonlyStatusOperation(string operation)
+        {
+            return string.Equals(operation, "registry-status", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "branch-status", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "sync-status", StringComparison.OrdinalIgnoreCase);
         }
 
         private void CaptureCompletedLifecycleResult(ConfigSheetForgeBackgroundJob job)
@@ -3391,7 +3465,7 @@ namespace ConfigSheetForge.Unity.Editor
             cards.Add(new WorkflowStatusCard(
                 "分支工作区",
                 branchBound ? "已绑定" : "未绑定",
-                branchBound ? "已找到当前分支对应的在线工作区。" : "先预览同步计划，确认是否还没绑定或权限不足。",
+                branchBound ? "已从注册中心或分支规则找到当前分支在线工作区。" : "当前分支还没有在线工作区；下一步从 main/目标分支初始化。",
                 branchBound ? WorkflowStatusKind.Ok : WorkflowStatusKind.Warning));
             cards.Add(new WorkflowStatusCard(
                 "在线表",
@@ -3400,8 +3474,8 @@ namespace ConfigSheetForge.Unity.Editor
                 onlineReadable ? WorkflowStatusKind.Ok : WorkflowStatusKind.Warning));
             cards.Add(new WorkflowStatusCard(
                 "本地 cache",
-                cacheFresh ? "本地 cache 新鲜" : "待同步",
-                cacheFresh ? "当前分支表已有本地 semantic/hash cache。" : "先预览同步计划；apply 只在确认后写本地 cache。",
+                cacheFresh ? "无需同步" : BuildCacheOverviewText(projectRoot),
+                cacheFresh ? "最近同步预览显示无变化，或当前分支表已有本地 semantic/hash cache。" : "先预览同步计划；apply 只在确认后写本地 cache。",
                 cacheFresh ? WorkflowStatusKind.Ok : WorkflowStatusKind.Pending));
             cards.Add(new WorkflowStatusCard(
                 "PR gate",
@@ -3543,6 +3617,54 @@ namespace ConfigSheetForge.Unity.Editor
             RunCliInternal(false, args);
         }
 
+        private void StartRegistryStatusProbeIfNeeded(bool force)
+        {
+            if (IsJobRunning || _projectConfig == null || !_projectConfig.Exists || string.IsNullOrWhiteSpace(_projectConfig.RegistryBaseToken))
+            {
+                return;
+            }
+
+            var projectRoot = FindProjectRoot();
+            var key = _projectConfig.ProjectConfigPath + "|" + FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch);
+            if (!force &&
+                string.Equals(_lastRegistryStatusProbeKey, key, StringComparison.Ordinal) &&
+                (DateTime.UtcNow - _lastRegistryStatusProbeUtc).TotalSeconds < RegistryStatusProbeCacheSeconds)
+            {
+                return;
+            }
+
+            var resultPath = GetUnityLifecyclePath(projectRoot, "registry-status.result.json");
+            var cli = ResolveCoreCli(projectRoot);
+            var args = new[]
+            {
+                "registry-status",
+                "--manifest",
+                _projectConfig.ProjectConfigPath,
+                "--out",
+                resultPath,
+                "--details"
+            };
+            _lastCommand = cli.ToCommandLine(args);
+            if (!cli.CanLaunch)
+            {
+                return;
+            }
+
+            _lastRegistryStatusProbeKey = key;
+            _lastRegistryStatusProbeUtc = DateTime.UtcNow;
+            StartBackgroundJob(ConfigSheetForgeBackgroundJob.CreateSingleProcess(
+                "registry-status",
+                dryRun: true,
+                commandLine: _lastCommand,
+                executable: cli.Executable,
+                arguments: cli.BuildArguments(args),
+                workingDirectory: projectRoot,
+                resultPath: resultPath,
+                lifecycleDirectory: GetUnityLifecycleDirectory(projectRoot),
+                refreshReadonlyStatusOnComplete: true,
+                projectConfig: _projectConfig));
+        }
+
         private void RunCliInternal(bool refreshReadonlyStatusOnComplete, params string[] args)
         {
             var cleanArgs = CleanArgs(args);
@@ -3579,6 +3701,50 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             RunSyncCacheCli(apply);
+        }
+
+        private void RunCurrentBranchBootstrapPreview()
+        {
+            RefreshReadonlyStatus();
+            if (!_projectConfig.Exists)
+            {
+                SetImmediateOutput("未发现项目配置。请确认 ProjectSettings 下存在 *ConfigSheetForge*.json。", "");
+                return;
+            }
+
+            var projectRoot = FindProjectRoot();
+            var resultPath = GetUnityLifecyclePath(projectRoot, "bootstrap-current-branch-from-target.result.json");
+            var args = new[]
+            {
+                "bootstrap-current-branch-from-target",
+                "--manifest",
+                _projectConfig.ProjectConfigPath,
+                "--target-branch",
+                FirstNonEmpty(_targetBranch, _projectConfig.DefaultTargetBranch, "main"),
+                "--out",
+                resultPath,
+                "--details",
+                "--dry-run"
+            };
+            var cli = ResolveCoreCli(projectRoot);
+            _lastCommand = cli.ToCommandLine(args);
+            if (!cli.CanLaunch)
+            {
+                SetImmediateOutput(ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig), "");
+                return;
+            }
+
+            StartBackgroundJob(ConfigSheetForgeBackgroundJob.CreateSingleProcess(
+                "bootstrap-current-branch-from-target",
+                dryRun: true,
+                commandLine: _lastCommand,
+                executable: cli.Executable,
+                arguments: cli.BuildArguments(args),
+                workingDirectory: projectRoot,
+                resultPath: resultPath,
+                lifecycleDirectory: GetUnityLifecycleDirectory(projectRoot),
+                refreshReadonlyStatusOnComplete: true,
+                projectConfig: _projectConfig));
         }
 
         private void RunSyncCacheCli(bool apply)
@@ -4014,6 +4180,7 @@ namespace ConfigSheetForge.Unity.Editor
             _projectConfig = ConfigSheetForgeEditorUtility.LoadProjectConfigSummary(projectRoot, _currentGitBranch);
             EnsureNewTableDefaults();
             _cliInvocation = ConfigSheetForgeEditorUtility.ResolveCoreCli(_projectConfig, projectRoot, _cliPath);
+            MergeLifecycleSummary(projectRoot, "registry-status.result.json");
             MergeLifecycleSummary(projectRoot, "sync-cache.result.json");
             MergeLifecycleSummary(projectRoot, "pr-gate-report.result.json");
             _gateReportSummary = LoadGateReportSummary(projectRoot);
@@ -4240,6 +4407,40 @@ namespace ConfigSheetForge.Unity.Editor
             _projectConfig.BranchWikiNodeToken = FirstNonEmpty(_projectConfig.BranchWikiNodeToken, live.BranchWikiNodeToken);
             _projectConfig.Profile = FirstNonEmpty(_projectConfig.Profile, live.Profile);
             _projectConfig.FeishuBranch = FirstNonEmpty(_projectConfig.FeishuBranch, live.FeishuBranch);
+            _projectConfig.LiveBranchBindingStatus = FirstNonEmpty(live.LiveBranchBindingStatus, _projectConfig.LiveBranchBindingStatus);
+            _projectConfig.LiveNextRecommendedAction = FirstNonEmpty(live.LiveNextRecommendedAction, _projectConfig.LiveNextRecommendedAction);
+            _projectConfig.LiveExpectedTableCount = live.LiveExpectedTableCount > 0 ? live.LiveExpectedTableCount : _projectConfig.LiveExpectedTableCount;
+            _projectConfig.LiveRegisteredTableCount = live.LiveRegisteredTableCount > 0 ? live.LiveRegisteredTableCount : _projectConfig.LiveRegisteredTableCount;
+            if (live.LiveMissingTables.Count > 0)
+            {
+                _projectConfig.LiveMissingTables.Clear();
+                _projectConfig.LiveMissingTables.AddRange(live.LiveMissingTables);
+            }
+
+            if (live.LiveMissingLocators.Count > 0)
+            {
+                _projectConfig.LiveMissingLocators.Clear();
+                _projectConfig.LiveMissingLocators.AddRange(live.LiveMissingLocators);
+            }
+
+            if (live.LiveDuplicateConfigSheets.Count > 0)
+            {
+                _projectConfig.LiveDuplicateConfigSheets.Clear();
+                _projectConfig.LiveDuplicateConfigSheets.AddRange(live.LiveDuplicateConfigSheets);
+            }
+
+            if (!string.IsNullOrWhiteSpace(live.SyncCacheStatus))
+            {
+                _projectConfig.SyncCacheStatus = live.SyncCacheStatus;
+                _projectConfig.SyncCacheChangedTables.Clear();
+                _projectConfig.SyncCacheMissingCacheTables.Clear();
+                _projectConfig.SyncCacheUpToDateTables.Clear();
+                _projectConfig.SyncCacheBlockedTables.Clear();
+                _projectConfig.SyncCacheChangedTables.AddRange(live.SyncCacheChangedTables);
+                _projectConfig.SyncCacheMissingCacheTables.AddRange(live.SyncCacheMissingCacheTables);
+                _projectConfig.SyncCacheUpToDateTables.AddRange(live.SyncCacheUpToDateTables);
+                _projectConfig.SyncCacheBlockedTables.AddRange(live.SyncCacheBlockedTables);
+            }
         }
 
         private GateReportSummaryView LoadGateReportSummary(string projectRoot)
@@ -4397,6 +4598,15 @@ namespace ConfigSheetForge.Unity.Editor
                 return "未找到项目配置";
             }
 
+            if (string.Equals(_projectConfig.LiveBranchBindingStatus, "ok", StringComparison.OrdinalIgnoreCase) &&
+                _projectConfig.LiveRegisteredTableCount > 0 &&
+                _projectConfig.LiveExpectedTableCount > 0 &&
+                _projectConfig.LiveRegisteredTableCount >= _projectConfig.LiveExpectedTableCount &&
+                _projectConfig.LiveMissingLocators.Count == 0)
+            {
+                return _projectConfig.LiveRegisteredTableCount.ToString() + "/" + _projectConfig.LiveExpectedTableCount.ToString() + " 在线表已登记";
+            }
+
             if (!BranchLooksBound())
             {
                 return "未绑定分支";
@@ -4422,6 +4632,19 @@ namespace ConfigSheetForge.Unity.Editor
                 return "未找到项目共享配置。";
             }
 
+            if (string.Equals(_projectConfig.LiveBranchBindingStatus, "ok", StringComparison.OrdinalIgnoreCase) &&
+                _projectConfig.LiveRegisteredTableCount > 0)
+            {
+                if (_projectConfig.LiveMissingTables.Count == 0 && _projectConfig.LiveMissingLocators.Count == 0)
+                {
+                    return "已从飞书 Base 注册中心读取当前分支在线表定位；ProjectSettings 不需要保存 Sheet token。";
+                }
+
+                return "注册中心已读取，但缺少：" +
+                       (_projectConfig.LiveMissingTables.Count > 0 ? "表记录 " + string.Join(", ", _projectConfig.LiveMissingTables) + " " : "") +
+                       (_projectConfig.LiveMissingLocators.Count > 0 ? "Sheet 定位 " + string.Join(", ", _projectConfig.LiveMissingLocators) : "");
+            }
+
             if (!BranchLooksBound())
             {
                 return "当前分支还没有绑定在线工作区。";
@@ -4442,6 +4665,11 @@ namespace ConfigSheetForge.Unity.Editor
 
         private bool BranchLooksBound()
         {
+            if (string.Equals(_projectConfig.LiveBranchBindingStatus, "ok", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
             return !string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeToken) ||
                    !string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeUrl) ||
                    !string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeTitle);
@@ -4449,6 +4677,15 @@ namespace ConfigSheetForge.Unity.Editor
 
         private bool OnlineTablesReadable()
         {
+            if (string.Equals(_projectConfig.LiveBranchBindingStatus, "ok", StringComparison.OrdinalIgnoreCase) &&
+                _projectConfig.LiveRegisteredTableCount > 0 &&
+                _projectConfig.LiveMissingTables.Count == 0 &&
+                _projectConfig.LiveMissingLocators.Count == 0 &&
+                _projectConfig.LiveDuplicateConfigSheets.Count == 0)
+            {
+                return true;
+            }
+
             var tables = _projectConfig.CurrentBranchTables;
             if (tables == null || tables.Count == 0)
             {
@@ -4470,6 +4707,18 @@ namespace ConfigSheetForge.Unity.Editor
 
         private bool CacheLooksFresh(string projectRoot)
         {
+            if (string.Equals(_projectConfig.SyncCacheStatus, "upToDate", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.Equals(_projectConfig.SyncCacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(_projectConfig.SyncCacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(_projectConfig.SyncCacheStatus, "blocked", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
             var tables = _projectConfig.CurrentBranchTables;
             if (tables == null || tables.Count == 0)
             {
@@ -4485,6 +4734,39 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return true;
+        }
+
+        private bool SyncPreviewRequiresCacheWrite()
+        {
+            return string.Equals(_projectConfig.SyncCacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(_projectConfig.SyncCacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase) ||
+                   _projectConfig.SyncCacheChangedTables.Count > 0 ||
+                   _projectConfig.SyncCacheMissingCacheTables.Count > 0;
+        }
+
+        private string BuildSyncCacheStatusText()
+        {
+            if (string.Equals(_projectConfig.SyncCacheStatus, "upToDate", StringComparison.OrdinalIgnoreCase))
+            {
+                return "无变化，cache 已是最新";
+            }
+
+            if (string.Equals(_projectConfig.SyncCacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase))
+            {
+                return "需要更新：" + string.Join(", ", _projectConfig.SyncCacheChangedTables);
+            }
+
+            if (string.Equals(_projectConfig.SyncCacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase))
+            {
+                return "缺少 cache：" + string.Join(", ", _projectConfig.SyncCacheMissingCacheTables);
+            }
+
+            if (string.Equals(_projectConfig.SyncCacheStatus, "blocked", StringComparison.OrdinalIgnoreCase))
+            {
+                return "被阻断：" + string.Join(", ", _projectConfig.SyncCacheBlockedTables);
+            }
+
+            return "还没有同步预览结论";
         }
 
         private bool GateLooksPassed()
@@ -4542,9 +4824,32 @@ namespace ConfigSheetForge.Unity.Editor
                 return "先配置项目";
             }
 
-            if (!BranchLooksBound() || !OnlineTablesReadable())
+            if (GateLooksPassed())
             {
-                return "预览同步计划";
+                return "可以提交 PR";
+            }
+
+            if (!BranchLooksBound() ||
+                string.Equals(_projectConfig.LiveNextRecommendedAction, "bootstrap-current-branch-from-target", StringComparison.OrdinalIgnoreCase) ||
+                (string.Equals(_projectConfig.LiveBranchBindingStatus, "missing", StringComparison.OrdinalIgnoreCase) && _projectConfig.LiveRegisteredTableCount == 0))
+            {
+                return "初始化当前分支在线表";
+            }
+
+            if (!OnlineTablesReadable())
+            {
+                return _projectConfig.LiveMissingTables.Count > 0 ? "初始化当前分支在线表" : "修复在线表定位";
+            }
+
+            if (string.Equals(_projectConfig.SyncCacheStatus, "upToDate", StringComparison.OrdinalIgnoreCase))
+            {
+                return "运行 PR 检查";
+            }
+
+            if (string.Equals(_projectConfig.SyncCacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(_projectConfig.SyncCacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase))
+            {
+                return "写入本地 cache";
             }
 
             if (!CacheLooksFresh(projectRoot))
@@ -4563,6 +4868,16 @@ namespace ConfigSheetForge.Unity.Editor
         private string BuildNextStepButtonText(string projectRoot)
         {
             var next = BuildNextStepText(projectRoot);
+            if (string.Equals(next, "初始化当前分支在线表", StringComparison.OrdinalIgnoreCase))
+            {
+                return "初始化当前分支在线表";
+            }
+
+            if (string.Equals(next, "写入本地 cache", StringComparison.OrdinalIgnoreCase))
+            {
+                return "写入本地 cache";
+            }
+
             if (string.Equals(next, "运行 PR 检查", StringComparison.OrdinalIgnoreCase))
             {
                 return "运行 PR 检查";
@@ -4592,11 +4907,30 @@ namespace ConfigSheetForge.Unity.Editor
                 return;
             }
 
+            if (string.Equals(next, "初始化当前分支在线表", StringComparison.OrdinalIgnoreCase))
+            {
+                RunCurrentBranchBootstrapPreview();
+                return;
+            }
+
+            if (string.Equals(next, "写入本地 cache", StringComparison.OrdinalIgnoreCase))
+            {
+                _selectedTab = TablesTab;
+                _showSyncSection = true;
+                SetImmediateOutput("请在“配表”页确认写入本地 cache。", "写入前需要最近一次同步预览通过，并勾选确认。");
+                return;
+            }
+
             RunSyncCache(apply: false);
         }
 
         private string BuildCacheOverviewText(string projectRoot)
         {
+            if (!string.IsNullOrWhiteSpace(_projectConfig.SyncCacheStatus))
+            {
+                return BuildSyncCacheStatusText();
+            }
+
             var tables = _projectConfig.CurrentBranchTables;
             if (tables == null || tables.Count == 0)
             {
@@ -4627,6 +4961,26 @@ namespace ConfigSheetForge.Unity.Editor
 
         private string BuildTableCacheStatus(ProjectConfigTableSummary table)
         {
+            if (_projectConfig.SyncCacheUpToDateTables.Any(t => string.Equals(t, table.TableId, StringComparison.OrdinalIgnoreCase)))
+            {
+                return "无变化";
+            }
+
+            if (_projectConfig.SyncCacheChangedTables.Any(t => string.Equals(t, table.TableId, StringComparison.OrdinalIgnoreCase)))
+            {
+                return "需要更新";
+            }
+
+            if (_projectConfig.SyncCacheMissingCacheTables.Any(t => string.Equals(t, table.TableId, StringComparison.OrdinalIgnoreCase)))
+            {
+                return "缺少 cache";
+            }
+
+            if (_projectConfig.SyncCacheBlockedTables.Any(t => string.Equals(t, table.TableId, StringComparison.OrdinalIgnoreCase)))
+            {
+                return "同步阻断";
+            }
+
             var projectRoot = FindProjectRoot();
             if (HasCacheFiles(projectRoot, table))
             {
@@ -4667,10 +5021,10 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeToken) && string.IsNullOrWhiteSpace(_projectConfig.BranchWikiNodeUrl))
             {
-                return "暂时没有读到当前分支的在线工作区。可能是未绑定分支、权限不足，或最近还没有预览同步计划。下一步：先点“预览同步计划”。";
+                return "暂时没有读到当前分支的在线工作区。下一步：从 main/目标分支初始化当前分支在线表（先预览），而不是做历史 Excel Seed。";
             }
 
-            return "当前分支没有在线表记录，或记录缺少表 ID / 在线表链接。下一步：确认这个分支是否已经 Seed；如果要迁移旧 Excel，请展开“本地 Excel Seed”。";
+            return "当前分支没有完整在线表记录，或记录缺少表 ID / 在线表链接。下一步：从 main/目标分支初始化当前分支在线表；本地 Excel Seed 只用于历史迁移。";
         }
 
         private static string BuildSheetLocationText(ProjectConfigTableSummary table)
@@ -6778,6 +7132,34 @@ namespace ConfigSheetForge.Unity.Editor
                 builder.AppendLine("request fingerprint: " + requestFingerprint);
             }
 
+            if (string.Equals(operation, "sync-cache", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(operation, "sync-from-online-sheet", StringComparison.OrdinalIgnoreCase))
+            {
+                var cacheStatus = ExtractString(resultJson, "cacheStatus");
+                if (!string.IsNullOrWhiteSpace(cacheStatus))
+                {
+                    builder.AppendLine("cache 状态: " + HumanizeCacheStatus(cacheStatus));
+                }
+
+                var changed = ExtractStringArray(resultJson, "changedTables");
+                var missing = ExtractStringArray(resultJson, "missingCacheTables");
+                var upToDate = ExtractStringArray(resultJson, "upToDateTables");
+                if (changed.Count > 0)
+                {
+                    builder.AppendLine("需要更新: " + string.Join(", ", changed));
+                }
+
+                if (missing.Count > 0)
+                {
+                    builder.AppendLine("缺少 cache: " + string.Join(", ", missing));
+                }
+
+                if (upToDate.Count > 0)
+                {
+                    builder.AppendLine("无变化: " + upToDate.Count.ToString() + " 张");
+                }
+            }
+
             if (string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase) && !dryRun)
             {
                 var postflightPassed = ExtractString(resultJson, "postflightPassed");
@@ -6809,6 +7191,31 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return builder.ToString().TrimEnd();
+        }
+
+        private static string HumanizeCacheStatus(string cacheStatus)
+        {
+            if (string.Equals(cacheStatus, "upToDate", StringComparison.OrdinalIgnoreCase))
+            {
+                return "无变化，未重写 cache";
+            }
+
+            if (string.Equals(cacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase))
+            {
+                return "有变化，需要写入本地 cache";
+            }
+
+            if (string.Equals(cacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase))
+            {
+                return "缺少本地 cache";
+            }
+
+            if (string.Equals(cacheStatus, "blocked", StringComparison.OrdinalIgnoreCase))
+            {
+                return "被阻断";
+            }
+
+            return cacheStatus;
         }
 
         private static string BuildFailureSummary(string operation, bool dryRun, string resultPath, string reason)

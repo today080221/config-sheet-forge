@@ -233,6 +233,65 @@ namespace ConfigSheetForge.Core
         public bool ConfirmApply { get; set; }
     }
 
+    public sealed class ResolvedOnlineTableStatus
+    {
+        public string TableId { get; set; } = "";
+        public string DisplayName { get; set; } = "";
+        public string RecordId { get; set; } = "";
+        public string SpreadsheetToken { get; set; } = "";
+        public string SheetId { get; set; } = "";
+        public string OnlineSheetUrl { get; set; } = "";
+        public string WikiNodeToken { get; set; } = "";
+        public string WikiNodeUrl { get; set; } = "";
+        public string SemanticHash { get; set; } = "";
+        public string UpdatedAt { get; set; } = "";
+        public string OwnerRole { get; set; } = "";
+        public string Branch { get; set; } = "";
+        public string Profile { get; set; } = "";
+        public string Status { get; set; } = "";
+        public string BlockingReason { get; set; } = "";
+    }
+
+    public sealed class BranchStatusSummary
+    {
+        public string CurrentGitBranch { get; set; } = "";
+        public string CurrentProfile { get; set; } = "";
+        public string TargetBranch { get; set; } = "";
+        public string TargetProfile { get; set; } = "";
+        public string BranchBindingStatus { get; set; } = "unknown";
+        public string BranchWikiNodeTitle { get; set; } = "";
+        public string BranchWikiNodeUrl { get; set; } = "";
+        public string BranchWikiNodeToken { get; set; } = "";
+        public List<string> ExpectedTableIds { get; set; } = new List<string>();
+        public List<ResolvedOnlineTableStatus> RegisteredOnlineTables { get; set; } = new List<ResolvedOnlineTableStatus>();
+        public int TableCountExpected { get; set; }
+        public int TableCountRegistered { get; set; }
+        public List<string> MissingTables { get; set; } = new List<string>();
+        public List<string> MissingLocators { get; set; } = new List<string>();
+        public List<string> DuplicateConfigSheets { get; set; } = new List<string>();
+        public bool CanReadRegistry { get; set; } = true;
+        public bool CanReadSheetsMetadata { get; set; } = true;
+        public List<string> HumanReadableFailures { get; set; } = new List<string>();
+        public string NextRecommendedAction { get; set; } = "";
+    }
+
+    public sealed class SyncCacheSummary
+    {
+        public string CacheStatus { get; set; } = "unknown";
+        public List<string> ChangedTables { get; set; } = new List<string>();
+        public List<string> MissingCacheTables { get; set; } = new List<string>();
+        public List<string> UpToDateTables { get; set; } = new List<string>();
+        public List<string> BlockedTables { get; set; } = new List<string>();
+        public bool WillWriteFiles { get; set; }
+        public List<string> WillWriteFilePaths { get; set; } = new List<string>();
+        public bool NoChangeKeepsMtime { get; set; } = true;
+        public int TableCount { get; set; }
+        public int TriangulationPassedCount { get; set; }
+        public int TriangulationFailedCount { get; set; }
+        public List<string> PortableSubsetFindings { get; set; } = new List<string>();
+        public List<ResolvedOnlineTableStatus> ResolvedOnlineTables { get; set; } = new List<ResolvedOnlineTableStatus>();
+    }
+
     public sealed class LifecycleContractResult
     {
         public string Operation { get; set; } = "";
@@ -259,6 +318,9 @@ namespace ConfigSheetForge.Core
         public PrGateReport PrGateReport { get; set; } = new PrGateReport();
         public string GateReportPath { get; set; } = "";
         public List<SeedTableLifecycleResult> SeedTables { get; set; } = new List<SeedTableLifecycleResult>();
+        public BranchStatusSummary BranchStatus { get; set; } = new BranchStatusSummary();
+        public SyncCacheSummary SyncCacheSummary { get; set; } = new SyncCacheSummary();
+        public List<ResolvedOnlineTableStatus> ResolvedOnlineTables { get; set; } = new List<ResolvedOnlineTableStatus>();
 
         public void AddFailure(string message)
         {
@@ -975,6 +1037,15 @@ namespace ConfigSheetForge.Core
                 case "bootstrap-target-branch-from-local-xlsx":
                     await SeedFromLocalXlsxLifecycle.ExecuteAsync(request, platform, result, cancellationToken).ConfigureAwait(false);
                     break;
+                case "bootstrap-current-branch-from-target":
+                case "branch-workspace-bootstrap-from-target":
+                    ApplyCurrentBranchBootstrapPlan(request, result);
+                    break;
+                case "registry-status":
+                case "branch-status":
+                case "sync-status":
+                    ApplyBranchStatus(request, result);
+                    break;
                 case "sync-cache":
                 case "sync-from-online-sheet":
                     ApplySyncCachePlan(request, result);
@@ -1619,12 +1690,315 @@ namespace ConfigSheetForge.Core
             action.Details["writeBackToMain"] = inputs.WriteBackToMain.ToString().ToLowerInvariant();
         }
 
+        private static void ApplyBranchStatus(LifecycleContractRequest request, LifecycleContractResult result)
+        {
+            var branchWorkspace = BranchWorkspaceResolver.Resolve(request);
+            result.BranchWorkspace = branchWorkspace;
+            BranchWorkspaceResolver.ValidateOneToOne(request, branchWorkspace, result);
+            result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, request.DryRun ? "done" : "done", "只读：已从注册中心上下文解析当前分支工作区。"));
+            PopulateBranchStatus(request, result, branchWorkspace);
+        }
+
+        private static void ApplyCurrentBranchBootstrapPlan(LifecycleContractRequest request, LifecycleContractResult result)
+        {
+            request.MergeInputs = request.MergeInputs ?? new MergeInputsContract();
+            var branchWorkspace = BranchWorkspaceResolver.Resolve(request);
+            result.BranchWorkspace = branchWorkspace;
+            PopulateBranchStatus(request, result, branchWorkspace);
+
+            var targetBranch = FirstNonEmpty(request.MergeInputs.TargetBranch, request.BranchWorkspace.MainGitBranch, "main");
+            var targetProfile = FirstNonEmpty(request.MergeInputs.TargetFeishuProfile, request.BranchWorkspace.MainFeishuBranch, targetBranch);
+            var tableIds = BuildExpectedTableIds(request, request.SyncCache != null ? request.SyncCache.TableId : "");
+            var targetRows = FindConfigSheetRowsForProfile(request, targetProfile, request.SyncCache != null ? request.SyncCache.TableId : "");
+            var targetRegistered = new HashSet<string>(
+                targetRows.Select(t => t.TableId).Where(t => !string.IsNullOrWhiteSpace(t)),
+                StringComparer.OrdinalIgnoreCase);
+            var missingTargetTables = tableIds.Where(t => !targetRegistered.Contains(t)).OrderBy(t => t, StringComparer.OrdinalIgnoreCase).ToList();
+            var missingTargetLocators = targetRows
+                .Where(t => string.IsNullOrWhiteSpace(FirstNonEmpty(t.SpreadsheetToken, t.SpreadsheetUrl)) || string.IsNullOrWhiteSpace(t.SheetId))
+                .Select(t => t.TableId)
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(t => t, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            result.RequestSummary["sourceMode"] = "target-branch";
+            result.RequestSummary["targetBranch"] = targetBranch;
+            result.RequestSummary["targetProfile"] = targetProfile;
+            result.RequestSummary["currentBranch"] = branchWorkspace.GitBranch;
+            result.RequestSummary["currentProfile"] = FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch);
+            result.RequestSummary["tableIds"] = string.Join(", ", tableIds);
+            result.RequestSummary["tableCount"] = tableIds.Count.ToString(CultureInfo.InvariantCulture);
+
+            var plan = result.AddAction("current_branch.bootstrap_from_target.plan", request.DryRun ? "planned" : "blocked", "从目标分支 “" + targetBranch + "” 派生当前分支在线工作区和 ConfigSheets；dry-run 只生成计划。");
+            plan.Details["targetBranch"] = targetBranch;
+            plan.Details["targetProfile"] = targetProfile;
+            plan.Details["currentBranch"] = branchWorkspace.GitBranch;
+            plan.Details["currentProfile"] = FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch);
+            plan.Details["branchNodeTitle"] = branchWorkspace.NodeTitle;
+            plan.Details["tableCount"] = tableIds.Count.ToString(CultureInfo.InvariantCulture);
+            plan.Details["tableIds"] = string.Join(", ", tableIds);
+            plan.Details["targetRegisteredTableCount"] = targetRows.Count.ToString(CultureInfo.InvariantCulture);
+            plan.Details["missingTargetTables"] = string.Join(", ", missingTargetTables);
+            plan.Details["missingTargetLocators"] = string.Join(", ", missingTargetLocators);
+            plan.Details["writesLocalCache"] = "false";
+            plan.Details["writesProjectSettings"] = "false";
+            plan.Details["writesExcelToSo"] = "false";
+
+            result.AddAction("current_branch.workspace.ensure", request.DryRun ? "planned" : "blocked", "创建/复用当前分支 Wiki 节点 “" + branchWorkspace.NodeTitle + "”。");
+            result.AddAction("current_branch.sheets.copy_from_target", request.DryRun ? "planned" : "blocked", "按目标分支在线表导出/导入，创建或复用当前分支在线 Sheet。");
+            result.AddAction("current_branch.registry.upsert", request.DryRun ? "planned" : "blocked", "upsert BranchBindings、ConfigSheets 和 SchemaReviews baseline。");
+
+            if (missingTargetTables.Count > 0 || missingTargetLocators.Count > 0)
+            {
+                if (missingTargetTables.Count > 0)
+                {
+                    result.AddFailure("无法从目标分支派生当前分支：目标分支 “" + targetBranch + "” 缺少 ConfigSheets 记录：" + string.Join(", ", missingTargetTables) + "。");
+                }
+
+                if (missingTargetLocators.Count > 0)
+                {
+                    result.AddFailure("无法从目标分支派生当前分支：目标分支这些表缺少 SpreadsheetToken/SheetId：" + string.Join(", ", missingTargetLocators) + "。");
+                }
+
+                return;
+            }
+
+            if (!request.DryRun)
+            {
+                result.AddFailure("从目标分支初始化当前分支在线表的 apply 需要项目 adapter 或后续 CLI 复制实现；当前版本先提供一等 dry-run 入口，避免误导用户去做本地 Excel Seed。");
+            }
+        }
+
+        private static void PopulateBranchStatus(LifecycleContractRequest request, LifecycleContractResult result, BranchWorkspaceResolution branchWorkspace)
+        {
+            request.SyncCache = request.SyncCache ?? new SyncCacheContract();
+            var profile = FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch, request.Git.Profile, request.Git.FeishuBranch, request.Git.Branch);
+            var selectedTable = FirstNonEmpty(request.SyncCache.TableId, request.Table != null ? request.Table.TableId : "");
+            var expected = BuildExpectedTableIds(request, selectedTable);
+            var rows = FindConfigSheetRowsForProfile(request, profile, selectedTable);
+            var duplicateRows = FindDuplicateConfigSheetRows(rows);
+            var resolved = new List<ResolvedOnlineTableStatus>();
+            foreach (var row in rows
+                .GroupBy(t => t.TableId ?? "", StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(t => t.TableId, StringComparer.OrdinalIgnoreCase))
+            {
+                resolved.Add(ToResolvedOnlineTable(row, profile));
+            }
+
+            var registered = new HashSet<string>(
+                resolved
+                    .Where(t => !string.IsNullOrWhiteSpace(t.TableId))
+                    .Select(t => t.TableId),
+                StringComparer.OrdinalIgnoreCase);
+            var missingTables = expected
+                .Where(t => !registered.Contains(t))
+                .OrderBy(t => t, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var missingLocators = resolved
+                .Where(t => string.IsNullOrWhiteSpace(FirstNonEmpty(t.SpreadsheetToken, t.OnlineSheetUrl)) || string.IsNullOrWhiteSpace(t.SheetId))
+                .Select(t => t.TableId)
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(t => t, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var status = new BranchStatusSummary
+            {
+                CurrentGitBranch = branchWorkspace.GitBranch,
+                CurrentProfile = profile,
+                TargetBranch = FirstNonEmpty(request.MergeInputs != null ? request.MergeInputs.TargetBranch : "", request.BranchWorkspace.MainGitBranch, "main"),
+                TargetProfile = FirstNonEmpty(request.MergeInputs != null ? request.MergeInputs.TargetFeishuProfile : "", request.BranchWorkspace.MainFeishuBranch, "main"),
+                BranchWikiNodeTitle = branchWorkspace.NodeTitle,
+                BranchWikiNodeUrl = branchWorkspace.WikiNodeUrl,
+                BranchWikiNodeToken = branchWorkspace.WikiNodeToken,
+                ExpectedTableIds = expected,
+                RegisteredOnlineTables = resolved,
+                TableCountExpected = expected.Count,
+                TableCountRegistered = resolved.Count,
+                MissingTables = missingTables,
+                MissingLocators = missingLocators,
+                DuplicateConfigSheets = duplicateRows,
+                CanReadRegistry = true,
+                CanReadSheetsMetadata = true
+            };
+
+            if (duplicateRows.Count > 0)
+            {
+                status.BranchBindingStatus = "duplicate";
+                status.HumanReadableFailures.Add("ConfigSheets 中存在重复记录：" + string.Join(", ", duplicateRows) + "。请先清理重复行，工具不会静默任选一条。");
+                status.NextRecommendedAction = "cleanup-duplicate-config-sheets";
+            }
+            else if (string.IsNullOrWhiteSpace(branchWorkspace.WikiNodeToken) && string.IsNullOrWhiteSpace(branchWorkspace.WikiNodeUrl))
+            {
+                status.BranchBindingStatus = "missing";
+                status.HumanReadableFailures.Add("当前分支还没有 BranchBindings 工作区记录。下一步：从目标分支初始化当前分支在线表。");
+                status.NextRecommendedAction = "bootstrap-current-branch-from-target";
+            }
+            else if (missingTables.Count > 0 || missingLocators.Count > 0)
+            {
+                status.BranchBindingStatus = "ok";
+                if (missingTables.Count > 0)
+                {
+                    status.HumanReadableFailures.Add("当前分支缺少 ConfigSheets 记录：" + string.Join(", ", missingTables) + "。");
+                }
+
+                if (missingLocators.Count > 0)
+                {
+                    status.HumanReadableFailures.Add("当前分支这些表缺少在线 Sheet 定位：" + string.Join(", ", missingLocators) + "。");
+                }
+
+                status.NextRecommendedAction = resolved.Count == 0 ? "bootstrap-current-branch-from-target" : "fix-config-sheets";
+            }
+            else
+            {
+                status.BranchBindingStatus = "ok";
+                status.NextRecommendedAction = "preview-sync-cache";
+            }
+
+            result.BranchStatus = status;
+            result.ResolvedOnlineTables = new List<ResolvedOnlineTableStatus>(resolved);
+            result.SyncCacheSummary.ResolvedOnlineTables = new List<ResolvedOnlineTableStatus>(resolved);
+            result.SyncCacheSummary.TableCount = resolved.Count;
+
+            result.SeedTables.Clear();
+            foreach (var table in resolved)
+            {
+                result.SeedTables.Add(new SeedTableLifecycleResult
+                {
+                    TableId = table.TableId,
+                    DisplayName = table.DisplayName,
+                    Status = string.IsNullOrWhiteSpace(table.BlockingReason) ? "registered" : "blocked",
+                    SpreadsheetToken = table.SpreadsheetToken,
+                    SpreadsheetUrl = table.OnlineSheetUrl,
+                    SheetId = table.SheetId,
+                    WikiNodeToken = table.WikiNodeToken,
+                    WikiNodeUrl = table.WikiNodeUrl,
+                    Branch = table.Branch,
+                    Profile = table.Profile,
+                    RegistryRecordId = table.RecordId,
+                    SemanticHash = table.SemanticHash
+                });
+            }
+        }
+
+        private static List<string> BuildExpectedTableIds(LifecycleContractRequest request, string selectedTable)
+        {
+            var result = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(selectedTable))
+            {
+                result.Add(selectedTable);
+            }
+
+            foreach (var table in request.SeedFromLocalXlsx != null ? request.SeedFromLocalXlsx.Tables : new List<SeedTableContract>())
+            {
+                if (!string.IsNullOrWhiteSpace(table.TableId) &&
+                    (string.IsNullOrWhiteSpace(selectedTable) || string.Equals(table.TableId, selectedTable, StringComparison.OrdinalIgnoreCase)))
+                {
+                    result.Add(table.TableId);
+                }
+            }
+
+            if (result.Count == 0 && request.Table != null && !string.IsNullOrWhiteSpace(request.Table.TableId))
+            {
+                result.Add(request.Table.TableId);
+            }
+
+            return result.ToList();
+        }
+
+        private static List<SeedTableContract> FindConfigSheetRowsForProfile(LifecycleContractRequest request, string profile, string selectedTable)
+        {
+            var seed = request.SeedFromLocalXlsx ?? new SeedFromLocalXlsxContract();
+            return seed.Tables
+                .Where(t => !string.IsNullOrWhiteSpace(t.TableId))
+                .Where(t => string.IsNullOrWhiteSpace(selectedTable) || string.Equals(t.TableId, selectedTable, StringComparison.OrdinalIgnoreCase))
+                .Where(t =>
+                {
+                    var tableProfile = FirstNonEmpty(t.Profile, t.Branch);
+                    if (!string.IsNullOrWhiteSpace(tableProfile))
+                    {
+                        return string.IsNullOrWhiteSpace(profile) ||
+                               string.Equals(tableProfile, profile, StringComparison.OrdinalIgnoreCase);
+                    }
+
+                    return HasOnlineLocator(t);
+                })
+                .OrderBy(t => t.TableId, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static bool HasOnlineLocator(SeedTableContract table)
+        {
+            return table != null &&
+                   (!string.IsNullOrWhiteSpace(table.SpreadsheetToken) ||
+                    !string.IsNullOrWhiteSpace(table.SpreadsheetUrl) ||
+                    !string.IsNullOrWhiteSpace(table.SheetId));
+        }
+
+        private static List<string> FindDuplicateConfigSheetRows(List<SeedTableContract> rows)
+        {
+            return rows
+                .GroupBy(t => t.TableId ?? "", StringComparer.OrdinalIgnoreCase)
+                .Where(g => !string.IsNullOrWhiteSpace(g.Key) && g.Count() > 1)
+                .Select(g => g.Key + "(" + string.Join(", ", g.Select(t => FirstNonEmpty(t.RegistryRecordId, "无 record_id"))) + ")")
+                .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static ResolvedOnlineTableStatus ToResolvedOnlineTable(SeedTableContract table, string fallbackProfile)
+        {
+            var onlineUrl = table.SpreadsheetUrl;
+            return new ResolvedOnlineTableStatus
+            {
+                TableId = table.TableId,
+                DisplayName = FirstNonEmpty(table.DisplayName, table.TableId),
+                RecordId = table.RegistryRecordId,
+                SpreadsheetToken = table.SpreadsheetToken,
+                SheetId = table.SheetId,
+                OnlineSheetUrl = onlineUrl,
+                WikiNodeToken = table.WikiNodeToken,
+                WikiNodeUrl = table.WikiNodeUrl,
+                SemanticHash = table.SemanticHash,
+                OwnerRole = table.OwnerRole,
+                Branch = table.Branch,
+                Profile = FirstNonEmpty(table.Profile, table.Branch, fallbackProfile),
+                BlockingReason = BuildTableLocatorBlockingReason(table)
+            };
+        }
+
+        private static string BuildTableLocatorBlockingReason(SeedTableContract table)
+        {
+            if (table == null)
+            {
+                return "在线表记录为空。";
+            }
+
+            if (string.IsNullOrWhiteSpace(table.TableId))
+            {
+                return "在线表记录缺少 TableId。";
+            }
+
+            if (string.IsNullOrWhiteSpace(FirstNonEmpty(table.SpreadsheetToken, table.SpreadsheetUrl)))
+            {
+                return "缺少在线 Sheet token 或链接。";
+            }
+
+            if (string.IsNullOrWhiteSpace(table.SheetId))
+            {
+                return "缺少工作表 ID。";
+            }
+
+            return "";
+        }
+
         private static void ApplySyncCachePlan(LifecycleContractRequest request, LifecycleContractResult result)
         {
             var branchWorkspace = BranchWorkspaceResolver.Resolve(request);
             result.BranchWorkspace = branchWorkspace;
             BranchWorkspaceResolver.ValidateOneToOne(request, branchWorkspace, result);
             result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, request.DryRun ? "planned" : "ready", request.DryRun ? "预览：从 BranchBindings 解析当前分支工作区，不写飞书或本地 cache。" : "已解析当前分支工作区。"));
+            PopulateBranchStatus(request, result, branchWorkspace);
             if (!result.Success)
             {
                 return;
@@ -1639,6 +2013,28 @@ namespace ConfigSheetForge.Core
             if (string.IsNullOrWhiteSpace(branchWorkspace.WikiNodeToken) && request.BranchBindings.Count > 0)
             {
                 result.AddFailure("当前 Git 分支 “" + branchWorkspace.GitBranch + "” 没有可用 BranchBindings Wiki 节点。请先运行 seed dry-run/apply 创建分支工作区，或修正 BranchBindings。");
+                return;
+            }
+
+            if (result.BranchStatus.MissingTables.Count > 0 || result.BranchStatus.MissingLocators.Count > 0 || result.BranchStatus.DuplicateConfigSheets.Count > 0)
+            {
+                if (result.BranchStatus.MissingTables.Count > 0)
+                {
+                    result.AddFailure("sync-cache 需要 live registry 中当前 branch/profile 的 ConfigSheets；缺少：" + string.Join(", ", result.BranchStatus.MissingTables) + "。");
+                }
+
+                if (result.BranchStatus.MissingLocators.Count > 0)
+                {
+                    result.AddFailure("sync-cache 需要 ConfigSheets 提供 SpreadsheetToken/SheetId；缺少定位：" + string.Join(", ", result.BranchStatus.MissingLocators) + "。");
+                }
+
+                if (result.BranchStatus.DuplicateConfigSheets.Count > 0)
+                {
+                    result.AddFailure("sync-cache 发现 ConfigSheets 重复记录：" + string.Join(", ", result.BranchStatus.DuplicateConfigSheets) + "。请先清理重复记录。");
+                }
+
+                result.SyncCacheSummary.CacheStatus = "blocked";
+                result.SyncCacheSummary.BlockedTables.AddRange(result.BranchStatus.MissingTables.Concat(result.BranchStatus.MissingLocators).Distinct(StringComparer.OrdinalIgnoreCase));
                 return;
             }
 

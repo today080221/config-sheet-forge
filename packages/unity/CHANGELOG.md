@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.23
+
+- 新增只读 `registry-status` / `branch-status` / `sync-status` lifecycle：Unity 可以后台读取 Feishu Base 注册中心，判断当前分支 BranchBindings、ConfigSheets、缺失表、缺定位、重复记录和下一步建议；不会读取/导出在线 Sheet，也不会写任何文件。
+- `sync-cache` dry-run 不再只返回 planned actions。它会从 live registry hydrate 在线表定位，读取在线 Sheet、临时导出 xlsx、做三方一致性检查和 hash gate，并在 result 中输出 `cacheStatus`、changed/missing/up-to-date/blocked tables、resolved online tables 和 no-change mtime 语义。
+- Unity 状态页改为信任 live registry 作为在线 Sheet locator 的 Source of Truth：ProjectSettings 里的 SpreadsheetToken/SheetId 可以为空，只要注册中心返回有效 ConfigSheets，就显示“在线表已登记”，不再误报“未读取到在线表”。
+- 首页推荐下一步按完整状态机收敛：缺分支工作区时推荐“从目标分支初始化当前分支在线表”，同步预览无变化时推荐 PR 检查/合并预览，有变化或缺 cache 时才推荐写入本地 cache，PR gate 已通过时不再被本地空 token 打回同步循环。
+- 新增 `bootstrap-current-branch-from-target` / `branch-workspace-bootstrap-from-target` dry-run 入口，用于把“新分支在线表应从 main/PR base 派生”作为一等工作流展示，避免普通用户误入历史 `本地 Excel Seed`。
+- Unity 打开窗口会以后台 job 做只读注册中心状态 probe；所有 lark/CLI 访问仍不阻塞 IMGUI，运行中可切 tab、滚动、复制日志和取消。
+- 测试覆盖 ProjectSettings token 为空但 live registry 有 16/16 有效 ConfigSheets 时的状态显示、`sync-cache` dry-run `cacheStatus` 输出，以及推荐状态不再循环到“写入本地 cache”。
+
 ## 0.4.22
 
 - PR gate hydrate 现在会统一归一化 Feishu Base 单选字段返回值：`"approved"`、`["approved"]`、`[{ "text": "approved" }]`、`{ "name": "approved" }` 都会按 `approved` 判断。

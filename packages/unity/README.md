@@ -8,10 +8,13 @@
 
 窗口采用任务型 Dashboard：第一次打开会提示“飞书在线表是正式源头，本地 Excel 是缓存”；首页会给出“推荐下一步”，通常从 `预览同步计划` 开始。预览类按钮只读取不写文件；写入、创建、写回类按钮必须勾选确认，并要求最近一次同输入预览成功。
 
+从 0.4.23 开始，Unity 状态页把 Feishu Base 注册中心当作 live locator 的 Source of Truth。`ProjectSettings/*ConfigSheetForge*.json` 可以只保存表 ID、分支/profile 规则、路径和治理配置，不需要保存每张表的 `SpreadsheetToken` / `SheetId`。窗口会后台运行只读 `registry-status`，用 BranchBindings + ConfigSheets 判断“当前分支是否已登记在线表”。
+
 窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。
 - `配表`：同步已有在线表，或申请新建配表。项目配置存在时会走项目 adapter 生成 lifecycle contract；否则提供 generic registry fallback。
+- `配表`：同步已有在线表，或申请新建配表。`sync-cache` dry-run 会读取注册中心、临时读取/导出在线 Sheet 并做三方一致性检查；只有 apply 且确认后才写正式本地 cache。
 - `合并`：按当前分支和目标分支生成合并预览；项目 adapter 模式下会自动推导 PR、共同祖先和语义输入。目标分支支持搜索，识别到 GitHub PR 时默认使用 PR base。有效预览会列出 source/target 工作区、tableCount、报告路径和缺失项；缺目标分支或表定位时会失败而不是空成功。预览通过后可点 `提交合并审查记录`，只写 Base `MergeReviews`，不写 main、不写本地 cache。
 - `PR 检查`：合 PR 前生成检查报告；失败时优先显示中文原因和下一步。缺合并审查记录、Schema 审查、waiver 时会给可执行入口，而不是只让用户手工找 Base。
 - `输出`：查看摘要、报告和折叠的详细日志；非输出页底部默认只显示一行最近结果，展开后才是可拖拽底部抽屉。
@@ -34,6 +37,7 @@
 | 写入本地 cache | 中风险 | 会更新本地 cache，需要勾选确认 |
 | 创建在线表并登记 / 本地 Excel Seed apply / 确认写回 main | 高风险 | 会写飞书、项目状态或目标工作区，需要预览成功 + 勾选 + 二次确认 |
 | 初始化目标分支 | 高风险 | 先 dry-run；apply 必须校验同输入 dry-run result，再拆分确认在线 Sheet、Base 注册、SchemaReviews、本地 cache、ProjectSettings、ExcelToSO |
+| 从目标分支初始化当前分支 | 中/高风险 | 新功能分支缺在线工作区时使用；先 dry-run，从 main/PR base 派生当前分支在线表，避免误用历史 Excel Seed |
 | 提交合并审查记录 | 中风险 | 只写 Base MergeReviews，不写 main、不写 cache；必须最近一次合并预览通过 |
 
 Editor assembly 引用 `ConfigSheetForge.Core`，也就是 CLI 编译的同一份语义工作簿 core。Provider 访问不放在 Unity 里，统一交给已安装的 `config-sheet-forge` CLI。
