@@ -18,9 +18,20 @@ namespace ConfigSheetForge.Core
         public string BaselineStrategy { get; set; } = "pending";
         public bool PreferDriveImport { get; set; } = true;
         public bool ConfirmApply { get; set; }
+        public bool ConfirmCreateOnlineSheets { get; set; }
+        public bool ConfirmRegistryUpsert { get; set; }
+        public bool ConfirmSchemaReviews { get; set; }
+        public bool ConfirmWriteLocalCache { get; set; }
+        public bool ConfirmWriteProjectConfig { get; set; }
+        public bool ConfirmExcelToSoSettings { get; set; }
         public bool ConfirmProjectConfigUpdate { get; set; }
         public bool ConfirmExcelToSoSettingsUpdate { get; set; }
         public bool CleanupDefaultRows { get; set; }
+        public string TargetGitBranch { get; set; } = "";
+        public string TargetFeishuProfile { get; set; } = "";
+        public string TargetBranchWikiNodeTitle { get; set; } = "";
+        public string SourceMode { get; set; } = "local-xlsx";
+        public List<string> TableIds { get; set; } = new List<string>();
         public List<SeedTableContract> Tables { get; set; } = new List<SeedTableContract>();
     }
 
@@ -138,17 +149,45 @@ namespace ConfigSheetForge.Core
             }
 
             var seed = request.SeedFromLocalXlsx ?? new SeedFromLocalXlsxContract();
-            var tables = ResolveTables(request);
+            var tables = ResolveTables(request).ToList();
             if (tables.Count == 0)
             {
                 result.AddFailure("没有找到要 seed 的配表。请在 contract.seedFromLocalXlsx.tables 中声明表，或提供 request.table/sourceXlsxPath。");
                 return;
             }
 
-            if (!request.DryRun && !seed.ConfirmApply)
+            if (!ApplyTargetBranchBootstrapOverrides(request, seed, tables, result))
+            {
+                return;
+            }
+
+            seed.Tables = tables;
+
+            if (!request.DryRun && !IsTargetBranchBootstrap(request) && !seed.ConfirmApply)
             {
                 result.AddFailure("seed-from-local-xlsx 会创建/绑定在线 Sheet 并回填本地配置。apply 模式必须显式确认：CLI 传 --yes，或 contract.seedFromLocalXlsx.confirmApply=true。");
                 return;
+            }
+
+            if (!request.DryRun && IsTargetBranchBootstrap(request))
+            {
+                if (!CanCreateOnlineSheets(request, seed))
+                {
+                    result.AddFailure("初始化目标分支会创建/复用在线工作区和 Sheet。apply 前必须显式确认 confirmCreateOnlineSheets=true。");
+                    return;
+                }
+
+                if (!CanRegistryUpsert(request, seed))
+                {
+                    result.AddFailure("初始化目标分支需要登记 BranchBindings / ConfigSheets。apply 前必须显式确认 confirmRegistryUpsert=true。");
+                    return;
+                }
+
+                if (!CanSchemaReviews(request, seed))
+                {
+                    result.AddFailure("初始化目标分支需要登记 SchemaReviews baseline。apply 前必须显式确认 confirmSchemaReviews=true。");
+                    return;
+                }
             }
 
             var branchWorkspace = BranchWorkspaceResolver.Resolve(request);
@@ -163,6 +202,7 @@ namespace ConfigSheetForge.Core
             if (request.DryRun)
             {
                 result.Actions.Add(BranchWorkspaceResolver.BuildAction(branchWorkspace, "planned", "预览：seed 会先使用/创建分支工作区节点，再把在线 Sheet 挂到该节点下。"));
+                AddTargetBootstrapPlanAction(request, seed, tables, result, branchWorkspace);
             }
             else
             {
@@ -182,8 +222,20 @@ namespace ConfigSheetForge.Core
                     return;
                 }
 
+                if (!CanRegistryUpsert(request, seed))
+                {
+                    result.AddFailure("已定位目标工作区，但没有确认写 BranchBindings。请确认 confirmRegistryUpsert=true 后重试。");
+                    return;
+                }
+
                 var binding = await branchPlatform.UpsertBranchBindingAsync(request.Registry, branchWorkspace, cancellationToken).ConfigureAwait(false);
                 result.Actions.Add(binding);
+                if (IsTargetBranchBootstrap(request) && string.Equals(binding.Status, "skipped", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.AddFailure("初始化目标分支需要写 BranchBindings，但当前 registry Base 未配置或被跳过。请检查 ProjectSettings 的 live registry/baseToken。");
+                    return;
+                }
+
                 if (binding.Status == "failed")
                 {
                     result.AddFailure(binding.Message);
@@ -274,7 +326,14 @@ namespace ConfigSheetForge.Core
                 return;
             }
 
-            if (NeedsExcelToSoUpdate(table) && !seed.ConfirmExcelToSoSettingsUpdate)
+            if (!CanCreateOnlineSheets(request, seed))
+            {
+                Fail(tableResult, result, "配表 “" + FirstNonEmpty(table.DisplayName, table.TableId) + "” 需要创建/复用在线 Sheet。请先确认 confirmCreateOnlineSheets=true。");
+                tableResult.Status = "blocked";
+                return;
+            }
+
+            if (!IsTargetBranchBootstrap(request) && NeedsExcelToSoUpdate(table) && !CanExcelToSoSettings(request, seed))
             {
                 Fail(tableResult, result, "配表 “" + FirstNonEmpty(table.DisplayName, table.TableId) + "” 需要更新 ExcelToSO settings。apply 模式必须显式确认：CLI 传 --confirm-excel-to-so，或 contract.seedFromLocalXlsx.confirmExcelToSoSettingsUpdate=true。");
                 tableResult.Status = "blocked";
@@ -339,24 +398,45 @@ namespace ConfigSheetForge.Core
                 return;
             }
 
-            var cache = await platform.WriteSeedCacheAsync(seed, table, local.Workbook, tableResult.SemanticHash, roundTrip.ExportedXlsxPath, cancellationToken).ConfigureAwait(false);
-            tableResult.CacheXlsxPath = GetDetail(cache, "xlsxPath");
-            tableResult.SemanticCachePath = GetDetail(cache, "semanticPath");
-            tableResult.HashCachePath = GetDetail(cache, "shaPath");
-            result.Actions.Add(cache);
-            tableResult.Actions.Add(cache);
-            if (IsFailedAction(cache, tableResult, result))
+            if (CanWriteLocalCache(request, seed))
             {
-                tableResult.Status = "failed";
-                return;
+                var cache = await platform.WriteSeedCacheAsync(seed, table, local.Workbook, tableResult.SemanticHash, roundTrip.ExportedXlsxPath, cancellationToken).ConfigureAwait(false);
+                tableResult.CacheXlsxPath = GetDetail(cache, "xlsxPath");
+                tableResult.SemanticCachePath = GetDetail(cache, "semanticPath");
+                tableResult.HashCachePath = GetDetail(cache, "shaPath");
+                result.Actions.Add(cache);
+                tableResult.Actions.Add(cache);
+                if (IsFailedAction(cache, tableResult, result))
+                {
+                    tableResult.Status = "failed";
+                    return;
+                }
+            }
+            else
+            {
+                Add(tableResult, result, "seed.cache.write", "skipped", "未确认写本地 cache，已跳过 .config-sheet-forge/cache 和 excel-cache 写入。");
             }
 
-            var config = await platform.UpdateProjectConfigAsync(seed, table, online, cancellationToken).ConfigureAwait(false);
-            result.Actions.Add(config);
-            tableResult.Actions.Add(config);
-            if (IsFailedAction(config, tableResult, result))
+            if (CanWriteProjectConfig(request, seed))
             {
-                tableResult.Status = "failed";
+                var config = await platform.UpdateProjectConfigAsync(seed, table, online, cancellationToken).ConfigureAwait(false);
+                result.Actions.Add(config);
+                tableResult.Actions.Add(config);
+                if (IsFailedAction(config, tableResult, result))
+                {
+                    tableResult.Status = "failed";
+                    return;
+                }
+            }
+            else
+            {
+                Add(tableResult, result, "seed.project_config.update", "skipped", "未确认写 ProjectSettings，已跳过项目配置回填。");
+            }
+
+            if (!CanRegistryUpsert(request, seed))
+            {
+                Fail(tableResult, result, "配表 “" + FirstNonEmpty(table.DisplayName, table.TableId) + "” 需要登记 ConfigSheets。请确认 confirmRegistryUpsert=true 后重试。");
+                tableResult.Status = "blocked";
                 return;
             }
 
@@ -365,25 +445,46 @@ namespace ConfigSheetForge.Core
             result.RegistryRecordId = FirstNonEmpty(result.RegistryRecordId, tableResult.RegistryRecordId);
             result.Actions.Add(registry);
             tableResult.Actions.Add(registry);
+            if (IsTargetBranchBootstrap(request) && string.Equals(registry.Status, "skipped", StringComparison.OrdinalIgnoreCase))
+            {
+                Fail(tableResult, result, "初始化目标分支需要写 ConfigSheets，但当前 registry Base 未配置或被跳过。请检查 ProjectSettings 的 live registry/baseToken。");
+                tableResult.Status = "blocked";
+                return;
+            }
+
             if (IsFailedAction(registry, tableResult, result))
             {
                 tableResult.Status = "failed";
                 return;
             }
 
-            var schemaReason = BuildSeedSchemaReviewReason(table, tableResult.SchemaChangeDetected, seed.BaselineStrategy);
-            var schema = await platform.UpsertSeedSchemaReviewAsync(request.Registry, seed, table, request.Git, tableResult.SchemaChangeDetected, schemaReason, cancellationToken).ConfigureAwait(false);
-            tableResult.SchemaReviewId = GetDetail(schema, "schemaReviewId");
-            result.SchemaReviewId = FirstNonEmpty(result.SchemaReviewId, tableResult.SchemaReviewId);
-            result.Actions.Add(schema);
-            tableResult.Actions.Add(schema);
-            if (IsFailedAction(schema, tableResult, result))
+            if (CanSchemaReviews(request, seed))
             {
-                tableResult.Status = "failed";
-                return;
+                var schemaReason = BuildSeedSchemaReviewReason(table, tableResult.SchemaChangeDetected, seed.BaselineStrategy);
+                var schema = await platform.UpsertSeedSchemaReviewAsync(request.Registry, seed, table, request.Git, tableResult.SchemaChangeDetected, schemaReason, cancellationToken).ConfigureAwait(false);
+                tableResult.SchemaReviewId = GetDetail(schema, "schemaReviewId");
+                result.SchemaReviewId = FirstNonEmpty(result.SchemaReviewId, tableResult.SchemaReviewId);
+                result.Actions.Add(schema);
+                tableResult.Actions.Add(schema);
+                if (IsTargetBranchBootstrap(request) && string.Equals(schema.Status, "skipped", StringComparison.OrdinalIgnoreCase))
+                {
+                    Fail(tableResult, result, "初始化目标分支需要写 SchemaReviews，但当前 registry Base 未配置、或该表被配置为不需要 SchemaReviews。请检查目标分支初始化策略。");
+                    tableResult.Status = "blocked";
+                    return;
+                }
+
+                if (IsFailedAction(schema, tableResult, result))
+                {
+                    tableResult.Status = "failed";
+                    return;
+                }
+            }
+            else
+            {
+                Add(tableResult, result, "seed.registry.schema_reviews.upsert", "skipped", "未确认登记 SchemaReviews，已跳过 schema baseline 回填。");
             }
 
-            if (NeedsExcelToSoUpdate(table))
+            if (NeedsExcelToSoUpdate(table) && CanExcelToSoSettings(request, seed))
             {
                 var excelToSo = await platform.UpdateExcelToSoSettingsAsync(seed, table, cancellationToken).ConfigureAwait(false);
                 result.Actions.Add(excelToSo);
@@ -393,6 +494,10 @@ namespace ConfigSheetForge.Core
                     tableResult.Status = "failed";
                     return;
                 }
+            }
+            else if (NeedsExcelToSoUpdate(table))
+            {
+                Add(tableResult, result, "seed.unity.excel_to_so.upsert", "skipped", "未确认更新 ExcelToSO settings，已跳过该写入。旧 Excel 源路径不会被改动。");
             }
 
             result.SpreadsheetToken = FirstNonEmpty(result.SpreadsheetToken, tableResult.SpreadsheetToken);
@@ -405,7 +510,12 @@ namespace ConfigSheetForge.Core
 
         private static void AddDryRunOrBlockedPlan(LifecycleContractRequest request, SeedFromLocalXlsxContract seed, SeedTableContract table, SeedTableLifecycleResult tableResult, LifecycleContractResult result)
         {
-            Add(tableResult, result, "seed.sheet.import_or_create", "planned", "预览：创建或导入飞书在线 Sheet；优先 drive import xlsx，失败时可 fallback 到 sheets create + values write，并记录能力差异。");
+            var sheet = Add(tableResult, result, "seed.sheet.import_or_create", "planned", "预览：创建或复用飞书在线 Sheet；优先 drive import xlsx，失败时可 fallback 到 sheets create + values write，并记录能力差异。");
+            sheet.Details["sourceXlsxPath"] = FirstNonEmpty(table.SourceXlsxPath, seed.SourceXlsxPath);
+            sheet.Details["targetSheetTitle"] = FirstNonEmpty(table.DisplayName, table.TableId);
+            sheet.Details["targetBranch"] = table.Branch;
+            sheet.Details["targetProfile"] = table.Profile;
+            sheet.Details["willCreateOrReuseOnlineSheet"] = "true";
             var wiki = Add(tableResult, result, "seed.wiki.link", "planned", "预览：把在线 Sheet 放到分支工作区 “" + FirstNonEmpty(result.BranchWorkspace.RootWikiTitle, seed.WikiParentTitle, "项目配置表") + "/" + FirstNonEmpty(result.BranchWorkspace.NodeTitle, "main") + "”。");
             wiki.Details["branchNodeTitle"] = result.BranchWorkspace.NodeTitle;
             wiki.Details["branchWikiNodeToken"] = result.BranchWorkspace.WikiNodeToken;
@@ -415,11 +525,198 @@ namespace ConfigSheetForge.Core
             Add(tableResult, result, "seed.online_read", "planned", "预览：导入后必须在线回读 Sheet。");
             Add(tableResult, result, "seed.export_xlsx", "planned", "预览：导出在线 Sheet 为 xlsx，供三方比较使用。");
             Add(tableResult, result, "seed.triangulation_compare", "planned", "预览：比较 local xlsx semantic、online-read semantic、exported-xlsx semantic；任一不一致都会阻断写入。");
-            Add(tableResult, result, "seed.cache.write_preview", "planned", "预览：三方一致后才写 .config-sheet-forge/excel-cache、semantic.json 和 sha256；hash 相同不改 mtime。");
-            Add(tableResult, result, "seed.project_config.preview", "planned", "预览：回填 ProjectSettings/*ConfigSheetForge*.json 中当前 branch/profile 对应的 spreadsheetToken、sheetId、url、wikiNodeToken。");
-            Add(tableResult, result, "seed.registry.config_sheets.preview", "planned", "预览：按 TableId + Branch/Profile upsert Base ConfigSheets，忽略空白默认行，不依赖行顺序。");
-            Add(tableResult, result, "seed.registry.schema_reviews.preview", "planned", "预览：创建 baseline/pending SchemaReviews 记录；schemaChangeDetected=" + tableResult.SchemaChangeDetected.ToString().ToLowerInvariant() + "。");
-            Add(tableResult, result, "seed.unity.excel_to_so.preview", "planned", "预览：只追加/更新目标表的 ExcelToSO JSON/YAML settings；apply 需要显式确认。");
+            var cache = Add(tableResult, result, "seed.cache.write_preview", "planned", "预览：三方一致后才可能写 .config-sheet-forge/excel-cache、semantic.json 和 sha256；hash 相同不改 mtime。");
+            cache.Details["willWriteLocalCache"] = CanWriteLocalCache(request, seed).ToString().ToLowerInvariant();
+            cache.Details["cacheXlsxPath"] = FirstNonEmpty(table.CacheXlsxPath, seed.ExcelCacheDirectory + "/" + table.TableId + ".xlsx");
+            var project = Add(tableResult, result, "seed.project_config.preview", "planned", "预览：可回填 ProjectSettings/*ConfigSheetForge*.json 中目标 branch/profile 对应的 spreadsheetToken、sheetId、url、wikiNodeToken。");
+            project.Details["willWriteProjectConfig"] = CanWriteProjectConfig(request, seed).ToString().ToLowerInvariant();
+            project.Details["projectConfigPath"] = FirstNonEmpty(table.ProjectConfigPath, seed.ProjectConfigPath);
+            var registry = Add(tableResult, result, "seed.registry.config_sheets.preview", "planned", "预览：按 TableId + Branch/Profile upsert Base ConfigSheets，忽略空白默认行，不依赖行顺序。");
+            registry.Details["willUpsertRegistry"] = CanRegistryUpsert(request, seed).ToString().ToLowerInvariant();
+            registry.Details["tableId"] = table.TableId;
+            registry.Details["branch"] = table.Branch;
+            registry.Details["profile"] = table.Profile;
+            var schema = Add(tableResult, result, "seed.registry.schema_reviews.preview", "planned", "预览：创建 baseline/pending SchemaReviews 记录；schemaChangeDetected=" + tableResult.SchemaChangeDetected.ToString().ToLowerInvariant() + "。");
+            schema.Details["willUpsertSchemaReviews"] = CanSchemaReviews(request, seed).ToString().ToLowerInvariant();
+            var excelToSo = Add(tableResult, result, "seed.unity.excel_to_so.preview", "planned", "预览：只有显式确认后才追加/更新目标表的 ExcelToSO JSON/YAML settings。");
+            excelToSo.Details["willUpdateExcelToSoSettings"] = CanExcelToSoSettings(request, seed).ToString().ToLowerInvariant();
+            excelToSo.Details["settingsPath"] = table.UnityExcelToSo != null ? table.UnityExcelToSo.SettingsPath : "";
+        }
+
+        private static bool ApplyTargetBranchBootstrapOverrides(LifecycleContractRequest request, SeedFromLocalXlsxContract seed, List<SeedTableContract> tables, LifecycleContractResult result)
+        {
+            if (!IsTargetBranchBootstrap(request))
+            {
+                return true;
+            }
+
+            var bootstrap = request.TargetBranchBootstrap ?? new TargetBranchBootstrapContract();
+            var sourceMode = FirstNonEmpty(bootstrap.SourceMode, seed.SourceMode, "local-xlsx");
+            if (!string.Equals(sourceMode, "local-xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                result.AddFailure("初始化目标分支当前只支持 sourceMode=local-xlsx。请先选择本地 xlsx 源，或等后续版本支持 current-branch-cache/existing-profile。");
+                return false;
+            }
+
+            request.Git ??= new ContractGitSpec();
+            request.MergeInputs ??= new MergeInputsContract();
+            request.BranchWorkspace ??= new BranchWorkspaceContract();
+            request.TargetBranchBootstrap ??= bootstrap;
+
+            var targetBranch = FirstNonEmpty(bootstrap.TargetGitBranch, seed.TargetGitBranch, request.MergeInputs.TargetBranch, request.BranchWorkspace.MainGitBranch, "main");
+            var mainBranch = FirstNonEmpty(request.BranchWorkspace.MainGitBranch, "main");
+            var targetProfile = FirstNonEmpty(bootstrap.TargetFeishuProfile, seed.TargetFeishuProfile, request.MergeInputs.TargetFeishuProfile, string.Equals(targetBranch, mainBranch, StringComparison.OrdinalIgnoreCase) ? FirstNonEmpty(request.BranchWorkspace.MainFeishuBranch, "main") : targetBranch);
+            var targetTitle = FirstNonEmpty(bootstrap.TargetBranchWikiNodeTitle, seed.TargetBranchWikiNodeTitle, request.MergeInputs.TargetBranchWikiNodeTitle, string.Equals(targetBranch, mainBranch, StringComparison.OrdinalIgnoreCase) ? FirstNonEmpty(request.BranchWorkspace.MainNodeTitle, targetProfile, "main") : targetProfile);
+
+            request.Git.Branch = targetBranch;
+            request.Git.FeishuBranch = targetProfile;
+            request.Git.Profile = targetProfile;
+            request.BranchWorkspace.GitBranch = targetBranch;
+            request.BranchWorkspace.FeishuBranch = targetProfile;
+            request.BranchWorkspace.Profile = targetProfile;
+            request.BranchWorkspace.MainFeishuBranch = string.Equals(targetBranch, mainBranch, StringComparison.OrdinalIgnoreCase) ? targetProfile : request.BranchWorkspace.MainFeishuBranch;
+            if (string.Equals(targetBranch, mainBranch, StringComparison.OrdinalIgnoreCase))
+            {
+                request.BranchWorkspace.MainNodeTitle = targetTitle;
+            }
+            else if (!string.IsNullOrWhiteSpace(targetTitle))
+            {
+                request.BranchWorkspace.BranchNodeTitleTemplate = targetTitle;
+            }
+
+            request.MergeInputs.TargetBranch = targetBranch;
+            request.MergeInputs.TargetFeishuProfile = targetProfile;
+            request.MergeInputs.TargetBranchWikiNodeTitle = targetTitle;
+            bootstrap.TargetGitBranch = targetBranch;
+            bootstrap.TargetFeishuProfile = targetProfile;
+            bootstrap.TargetBranchWikiNodeTitle = targetTitle;
+            seed.TargetGitBranch = targetBranch;
+            seed.TargetFeishuProfile = targetProfile;
+            seed.TargetBranchWikiNodeTitle = targetTitle;
+            seed.SourceMode = sourceMode;
+
+            var selected = BuildSelectedTableSet(bootstrap.TableIds, seed.TableIds);
+            if (selected.Count > 0)
+            {
+                tables.RemoveAll(t => !selected.Contains(t.TableId ?? ""));
+                if (tables.Count == 0)
+                {
+                    result.AddFailure("初始化目标分支没有找到 tableIds 指定的配表：" + string.Join(", ", selected) + "。请确认项目配置 tables 中存在这些 TableId。");
+                    return false;
+                }
+            }
+
+            foreach (var table in tables)
+            {
+                var originalProfile = FirstNonEmpty(table.Profile, table.Branch);
+                var originalBranch = table.Branch;
+                var wasDifferentTarget = !string.IsNullOrWhiteSpace(originalProfile) && !string.Equals(originalProfile, targetProfile, StringComparison.OrdinalIgnoreCase);
+                table.Branch = targetProfile;
+                table.Profile = targetProfile;
+                if (wasDifferentTarget || (!string.IsNullOrWhiteSpace(originalBranch) && !string.Equals(originalBranch, targetProfile, StringComparison.OrdinalIgnoreCase)))
+                {
+                    table.SpreadsheetToken = "";
+                    table.SpreadsheetUrl = "";
+                    table.SheetId = "";
+                    table.WikiNodeToken = "";
+                    table.WikiNodeUrl = "";
+                    table.RegistryRecordId = "";
+                }
+            }
+
+            return true;
+        }
+
+        private static void AddTargetBootstrapPlanAction(LifecycleContractRequest request, SeedFromLocalXlsxContract seed, List<SeedTableContract> tables, LifecycleContractResult result, BranchWorkspaceResolution branchWorkspace)
+        {
+            if (!IsTargetBranchBootstrap(request))
+            {
+                return;
+            }
+
+            var action = result.AddAction("target_branch.bootstrap.plan", "planned", "预览：初始化目标分支 “" + branchWorkspace.GitBranch + "” 的在线工作区和表定位；dry-run 不写飞书、不改本地文件。");
+            action.Details["targetGitBranch"] = branchWorkspace.GitBranch;
+            action.Details["targetFeishuProfile"] = FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch);
+            action.Details["targetBranchWikiNodeTitle"] = branchWorkspace.NodeTitle;
+            action.Details["targetBranchWikiNodeUrl"] = branchWorkspace.WikiNodeUrl;
+            action.Details["sourceMode"] = FirstNonEmpty(request.TargetBranchBootstrap != null ? request.TargetBranchBootstrap.SourceMode : "", seed.SourceMode, "local-xlsx");
+            action.Details["tableCount"] = tables.Count.ToString(CultureInfo.InvariantCulture);
+            action.Details["tableIds"] = string.Join(", ", tables.Select(t => t.TableId));
+            action.Details["confirmCreateOnlineSheets"] = CanCreateOnlineSheets(request, seed).ToString().ToLowerInvariant();
+            action.Details["confirmRegistryUpsert"] = CanRegistryUpsert(request, seed).ToString().ToLowerInvariant();
+            action.Details["confirmSchemaReviews"] = CanSchemaReviews(request, seed).ToString().ToLowerInvariant();
+            action.Details["confirmWriteLocalCache"] = CanWriteLocalCache(request, seed).ToString().ToLowerInvariant();
+            action.Details["confirmWriteProjectConfig"] = CanWriteProjectConfig(request, seed).ToString().ToLowerInvariant();
+            action.Details["confirmExcelToSoSettings"] = CanExcelToSoSettings(request, seed).ToString().ToLowerInvariant();
+        }
+
+        private static HashSet<string> BuildSelectedTableSet(IEnumerable<string> first, IEnumerable<string> second)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var value in first ?? Enumerable.Empty<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    result.Add(value.Trim());
+                }
+            }
+
+            foreach (var value in second ?? Enumerable.Empty<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    result.Add(value.Trim());
+                }
+            }
+
+            return result;
+        }
+
+        private static bool IsTargetBranchBootstrap(LifecycleContractRequest request)
+        {
+            return string.Equals(request.Operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool CanCreateOnlineSheets(LifecycleContractRequest request, SeedFromLocalXlsxContract seed)
+        {
+            return IsTargetBranchBootstrap(request)
+                ? (request.TargetBranchBootstrap != null && request.TargetBranchBootstrap.ConfirmCreateOnlineSheets) || seed.ConfirmCreateOnlineSheets
+                : seed.ConfirmApply || seed.ConfirmCreateOnlineSheets;
+        }
+
+        private static bool CanRegistryUpsert(LifecycleContractRequest request, SeedFromLocalXlsxContract seed)
+        {
+            return IsTargetBranchBootstrap(request)
+                ? (request.TargetBranchBootstrap != null && request.TargetBranchBootstrap.ConfirmRegistryUpsert) || seed.ConfirmRegistryUpsert
+                : seed.ConfirmApply || seed.ConfirmRegistryUpsert;
+        }
+
+        private static bool CanSchemaReviews(LifecycleContractRequest request, SeedFromLocalXlsxContract seed)
+        {
+            return IsTargetBranchBootstrap(request)
+                ? (request.TargetBranchBootstrap != null && request.TargetBranchBootstrap.ConfirmSchemaReviews) || seed.ConfirmSchemaReviews
+                : seed.ConfirmApply || seed.ConfirmSchemaReviews;
+        }
+
+        private static bool CanWriteLocalCache(LifecycleContractRequest request, SeedFromLocalXlsxContract seed)
+        {
+            return IsTargetBranchBootstrap(request)
+                ? (request.TargetBranchBootstrap != null && request.TargetBranchBootstrap.ConfirmWriteLocalCache) || seed.ConfirmWriteLocalCache
+                : seed.ConfirmApply || seed.ConfirmWriteLocalCache;
+        }
+
+        private static bool CanWriteProjectConfig(LifecycleContractRequest request, SeedFromLocalXlsxContract seed)
+        {
+            return IsTargetBranchBootstrap(request)
+                ? (request.TargetBranchBootstrap != null && request.TargetBranchBootstrap.ConfirmWriteProjectConfig) || seed.ConfirmWriteProjectConfig || seed.ConfirmProjectConfigUpdate
+                : seed.ConfirmApply || seed.ConfirmWriteProjectConfig || seed.ConfirmProjectConfigUpdate;
+        }
+
+        private static bool CanExcelToSoSettings(LifecycleContractRequest request, SeedFromLocalXlsxContract seed)
+        {
+            return IsTargetBranchBootstrap(request)
+                ? (request.TargetBranchBootstrap != null && request.TargetBranchBootstrap.ConfirmExcelToSoSettings) || seed.ConfirmExcelToSoSettings || seed.ConfirmExcelToSoSettingsUpdate
+                : seed.ConfirmExcelToSoSettings || seed.ConfirmExcelToSoSettingsUpdate;
         }
 
         private static SeedTableContract FromContractTable(ContractTableSpec table)

@@ -22,6 +22,7 @@ namespace ConfigSheetForge.Core
         public MergeInputsContract MergeInputs { get; set; } = new MergeInputsContract();
         public PrGateReport GateReport { get; set; } = new PrGateReport();
         public SeedFromLocalXlsxContract SeedFromLocalXlsx { get; set; } = new SeedFromLocalXlsxContract();
+        public TargetBranchBootstrapContract TargetBranchBootstrap { get; set; } = new TargetBranchBootstrapContract();
         public SyncCacheContract SyncCache { get; set; } = new SyncCacheContract();
         public BranchWorkspaceContract BranchWorkspace { get; set; } = new BranchWorkspaceContract();
         public string GateReportPath { get; set; } = "";
@@ -129,6 +130,21 @@ namespace ConfigSheetForge.Core
         public bool WriteBackToMain { get; set; }
         public bool ConfirmWriteMain { get; set; }
         public string TableId { get; set; } = "";
+    }
+
+    public sealed class TargetBranchBootstrapContract
+    {
+        public string TargetGitBranch { get; set; } = "";
+        public string TargetFeishuProfile { get; set; } = "";
+        public string TargetBranchWikiNodeTitle { get; set; } = "";
+        public string SourceMode { get; set; } = "local-xlsx";
+        public List<string> TableIds { get; set; } = new List<string>();
+        public bool ConfirmCreateOnlineSheets { get; set; }
+        public bool ConfirmRegistryUpsert { get; set; }
+        public bool ConfirmSchemaReviews { get; set; }
+        public bool ConfirmWriteLocalCache { get; set; }
+        public bool ConfirmWriteProjectConfig { get; set; }
+        public bool ConfirmExcelToSoSettings { get; set; }
     }
 
     public sealed class BranchBindingContract
@@ -730,6 +746,7 @@ namespace ConfigSheetForge.Core
                     break;
                 case "seed-from-local-xlsx":
                 case "bootstrap-from-local-xlsx":
+                case "bootstrap-target-branch-from-local-xlsx":
                     await SeedFromLocalXlsxLifecycle.ExecuteAsync(request, platform, result, cancellationToken).ConfigureAwait(false);
                     break;
                 case "sync-cache":

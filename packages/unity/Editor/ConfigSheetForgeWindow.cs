@@ -14,7 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.16";
+        private const string PackageVersion = "v0.4.17";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -121,6 +121,12 @@ namespace ConfigSheetForge.Unity.Editor
         private bool _confirmWriteMain;
         private bool _confirmSeedApply;
         private bool _confirmSeedExcelToSo;
+        private bool _confirmTargetCreateOnlineSheets;
+        private bool _confirmTargetRegistryUpsert;
+        private bool _confirmTargetSchemaReviews;
+        private bool _confirmTargetWriteLocalCache;
+        private bool _confirmTargetWriteProjectConfig;
+        private bool _confirmTargetExcelToSo;
         private bool _confirmSyncApply;
         private bool _confirmNewTableApply;
         private bool _showAdvancedDiagnostics;
@@ -489,6 +495,11 @@ namespace ConfigSheetForge.Unity.Editor
                 return "合并预览";
             }
 
+            if (string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                return "初始化目标分支";
+            }
+
             if (string.Equals(operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
             {
                 return "PR 检查";
@@ -528,6 +539,11 @@ namespace ConfigSheetForge.Unity.Editor
             if (string.Equals(job.Operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
             {
                 return "安全性：写回 main 只有在显式确认后才会发生。";
+            }
+
+            if (string.Equals(job.Operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                return "安全性：初始化目标分支按分项确认写入；未勾选的 cache、ProjectSettings、ExcelToSO 不会写。";
             }
 
             return "安全性：后台任务已通过 UI 确认，完成后按钮会自动恢复。";
@@ -1241,6 +1257,7 @@ namespace ConfigSheetForge.Unity.Editor
             DrawProjectMergeInputs();
             if (_projectConfig.Exists)
             {
+                DrawTargetBranchBootstrapCard();
                 EditorGUILayout.BeginVertical(EditorStyles.helpBox);
                 EditorGUILayout.LabelField("执行", EditorStyles.boldLabel);
                 EditorGUILayout.LabelField("低风险 merge 只生成预览，不写回 main；adapter 会根据 source/target/merge-base 自动准备 base/ours/theirs semantic 输入。", EditorStyles.wordWrappedLabel);
@@ -2295,6 +2312,124 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndVertical();
         }
 
+        private void DrawTargetBranchBootstrapCard()
+        {
+            if (!_programView || !TargetBranchLooksMissing())
+            {
+                return;
+            }
+
+            var targetBranch = FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main");
+            var targetProfile = FirstNonEmpty(_targetFeishuProfile, targetBranch);
+            var targetTitle = FirstNonEmpty(_targetBranchWikiNodeTitle, targetProfile);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("目标分支还没初始化", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("合并预览需要目标分支 " + targetBranch + " 的在线工作区和表定位。先生成初始化 dry-run，确认会创建/复用哪些在线 Sheet、会写哪些 Base 记录。", EditorStyles.wordWrappedLabel);
+            DrawReadonlyRow("目标分支", targetBranch, "通常来自 GitHub PR base branch。");
+            DrawReadonlyRow("目标 Feishu", targetProfile, "初始化后 compare-merge 会用它定位 main/base 在线表。");
+            DrawReadonlyRow("目标节点", targetTitle, "默认 main；会显示为项目配置表/main。");
+            DrawReadonlyRow("表范围", BuildTargetBootstrapTablesText(), "默认使用项目配置中的全部表。");
+
+            EditorGUILayout.BeginHorizontal();
+            if (DrawJobButton(new GUIContent("初始化目标分支 " + targetBranch + "（先 dry-run）", "只生成初始化计划，不写飞书、不改本地文件。"), GUILayout.Height(28)))
+            {
+                RunProjectLifecycle("bootstrap-target-branch-from-local-xlsx", dryRun: true);
+            }
+
+            if (GUILayout.Button(new GUIContent("复制 dry-run 命令", "复制通过 adapter 生成初始化计划的命令。"), GUILayout.Height(28), GUILayout.Width(116)))
+            {
+                CopyProjectLifecycleAdapterCommand("bootstrap-target-branch-from-local-xlsx", dryRun: true);
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (_riskModeUnlocked)
+            {
+                GUILayout.Space(4);
+                EditorGUILayout.LabelField("执行初始化（分项确认）", EditorStyles.boldLabel);
+                EditorGUILayout.HelpBox("apply 会严格使用 bot 身份；不会静默 fallback 到 user。cache、ProjectSettings、ExcelToSO settings 都是单独确认，默认不写。", MessageType.Warning);
+                _confirmTargetCreateOnlineSheets = EditorGUILayout.Toggle(new GUIContent("确认创建/复用在线 Sheet 和目标节点", "允许创建/复用 项目配置表/" + targetTitle + " 以及各表在线 Sheet。"), _confirmTargetCreateOnlineSheets);
+                _confirmTargetRegistryUpsert = EditorGUILayout.Toggle(new GUIContent("确认登记 BranchBindings / ConfigSheets", "允许 upsert Base 注册中心中的分支绑定和配表定位。"), _confirmTargetRegistryUpsert);
+                _confirmTargetSchemaReviews = EditorGUILayout.Toggle(new GUIContent("确认登记 SchemaReviews baseline", "允许为目标分支初始化 schema 审查记录。"), _confirmTargetSchemaReviews);
+                _confirmTargetWriteLocalCache = EditorGUILayout.Toggle(new GUIContent("确认写本地 cache", "可选；允许写 .config-sheet-forge/cache 和 excel-cache。"), _confirmTargetWriteLocalCache);
+                _confirmTargetWriteProjectConfig = EditorGUILayout.Toggle(new GUIContent("确认回填 ProjectSettings", "可选；默认不改 ProjectSettings/*ConfigSheetForge*.json。"), _confirmTargetWriteProjectConfig);
+                _confirmTargetExcelToSo = EditorGUILayout.Toggle(new GUIContent("确认更新 ExcelToSO settings", "可选；默认不改旧 Excel 源路径和 ExcelToSO settings。"), _confirmTargetExcelToSo);
+                var applyReady = _confirmTargetCreateOnlineSheets && _confirmTargetRegistryUpsert && _confirmTargetSchemaReviews && LastPreviewPassed("bootstrap-target-branch-from-local-xlsx");
+                if ((_confirmTargetCreateOnlineSheets || _confirmTargetRegistryUpsert || _confirmTargetSchemaReviews) && !LastPreviewPassed("bootstrap-target-branch-from-local-xlsx"))
+                {
+                    EditorGUILayout.HelpBox("请先生成“初始化目标分支”的 dry-run，并确认预览成功后再 apply。", MessageType.Warning);
+                }
+
+                if (DrawJobButton(new GUIContent("执行目标分支初始化", "危险操作：创建/复用在线 Sheet，并按确认项写 Base/cache/ProjectSettings/ExcelToSO。"), applyReady, GUILayout.Height(28)))
+                {
+                    var message = "将初始化目标分支 " + targetBranch + "。会创建/复用在线 Sheet，并写入已勾选的 Base/cache/ProjectSettings/ExcelToSO 项。请确认 dry-run 已通过。";
+                    if (EditorUtility.DisplayDialog("确认初始化目标分支", message, "确认执行", "取消"))
+                    {
+                        RunProjectLifecycle("bootstrap-target-branch-from-local-xlsx", dryRun: false);
+                    }
+                }
+            }
+            else
+            {
+                EditorGUILayout.LabelField("执行初始化属于高级写入；需要顶部开启“高级”后才显示确认项。", EditorStyles.wordWrappedMiniLabel);
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private bool TargetBranchLooksMissing()
+        {
+            if (!_projectConfig.Exists)
+            {
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(_targetBranchWikiNodeToken) && string.IsNullOrWhiteSpace(_targetBranchWikiNodeUrl))
+            {
+                return true;
+            }
+
+            var summary = (_resultSummary ?? "") + "\n" + (_output ?? "");
+            return summary.IndexOf("目标分支", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                   (summary.IndexOf("缺少", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    summary.IndexOf("找不到", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    summary.IndexOf("missingTarget", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private string BuildTargetBootstrapTablesText()
+        {
+            if (_projectConfig.TableCount > 0)
+            {
+                return _projectConfig.TableCount.ToString() + " 张共享配置表";
+            }
+
+            if (_projectConfig.CurrentBranchTableCount > 0)
+            {
+                return _projectConfig.CurrentBranchTableCount.ToString() + " 张当前分支表";
+            }
+
+            return "项目配置 tables 中的全部表";
+        }
+
+        private string BuildTargetBootstrapTableIdsCsv()
+        {
+            var ids = new List<string>();
+            var source = _projectConfig.Tables != null && _projectConfig.Tables.Count > 0
+                ? _projectConfig.Tables
+                : _projectConfig.CurrentBranchTables;
+            if (source != null)
+            {
+                foreach (var table in source)
+                {
+                    if (!string.IsNullOrWhiteSpace(table.TableId) && !ids.Contains(table.TableId))
+                    {
+                        ids.Add(table.TableId);
+                    }
+                }
+            }
+
+            return string.Join(",", ids);
+        }
+
         private void DrawProjectLifecycleCard(string title, string body, string buttonLabel, string operation, bool dryRun, bool includeNewTableSteps)
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
@@ -2877,6 +3012,13 @@ namespace ConfigSheetForge.Unity.Editor
                 builder.Append("report=").Append(_mergeReportPath).Append('|');
                 builder.Append("merged=").Append(_mergedPath);
             }
+            else if (string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.Append("target=").Append(FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main")).Append('|');
+                builder.Append("profile=").Append(FirstNonEmpty(_targetFeishuProfile, _targetBranch, "main")).Append('|');
+                builder.Append("node=").Append(FirstNonEmpty(_targetBranchWikiNodeTitle, _targetFeishuProfile, "main")).Append('|');
+                builder.Append("tables=").Append(BuildTargetBootstrapTableIdsCsv());
+            }
 
             return builder.ToString();
         }
@@ -2907,6 +3049,11 @@ namespace ConfigSheetForge.Unity.Editor
             if (string.Equals(operation, "new-table", StringComparison.OrdinalIgnoreCase))
             {
                 return _confirmNewTableApply;
+            }
+
+            if (string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
             }
 
             return _confirmSeedApply;
@@ -3649,6 +3796,41 @@ namespace ConfigSheetForge.Unity.Editor
                     args.Add("--confirm-excel-to-so");
                 }
             }
+            else if (string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!dryRun)
+                {
+                    if (_confirmTargetCreateOnlineSheets)
+                    {
+                        args.Add("--confirm-create-online-sheets");
+                    }
+
+                    if (_confirmTargetRegistryUpsert)
+                    {
+                        args.Add("--confirm-registry-upsert");
+                    }
+
+                    if (_confirmTargetSchemaReviews)
+                    {
+                        args.Add("--confirm-schema-reviews");
+                    }
+
+                    if (_confirmTargetWriteLocalCache)
+                    {
+                        args.Add("--confirm-write-local-cache");
+                    }
+
+                    if (_confirmTargetWriteProjectConfig)
+                    {
+                        args.Add("--confirm-write-project-config");
+                    }
+
+                    if (_confirmTargetExcelToSo)
+                    {
+                        args.Add("--confirm-excel-to-so");
+                    }
+                }
+            }
             else if (string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
             {
                 if (!dryRun && _writeBackToMain && _confirmWriteMain)
@@ -4041,7 +4223,17 @@ namespace ConfigSheetForge.Unity.Editor
             AppendJsonProperty(builder, "confirmWriteMain", _writeBackToMain && _confirmWriteMain, comma: true);
             AppendJsonProperty(builder, "confirmApply", ConfirmApplyForOperation(operation), comma: true);
             AppendJsonProperty(builder, "confirmExcelToSoSettingsUpdate", _confirmSeedExcelToSo, comma: true);
+            AppendJsonProperty(builder, "targetGitBranch", FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main"), comma: true);
+            AppendJsonProperty(builder, "targetProfile", FirstNonEmpty(_targetFeishuProfile, _targetBranch, "main"), comma: true);
+            AppendJsonProperty(builder, "sourceMode", string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ? "local-xlsx" : "", comma: true);
+            AppendJsonProperty(builder, "confirmCreateOnlineSheets", _confirmTargetCreateOnlineSheets, comma: true);
+            AppendJsonProperty(builder, "confirmRegistryUpsert", _confirmTargetRegistryUpsert, comma: true);
+            AppendJsonProperty(builder, "confirmSchemaReviews", _confirmTargetSchemaReviews, comma: true);
+            AppendJsonProperty(builder, "confirmWriteLocalCache", _confirmTargetWriteLocalCache, comma: true);
+            AppendJsonProperty(builder, "confirmWriteProjectConfig", _confirmTargetWriteProjectConfig, comma: true);
+            AppendJsonProperty(builder, "confirmExcelToSoSettings", _confirmTargetExcelToSo, comma: true);
             AppendJsonProperty(builder, "gateReportPath", finalGateReportPath, comma: true);
+            AppendJsonArrayProperty(builder, "tableIds", BuildTargetBootstrapTableIdsCsv(), comma: true);
             builder.AppendLine("  \"fields\": [");
             var fields = GetNewTableFieldsForContract();
             for (var i = 0; i < fields.Count; i++)
@@ -4103,6 +4295,29 @@ namespace ConfigSheetForge.Unity.Editor
         private static void AppendJsonProperty(StringBuilder builder, string key, bool value, bool comma)
         {
             builder.Append("  \"").Append(EscapeJson(key)).Append("\": ").Append(value ? "true" : "false");
+            if (comma)
+            {
+                builder.Append(',');
+            }
+
+            builder.AppendLine();
+        }
+
+        private static void AppendJsonArrayProperty(StringBuilder builder, string key, string csv, bool comma)
+        {
+            builder.Append("  \"").Append(EscapeJson(key)).Append("\": [");
+            var values = (csv ?? "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            for (var i = 0; i < values.Length; i++)
+            {
+                if (i > 0)
+                {
+                    builder.Append(", ");
+                }
+
+                builder.Append("\"").Append(EscapeJson(values[i].Trim())).Append("\"");
+            }
+
+            builder.Append("]");
             if (comma)
             {
                 builder.Append(',');

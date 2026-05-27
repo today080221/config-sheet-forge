@@ -12,7 +12,7 @@
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。
 - `配表`：同步已有在线表，或申请新建配表。项目配置存在时会走项目 adapter 生成 lifecycle contract；否则提供 generic registry fallback。
-- `合并`：按当前分支和目标分支生成合并预览；项目 adapter 模式下会自动推导 PR、共同祖先和语义输入。目标分支支持搜索，识别到 GitHub PR 时默认使用 PR base。有效预览会列出 source/target 工作区、tableCount、报告路径和缺失项；缺目标分支或表定位时会失败而不是空成功。
+- `合并`：按当前分支和目标分支生成合并预览；项目 adapter 模式下会自动推导 PR、共同祖先和语义输入。目标分支支持搜索，识别到 GitHub PR 时默认使用 PR base。有效预览会列出 source/target 工作区、tableCount、报告路径和缺失项；缺目标分支或表定位时会失败而不是空成功。程序视图会在目标分支未初始化时提供 `初始化目标分支 main（先 dry-run）`，高级入口里再分项确认 apply。
 - `PR 检查`：合 PR 前生成检查报告；失败时优先显示中文原因和下一步。
 - `输出`：查看摘要、报告和折叠的详细日志；非输出页底部默认只显示一行最近结果，展开后才是可拖拽底部抽屉。
 
@@ -33,6 +33,7 @@
 | 刷新状态 / 预览同步计划 / 预览新建配表 / 生成合并预览 / 运行 PR 检查 | 安全 | 只读取或生成报告，不写飞书、不改本地 cache |
 | 写入本地 cache | 中风险 | 会更新本地 cache，需要勾选确认 |
 | 创建在线表并登记 / 本地 Excel Seed apply / 确认写回 main | 高风险 | 会写飞书、项目状态或目标工作区，需要预览成功 + 勾选 + 二次确认 |
+| 初始化目标分支 | 高风险 | 先 dry-run；apply 拆分确认在线 Sheet、Base 注册、SchemaReviews、本地 cache、ProjectSettings、ExcelToSO |
 
 Editor assembly 引用 `ConfigSheetForge.Core`，也就是 CLI 编译的同一份语义工作簿 core。Provider 访问不放在 Unity 里，统一交给已安装的 `config-sheet-forge` CLI。
 
@@ -148,6 +149,16 @@ inputs JSON 至少包含这些字段：
 - `confirmWriteMain`
 - `confirmApply`
 - `confirmExcelToSoSettingsUpdate`
+- `targetGitBranch`
+- `targetProfile`
+- `sourceMode`
+- `tableIds`
+- `confirmCreateOnlineSheets`
+- `confirmRegistryUpsert`
+- `confirmSchemaReviews`
+- `confirmWriteLocalCache`
+- `confirmWriteProjectConfig`
+- `confirmExcelToSoSettings`
 - `gateReportPath`
 
 接入时注意：Unity UPM 重新 resolve `packages-lock.json` 时，可能顺带刷新其它 git dependency 的 hash。这通常不是 Config Sheet Forge 包本身的改动；请在 PR 里单独核对 manifest/lock diff。
@@ -155,7 +166,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.15
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.17
 ```
 
 ## 测试

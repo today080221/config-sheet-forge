@@ -242,6 +242,18 @@ foreach ($requiredV416UiMarker in @("ReadonlyRefreshThrottleSeconds", "MaxOutput
   }
 }
 
+foreach ($requiredV417CoreMarker in @("TargetBranchBootstrapContract", "bootstrap-target-branch-from-local-xlsx", "ConfirmCreateOnlineSheets", "target_branch.bootstrap.plan")) {
+  if (($coreContracts + "`n" + (Get-Content -Raw packages/unity/Runtime/Core/SeedLifecycle.cs)) -notlike "*$requiredV417CoreMarker*") {
+    throw "Unity v0.4.17 target-branch bootstrap core marker is missing: $requiredV417CoreMarker"
+  }
+}
+
+foreach ($requiredV417UiMarker in @("DrawTargetBranchBootstrapCard", "初始化目标分支", "confirmRegistryUpsert", "confirmWriteProjectConfig", "confirmExcelToSoSettings")) {
+  if ($window -notlike "*$requiredV417UiMarker*") {
+    throw "Unity v0.4.17 target-branch bootstrap UI marker is missing: $requiredV417UiMarker"
+  }
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

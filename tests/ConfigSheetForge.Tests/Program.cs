@@ -48,6 +48,9 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
     ("apply-contract sync-cache apply requires confirmation", ApplyContractSyncCacheApplyRequiresConfirmation),
     ("seed dry-run plans xlsx migration without writes", SeedDryRunPlansXlsxMigrationWithoutWrites),
+    ("target branch bootstrap dry-run overrides seed target", TargetBranchBootstrapDryRunOverridesSeedTarget),
+    ("target branch bootstrap apply skips project config without confirmation", TargetBranchBootstrapSkipsProjectConfigWithoutConfirmation),
+    ("target branch bootstrap apply skips excel to so without confirmation", TargetBranchBootstrapSkipsExcelToSoWithoutConfirmation),
     ("seed manifest does not treat cache excelPath as source", SeedManifestDoesNotTreatCacheExcelPathAsSource),
     ("seed dry-run blocks merged xlsx cells", SeedDryRunBlocksMergedCells),
     ("sheet write ranges support columns past z", () => RunSync(SheetWriteRangeSupportsColumnsPastZ)),
@@ -1385,6 +1388,61 @@ static async Task SeedDryRunPlansXlsxMigrationWithoutWrites()
     }
 }
 
+static async Task TargetBranchBootstrapDryRunOverridesSeedTarget()
+{
+    var request = SampleTargetBootstrapRequest(dryRun: true);
+    request.SeedFromLocalXlsx.Tables[0].Branch = "codex/config-sheet-seed-feishu-main";
+    request.SeedFromLocalXlsx.Tables[0].Profile = "codex/config-sheet-seed-feishu-main";
+    request.SeedFromLocalXlsx.Tables[0].SpreadsheetToken = "sht_source_should_not_leak";
+    request.TargetBranchBootstrap.TableIds.Add("ItemsData");
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, new SeedRecordingPlatform(), CancellationToken.None);
+
+    AssertTrue(result.Success, "Target bootstrap dry-run should produce a plan.");
+    AssertEqual("main", result.Branch, "Bootstrap should switch lifecycle branch to target main.");
+    AssertEqual("main", result.BranchWorkspace.NodeTitle, "Bootstrap should use the target node title.");
+    var table = request.SeedFromLocalXlsx.Tables[0];
+    AssertEqual("main", table.Profile, "Seed table profile should be overridden to target profile.");
+    AssertEqual("", table.SpreadsheetToken, "Source branch spreadsheet locator must not leak into target bootstrap.");
+    AssertTrue(result.Actions.Any(a => a.Action == "target_branch.bootstrap.plan"), "Result should expose a target bootstrap plan action.");
+    AssertTrue(result.Actions.Any(a => a.Details.TryGetValue("tableCount", out var count) && count == "1"), "Plan should include table count.");
+}
+
+static async Task TargetBranchBootstrapSkipsProjectConfigWithoutConfirmation()
+{
+    var request = SampleTargetBootstrapRequest(dryRun: false);
+    request.TargetBranchBootstrap.ConfirmCreateOnlineSheets = true;
+    request.TargetBranchBootstrap.ConfirmRegistryUpsert = true;
+    request.TargetBranchBootstrap.ConfirmSchemaReviews = true;
+    request.TargetBranchBootstrap.ConfirmWriteLocalCache = true;
+    request.TargetBranchBootstrap.ConfirmWriteProjectConfig = false;
+    var platform = new SeedRecordingPlatform();
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
+
+    AssertTrue(result.Success, "Target bootstrap apply should succeed when optional ProjectSettings write is not confirmed.");
+    AssertTrue(!platform.Calls.Contains("project-config"), "ProjectSettings update must not run when confirmWriteProjectConfig=false.");
+    AssertTrue(result.Actions.Any(a => a.Action == "seed.project_config.update" && a.Status == "skipped"), "Result should make skipped ProjectSettings write visible.");
+}
+
+static async Task TargetBranchBootstrapSkipsExcelToSoWithoutConfirmation()
+{
+    var request = SampleTargetBootstrapRequest(dryRun: false);
+    request.SeedFromLocalXlsx.Tables[0].UnityExcelToSo.SettingsPath = "ProjectSettings/ExcelToSO.json";
+    request.TargetBranchBootstrap.ConfirmCreateOnlineSheets = true;
+    request.TargetBranchBootstrap.ConfirmRegistryUpsert = true;
+    request.TargetBranchBootstrap.ConfirmSchemaReviews = true;
+    request.TargetBranchBootstrap.ConfirmWriteLocalCache = true;
+    request.TargetBranchBootstrap.ConfirmExcelToSoSettings = false;
+    var platform = new SeedRecordingPlatform();
+
+    var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
+
+    AssertTrue(result.Success, "Target bootstrap apply should not require ExcelToSO when that write is not confirmed.");
+    AssertTrue(!platform.Calls.Contains("excel-to-so"), "ExcelToSO updater must not run when confirmExcelToSoSettings=false.");
+    AssertTrue(result.Actions.Any(a => a.Action == "seed.unity.excel_to_so.upsert" && a.Status == "skipped"), "Result should make skipped ExcelToSO write visible.");
+}
+
 static async Task SeedManifestDoesNotTreatCacheExcelPathAsSource()
 {
     var root = Path.Combine(Path.GetTempPath(), "csforge-seed-manifest-source-" + Guid.NewGuid().ToString("N"));
@@ -1765,6 +1823,68 @@ static WorkbookDocument SampleWorkbook()
     return workbook;
 }
 
+static LifecycleContractRequest SampleTargetBootstrapRequest(bool dryRun)
+{
+    return new LifecycleContractRequest
+    {
+        Operation = "bootstrap-target-branch-from-local-xlsx",
+        DryRun = dryRun,
+        Locale = "zh-Hans",
+        Registry = new RegistryContract { BaseToken = "base_mock" },
+        Git = new ContractGitSpec
+        {
+            Branch = "codex/config-sheet-seed-feishu-main",
+            Profile = "codex/config-sheet-seed-feishu-main",
+            FeishuBranch = "codex/config-sheet-seed-feishu-main",
+            Head = "abc"
+        },
+        BranchWorkspace = new BranchWorkspaceContract
+        {
+            RootWikiToken = "wik_root",
+            RootWikiTitle = "项目配置表",
+            GitBranch = "codex/config-sheet-seed-feishu-main",
+            Profile = "codex/config-sheet-seed-feishu-main",
+            FeishuBranch = "codex/config-sheet-seed-feishu-main",
+            MainGitBranch = "main",
+            MainFeishuBranch = "main",
+            MainNodeTitle = "main",
+            BranchNodeTitleTemplate = "branch-{slug}"
+        },
+        TargetBranchBootstrap = new TargetBranchBootstrapContract
+        {
+            TargetGitBranch = "main",
+            TargetFeishuProfile = "main",
+            TargetBranchWikiNodeTitle = "main",
+            SourceMode = "local-xlsx"
+        },
+        SeedFromLocalXlsx = new SeedFromLocalXlsxContract
+        {
+            WikiRootToken = "wik_root",
+            WikiParentTitle = "项目配置表",
+            CacheDirectory = ".config-sheet-forge/cache",
+            ExcelCacheDirectory = ".config-sheet-forge/excel-cache",
+            Tables =
+            {
+                new SeedTableContract
+                {
+                    TableId = "ItemsData",
+                    DisplayName = "道具",
+                    SourceXlsxPath = "Assets/Config/ItemsData.xlsx",
+                    CacheXlsxPath = ".config-sheet-forge/excel-cache/ItemsData.xlsx",
+                    SemanticCachePath = ".config-sheet-forge/cache/ItemsData.semantic.json",
+                    HashCachePath = ".config-sheet-forge/cache/ItemsData.sha256",
+                    ProjectConfigPath = "ProjectSettings/Example.ConfigSheetForge.json",
+                    SheetName = "道具",
+                    FieldRow = 0,
+                    TypeRow = 1,
+                    DescriptionRow = 2,
+                    DataStartRow = 3
+                }
+            }
+        }
+    };
+}
+
 static void CreateMinimalXlsx(string path, bool withMergedCells)
 {
     using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
@@ -1900,5 +2020,168 @@ sealed class RecordingLifecyclePlatform : ILifecyclePlatform
     {
         Calls.Add("apply-migration");
         return Task.FromResult(new LifecycleActionResult { Action = "registry.migration.apply", Status = "done", Message = "mock migration" });
+    }
+}
+
+sealed class SeedRecordingPlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform, IBranchWorkspacePlatform
+{
+    public List<string> Calls { get; } = new();
+
+    public Task<RegistrySnapshot> GetRegistrySnapshotAsync(RegistryContract registry, CancellationToken cancellationToken)
+    {
+        Calls.Add("snapshot");
+        return Task.FromResult(new RegistrySnapshot());
+    }
+
+    public Task<LifecycleActionResult> EnsureRegistryAsync(RegistryContract registry, RegistryDisplayMapping mapping, CancellationToken cancellationToken)
+    {
+        Calls.Add("ensure-registry");
+        return Task.FromResult(new LifecycleActionResult { Action = "registry.ensure", Status = "done", Message = "mock registry" });
+    }
+
+    public Task<SheetCreationResult> CreateOnlineSheetAsync(ContractTableSpec table, CancellationToken cancellationToken)
+    {
+        Calls.Add("create-sheet");
+        return Task.FromResult(new SheetCreationResult { SpreadsheetToken = "sht_mock", SpreadsheetUrl = "https://example.feishu.cn/sheets/sht_mock", SheetId = "sheet_mock", WikiNodeToken = "wik_sheet" });
+    }
+
+    public Task<LifecycleActionResult> WriteSheetTemplateAsync(SheetCreationResult sheet, IList<IList<string>> templateRows, CancellationToken cancellationToken)
+    {
+        Calls.Add("write-template");
+        return Task.FromResult(new LifecycleActionResult { Action = "sheet.template.write", Status = "done", Message = "mock template" });
+    }
+
+    public Task<LifecycleActionResult> UpsertRegistryRecordAsync(RegistryContract registry, ContractTableSpec table, SheetCreationResult sheet, CancellationToken cancellationToken)
+    {
+        Calls.Add("upsert-registry");
+        var action = new LifecycleActionResult { Action = "registry.config_sheets.upsert", Status = "done", Message = "mock registry upsert" };
+        action.Details["recordId"] = "rec_config";
+        return Task.FromResult(action);
+    }
+
+    public Task<LifecycleActionResult> UpsertSchemaReviewAsync(RegistryContract registry, ContractTableSpec table, ContractGitSpec git, string reason, CancellationToken cancellationToken)
+    {
+        Calls.Add("upsert-schema");
+        var action = new LifecycleActionResult { Action = "registry.schema_reviews.upsert", Status = "done", Message = "mock schema review" };
+        action.Details["schemaReviewId"] = "schema_pending";
+        return Task.FromResult(action);
+    }
+
+    public Task<LifecycleActionResult> ApplyRegistryMigrationAsync(RegistryContract registry, RegistryMigrationPlan plan, CancellationToken cancellationToken)
+    {
+        Calls.Add("apply-migration");
+        return Task.FromResult(new LifecycleActionResult { Action = "registry.migration.apply", Status = "done", Message = "mock migration" });
+    }
+
+    public Task<BranchWorkspaceResolution> EnsureBranchWorkspaceAsync(BranchWorkspaceContract workspace, BranchWorkspaceResolution planned, CancellationToken cancellationToken)
+    {
+        Calls.Add("branch-workspace");
+        planned.WikiNodeToken = string.IsNullOrWhiteSpace(planned.WikiNodeToken) ? "wik_main" : planned.WikiNodeToken;
+        planned.WikiNodeUrl = string.IsNullOrWhiteSpace(planned.WikiNodeUrl) ? "https://example.feishu.cn/wiki/wik_main" : planned.WikiNodeUrl;
+        planned.Status = "reused";
+        return Task.FromResult(planned);
+    }
+
+    public Task<LifecycleActionResult> UpsertBranchBindingAsync(RegistryContract registry, BranchWorkspaceResolution resolution, CancellationToken cancellationToken)
+    {
+        Calls.Add("branch-binding");
+        var action = new LifecycleActionResult { Action = "registry.branch_bindings.upsert", Status = "done", Message = "mock branch binding" };
+        action.Details["recordId"] = "rec_branch";
+        action.Details["gitBranch"] = resolution.GitBranch;
+        action.Details["profile"] = resolution.Profile;
+        return Task.FromResult(action);
+    }
+
+    public Task<SeedLocalWorkbookResult> ReadLocalXlsxAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, CancellationToken cancellationToken)
+    {
+        Calls.Add("read-local");
+        var workbook = MinimalWorkbook(table);
+        return Task.FromResult(new SeedLocalWorkbookResult
+        {
+            Workbook = workbook,
+            SourceXlsxPath = table.SourceXlsxPath,
+            SemanticHash = SemanticHasher.ComputeHash(workbook)
+        });
+    }
+
+    public Task<SeedOnlineSheetResult> EnsureOnlineSheetAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, WorkbookDocument localWorkbook, string semanticHash, CancellationToken cancellationToken)
+    {
+        Calls.Add("ensure-online");
+        return Task.FromResult(new SeedOnlineSheetResult
+        {
+            SpreadsheetToken = "sht_" + table.TableId,
+            SpreadsheetUrl = "https://example.feishu.cn/sheets/sht_" + table.TableId,
+            SheetId = "sheet_" + table.TableId,
+            WikiNodeToken = "wik_" + table.TableId,
+            Created = true,
+            UsedRowCount = 2,
+            UsedColumnCount = 2,
+            ImportMode = "mock"
+        });
+    }
+
+    public Task<SeedOnlineRoundTripResult> ReadAndExportOnlineSheetAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, SeedOnlineSheetResult sheet, CancellationToken cancellationToken)
+    {
+        Calls.Add("roundtrip");
+        var workbook = MinimalWorkbook(table);
+        return Task.FromResult(new SeedOnlineRoundTripResult
+        {
+            OnlineWorkbook = workbook,
+            ExportedXlsxWorkbook = workbook,
+            ExportedXlsxPath = "Temp/" + table.TableId + ".xlsx"
+        });
+    }
+
+    public Task<LifecycleActionResult> WriteSeedCacheAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, WorkbookDocument localWorkbook, string semanticHash, string exportedXlsxPath, CancellationToken cancellationToken)
+    {
+        Calls.Add("cache");
+        var action = new LifecycleActionResult { Action = "seed.cache.write", Status = "done", Message = "mock cache" };
+        action.Details["xlsxPath"] = table.CacheXlsxPath;
+        action.Details["semanticPath"] = table.SemanticCachePath;
+        action.Details["shaPath"] = table.HashCachePath;
+        action.Details["semanticHash"] = semanticHash;
+        return Task.FromResult(action);
+    }
+
+    public Task<LifecycleActionResult> UpdateProjectConfigAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, SeedOnlineSheetResult sheet, CancellationToken cancellationToken)
+    {
+        Calls.Add("project-config");
+        return Task.FromResult(new LifecycleActionResult { Action = "seed.project_config.update", Status = "done", Message = "mock project config" });
+    }
+
+    public Task<LifecycleActionResult> UpsertSeedRegistryRecordAsync(RegistryContract registry, SeedFromLocalXlsxContract seed, SeedTableContract table, SeedOnlineSheetResult sheet, CancellationToken cancellationToken)
+    {
+        Calls.Add("seed-registry");
+        var action = new LifecycleActionResult { Action = "seed.registry.config_sheets.upsert", Status = "done", Message = "mock seed registry" };
+        action.Details["recordId"] = "rec_" + table.TableId;
+        return Task.FromResult(action);
+    }
+
+    public Task<LifecycleActionResult> UpsertSeedSchemaReviewAsync(RegistryContract registry, SeedFromLocalXlsxContract seed, SeedTableContract table, ContractGitSpec git, bool schemaChangeDetected, string reason, CancellationToken cancellationToken)
+    {
+        Calls.Add("seed-schema");
+        var action = new LifecycleActionResult { Action = "seed.registry.schema_reviews.upsert", Status = "done", Message = "mock seed schema" };
+        action.Details["schemaReviewId"] = "schema_" + table.TableId;
+        return Task.FromResult(action);
+    }
+
+    public Task<LifecycleActionResult> UpdateExcelToSoSettingsAsync(SeedFromLocalXlsxContract seed, SeedTableContract table, CancellationToken cancellationToken)
+    {
+        Calls.Add("excel-to-so");
+        return Task.FromResult(new LifecycleActionResult { Action = "seed.unity.excel_to_so.upsert", Status = "done", Message = "mock excel to so" });
+    }
+
+    private static WorkbookDocument MinimalWorkbook(SeedTableContract table)
+    {
+        var workbook = new WorkbookDocument { ProviderId = "mock", SourceId = table.SourceXlsxPath, SourceTitle = table.DisplayName };
+        var sheet = new SheetDocument { Id = "sheet1", Name = string.IsNullOrWhiteSpace(table.SheetName) ? table.TableId : table.SheetName };
+        sheet.Columns.Add(new ColumnDefinition { Key = "id", DisplayName = "ID", ValueKind = "string", Required = true });
+        sheet.Columns.Add(new ColumnDefinition { Key = "name", DisplayName = "名称", ValueKind = "string" });
+        var row = new RowDocument { StableId = "item_001", SourceIndex = 1 };
+        row.Cells["id"] = new CellValue { RawText = "item_001", NormalizedText = "item_001", ValueKind = "string" };
+        row.Cells["name"] = new CellValue { RawText = "测试", NormalizedText = "测试", ValueKind = "string" };
+        sheet.Rows.Add(row);
+        workbook.Sheets.Add(sheet);
+        return workbook;
     }
 }

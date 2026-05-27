@@ -50,6 +50,7 @@ public static class Program
                 "sync" => await SyncAsync(parsed),
                 "sync-cache" => await SyncCacheLifecycleAsync(parsed),
                 "seed-from-xlsx" => await SeedFromXlsxAsync(parsed),
+                "bootstrap-target-branch-from-local-xlsx" => await SeedFromXlsxAsync(parsed, "bootstrap-target-branch-from-local-xlsx"),
                 "merge" => await MergeAsync(parsed),
                 "gate" => await GateAsync(parsed),
                 "apply-contract" => await ApplyContractAsync(parsed),
@@ -503,7 +504,7 @@ public static class Program
         return report.HasErrors || !triangulation.Passed ? 1 : 0;
     }
 
-    private static async Task<int> SeedFromXlsxAsync(ParsedArgs args)
+    private static async Task<int> SeedFromXlsxAsync(ParsedArgs args, string operation = "seed-from-local-xlsx")
     {
         if (args.HasFlag("allow-user-fallback"))
         {
@@ -512,11 +513,10 @@ public static class Program
 
         var workspace = await LoadWorkspaceAsync(requireConfig: false);
         var request = await BuildSeedRequestAsync(workspace, args);
-        request.Operation = "seed-from-local-xlsx";
+        request.Operation = operation;
         request.DryRun = args.HasFlag("dry-run") || request.DryRun;
-        request.SeedFromLocalXlsx.ConfirmApply = request.SeedFromLocalXlsx.ConfirmApply || args.HasFlag("yes") || args.HasFlag("confirm");
-        request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate = request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate || args.HasFlag("confirm-excel-to-so");
-        request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate = request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate || args.HasFlag("confirm-project-config");
+        ApplySeedConfirmationFlags(request, args);
+        ApplyTargetBranchBootstrapArgs(request, args);
 
         var result = await LifecycleExecutor.ExecuteAsync(request, new CliLifecyclePlatform(args, request), CancellationToken.None);
         await EmitLifecycleResultAsync(args, result);
@@ -614,6 +614,65 @@ public static class Program
         }
 
         return tables;
+    }
+
+    private static void ApplySeedConfirmationFlags(LifecycleContractRequest request, ParsedArgs args)
+    {
+        request.SeedFromLocalXlsx ??= new SeedFromLocalXlsxContract();
+        request.TargetBranchBootstrap ??= new TargetBranchBootstrapContract();
+
+        if (!TargetBranchBootstrapOperationRequested(request.Operation))
+        {
+            request.SeedFromLocalXlsx.ConfirmApply = request.SeedFromLocalXlsx.ConfirmApply || args.HasFlag("yes") || args.HasFlag("confirm");
+        }
+
+        request.SeedFromLocalXlsx.ConfirmCreateOnlineSheets = request.SeedFromLocalXlsx.ConfirmCreateOnlineSheets || args.HasFlag("confirm-create-online-sheets");
+        request.SeedFromLocalXlsx.ConfirmRegistryUpsert = request.SeedFromLocalXlsx.ConfirmRegistryUpsert || args.HasFlag("confirm-registry-upsert");
+        request.SeedFromLocalXlsx.ConfirmSchemaReviews = request.SeedFromLocalXlsx.ConfirmSchemaReviews || args.HasFlag("confirm-schema-reviews");
+        request.SeedFromLocalXlsx.ConfirmWriteLocalCache = request.SeedFromLocalXlsx.ConfirmWriteLocalCache || args.HasFlag("confirm-write-local-cache");
+        request.SeedFromLocalXlsx.ConfirmWriteProjectConfig = request.SeedFromLocalXlsx.ConfirmWriteProjectConfig || args.HasFlag("confirm-write-project-config") || args.HasFlag("confirm-project-config");
+        request.SeedFromLocalXlsx.ConfirmExcelToSoSettings = request.SeedFromLocalXlsx.ConfirmExcelToSoSettings || args.HasFlag("confirm-excel-to-so");
+        request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate = request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate || args.HasFlag("confirm-excel-to-so");
+        request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate = request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate || args.HasFlag("confirm-project-config") || args.HasFlag("confirm-write-project-config");
+
+        if (TargetBranchBootstrapOperationRequested(request.Operation))
+        {
+            request.TargetBranchBootstrap.ConfirmCreateOnlineSheets = request.TargetBranchBootstrap.ConfirmCreateOnlineSheets || args.HasFlag("confirm-create-online-sheets");
+            request.TargetBranchBootstrap.ConfirmRegistryUpsert = request.TargetBranchBootstrap.ConfirmRegistryUpsert || args.HasFlag("confirm-registry-upsert");
+            request.TargetBranchBootstrap.ConfirmSchemaReviews = request.TargetBranchBootstrap.ConfirmSchemaReviews || args.HasFlag("confirm-schema-reviews");
+            request.TargetBranchBootstrap.ConfirmWriteLocalCache = request.TargetBranchBootstrap.ConfirmWriteLocalCache || args.HasFlag("confirm-write-local-cache");
+            request.TargetBranchBootstrap.ConfirmWriteProjectConfig = request.TargetBranchBootstrap.ConfirmWriteProjectConfig || args.HasFlag("confirm-write-project-config") || args.HasFlag("confirm-project-config");
+            request.TargetBranchBootstrap.ConfirmExcelToSoSettings = request.TargetBranchBootstrap.ConfirmExcelToSoSettings || args.HasFlag("confirm-excel-to-so");
+        }
+    }
+
+    private static void ApplyTargetBranchBootstrapArgs(LifecycleContractRequest request, ParsedArgs args)
+    {
+        if (!TargetBranchBootstrapOperationRequested(request.Operation))
+        {
+            return;
+        }
+
+        request.TargetBranchBootstrap ??= new TargetBranchBootstrapContract();
+        request.MergeInputs ??= new MergeInputsContract();
+        request.TargetBranchBootstrap.TargetGitBranch = FirstNonEmpty(args.Get("target-git-branch", ""), args.Get("target-branch", ""), request.TargetBranchBootstrap.TargetGitBranch, request.MergeInputs.TargetBranch);
+        request.TargetBranchBootstrap.TargetFeishuProfile = FirstNonEmpty(args.Get("target-profile", ""), args.Get("target-feishu-profile", ""), request.TargetBranchBootstrap.TargetFeishuProfile, request.MergeInputs.TargetFeishuProfile);
+        request.TargetBranchBootstrap.TargetBranchWikiNodeTitle = FirstNonEmpty(args.Get("target-branch-wiki-node-title", ""), args.Get("target-node-title", ""), request.TargetBranchBootstrap.TargetBranchWikiNodeTitle, request.MergeInputs.TargetBranchWikiNodeTitle);
+        request.TargetBranchBootstrap.SourceMode = FirstNonEmpty(args.Get("source-mode", ""), request.TargetBranchBootstrap.SourceMode, "local-xlsx");
+
+        var tableIds = args.Get("table-ids", "");
+        if (!string.IsNullOrWhiteSpace(tableIds))
+        {
+            request.TargetBranchBootstrap.TableIds.Clear();
+            foreach (var value in tableIds.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var tableId = value.Trim();
+                if (!string.IsNullOrWhiteSpace(tableId))
+                {
+                    request.TargetBranchBootstrap.TableIds.Add(tableId);
+                }
+            }
+        }
     }
 
     private static async Task HydrateSyncCacheRequestFromRegistryAsync(LifecycleContractRequest request, ParsedArgs args, string selectedTable)
@@ -1229,9 +1288,8 @@ public static class Program
                 throw new CliException("seed-from-local-xlsx 默认且固定使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
             }
 
-            request.SeedFromLocalXlsx.ConfirmApply = request.SeedFromLocalXlsx.ConfirmApply || args.HasFlag("yes") || args.HasFlag("confirm");
-            request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate = request.SeedFromLocalXlsx.ConfirmExcelToSoSettingsUpdate || args.HasFlag("confirm-excel-to-so");
-            request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate = request.SeedFromLocalXlsx.ConfirmProjectConfigUpdate || args.HasFlag("confirm-project-config");
+            ApplySeedConfirmationFlags(request, args);
+            ApplyTargetBranchBootstrapArgs(request, args);
         }
 
         if (SyncCacheOperationRequested(request.Operation))
@@ -2204,7 +2262,13 @@ public static class Program
     private static bool SeedOperationRequested(string operation)
     {
         return string.Equals(operation, "seed-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase);
+               string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
+               TargetBranchBootstrapOperationRequested(operation);
+    }
+
+    private static bool TargetBranchBootstrapOperationRequested(string operation)
+    {
+        return string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool SyncCacheOperationRequested(string operation)
@@ -2599,6 +2663,8 @@ public static class Program
         Console.WriteLine("  config-sheet-forge sync-cache [--table <id>] [--manifest <project-config-or-contract>] [--dry-run] [--yes]");
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --table <id> --source-xlsx <path> --dry-run");
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --all --manifest <project-config-or-contract> --dry-run");
+        Console.WriteLine("  config-sheet-forge bootstrap-target-branch-from-local-xlsx --all --manifest <project-config-or-contract> --target-branch main --dry-run");
+        Console.WriteLine("    apply flags: --confirm-create-online-sheets --confirm-registry-upsert --confirm-schema-reviews [--confirm-write-local-cache] [--confirm-write-project-config] [--confirm-excel-to-so]");
         Console.WriteLine("  config-sheet-forge merge --base <file> --ours <file> --theirs <file> [--out <report.md>]");
         Console.WriteLine("  config-sheet-forge gate [--cache <dir>] [--details] [--annotations github]");
         Console.WriteLine("  config-sheet-forge apply-contract --request <contract.json> [--out <result.json>] [--dry-run]");

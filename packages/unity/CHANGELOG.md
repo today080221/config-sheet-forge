@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.17
+
+- 新增 `bootstrap-target-branch-from-local-xlsx` lifecycle operation，用于把目标分支（例如 PR base `main`）从本地 xlsx 正式初始化为在线 Source of Truth 工作区，不再需要项目侧手动 patch seed contract。
+- 目标分支初始化会覆盖 target git branch/profile/wiki node title，默认使用 `local-xlsx` 源，并按项目配置表范围生成每张表的初始化计划。
+- apply 确认拆为 `confirmCreateOnlineSheets`、`confirmRegistryUpsert`、`confirmSchemaReviews`、`confirmWriteLocalCache`、`confirmWriteProjectConfig`、`confirmExcelToSoSettings`；目标初始化不接受一个 `--yes` 覆盖所有写入。
+- 未确认的本地 cache、ProjectSettings、ExcelToSO settings 写入会被显式跳过并写进 result actions，避免初始化 main 时误改旧 Excel 路径或项目配置。
+- Unity 合并页在程序视图检测到目标分支缺工作区/表定位时，会显示“初始化目标分支 main（先 dry-run）”；执行 apply 入口只在“高级”开启后显示，并保留二次确认。
+- CLI 新增同名命令和 apply-contract flags，strict bot 语义保持不变，不会静默 fallback 到 user。
+- 测试覆盖目标分支 override、ProjectSettings/ExcelToSO 未确认不写，以及 Unity smoke 防回退。
+
 ## 0.4.16
 
 - `compare-merge` dry-run 不再返回空成功：会解析 source/target 分支工作区、表范围、base/ours/theirs 路径、merge report/merged path，并在 actions details 中输出 tableCount、source/target wiki 和缺失表信息。

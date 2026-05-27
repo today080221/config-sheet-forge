@@ -157,6 +157,33 @@ Base 注册中心建议包含这些字段：
 
 `registry-migrate` 会补齐这些 machine key 对应的中文字段显示名，并保留已有数据。
 
+## 目标分支初始化
+
+当 `compare-merge` 提示目标分支（通常是 `main`）缺少工作区或在线表定位时，不要手动改 lifecycle contract。使用 `bootstrap-target-branch-from-local-xlsx` 先生成 dry-run：
+
+```bash
+config-sheet-forge bootstrap-target-branch-from-local-xlsx --all --manifest "ProjectSettings/Example.ConfigSheetForge.json" --target-branch main --dry-run
+```
+
+它会把目标 git branch/profile/wiki node title 显式切到目标分支，并从项目配置的 `sourceXlsxPath` 读取本地 xlsx，计划创建或复用目标分支在线 Sheet。v1 支持 `sourceMode=local-xlsx`。
+
+apply 不能用一个 `--yes` 覆盖所有写入，必须按写入对象分开确认：
+
+```bash
+config-sheet-forge bootstrap-target-branch-from-local-xlsx --all --manifest "ProjectSettings/Example.ConfigSheetForge.json" --target-branch main \
+  --confirm-create-online-sheets \
+  --confirm-registry-upsert \
+  --confirm-schema-reviews
+```
+
+可选确认：
+
+- `--confirm-write-local-cache`：允许写 `.config-sheet-forge/cache` 和 `excel-cache`。
+- `--confirm-write-project-config`：允许回填 `ProjectSettings/*ConfigSheetForge*.json`。
+- `--confirm-excel-to-so`：允许更新 ExcelToSO settings。
+
+不传这些可选确认时，result 会把对应写入标为 `skipped`，不会改本地 cache、ProjectSettings 或 ExcelToSO settings。初始化成功后，目标分支应能被 `compare-merge` 直接定位到 BranchBindings、ConfigSheets、在线 Sheet token 和 SheetId。
+
 ## Unity merge workflow
 
 Unity 窗口的项目 adapter 模式会按当前 git branch 自动推导合并上下文。项目配置可以在根节点、`toolkit` 或 `github` 节点声明：
