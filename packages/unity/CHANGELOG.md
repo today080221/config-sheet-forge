@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.21
+
+- `registry-migrate` 新增窄迁移模式：`--only review-status-options`。这个模式只检查/补齐 `MergeReviews`、`SchemaReviews`、`Waivers` 的 `状态` 字段选项，不执行字段 ensure、rename、ambiguous alias 或 cleanup。
+- Unity PR 检查页复制的注册中心修复命令改为窄命令：`registry-migrate --only review-status-options --dry-run`，避免普通修复误触完整 schema 清理/升级。
+- `SchemaReviews.状态` 如果不是单选字段，会以 `registry.field.status_select_mismatch` 明确提示；apply 不会自动转换字段类型，需要负责人先在 Base 中确认迁移方案。
+- 完整 `registry-migrate` 保留原来的注册中心 schema 清理/升级诊断能力，但不再作为“补审查状态选项”的默认推荐路径。
+- 测试覆盖窄 dry-run 只产生 options/mismatch action、窄 apply 不执行 rename/ensure/cleanup，以及 SchemaReviews 状态字段非单选时不自动转换。
+
 ## 0.4.20
 
 - `registry-migrate --dry-run` 现在会检测 `MergeReviews`、`SchemaReviews`、`Waivers` 的 `状态` 单选字段是否缺少治理流程需要的选项，并预告要补齐的 `approved` / `completed` / `passed` 等值。

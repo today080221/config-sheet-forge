@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.20";
+        private const string PackageVersion = "v0.4.21";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -1573,10 +1573,10 @@ namespace ConfigSheetForge.Unity.Editor
             else if (failure.IsRegistryMigrationNeeded)
             {
                 EditorGUILayout.BeginHorizontal();
-                if (GUILayout.Button(new GUIContent("复制 registry-migrate 命令", "先 dry-run 看迁移计划；确认后再把 --dry-run 改为 --yes 执行。"), GUILayout.Height(26)))
+                if (GUILayout.Button(new GUIContent("复制状态选项窄迁移命令", "只检查/补齐 MergeReviews、SchemaReviews、Waivers 的状态选项；确认后再把 --dry-run 改为 --yes。"), GUILayout.Height(26)))
                 {
                     EditorGUIUtility.systemCopyBuffer = BuildRegistryMigrateDryRunCommand();
-                    SetImmediateOutput("已复制 registry-migrate dry-run 命令。", "先运行 dry-run 审计计划；确认只补状态选项后，再执行 registry-migrate --yes。");
+                    SetImmediateOutput("已复制 review-status-options 窄迁移 dry-run 命令。", "这条命令只检查/补齐 MergeReviews、SchemaReviews、Waivers 的状态选项；确认后把 --dry-run 改成 --yes。");
                 }
                 EditorGUILayout.EndHorizontal();
             }
@@ -3980,6 +3980,8 @@ namespace ConfigSheetForge.Unity.Editor
                 "registry-migrate",
                 "--base",
                 FirstNonEmpty(_projectConfig.RegistryBaseToken, "<registry-base-token>"),
+                "--only",
+                "review-status-options",
                 "--locale",
                 "zh-Hans",
                 "--dry-run",
@@ -5691,7 +5693,7 @@ namespace ConfigSheetForge.Unity.Editor
                 return new GateFailureView
                 {
                     Reason = "注册中心字段需要迁移",
-                    NextStep = "先运行 registry-migrate --dry-run 查看计划；确认只补状态选项后，再执行 registry-migrate --yes。",
+                    NextStep = "先运行 registry-migrate --only review-status-options --dry-run 查看窄计划；确认只补状态选项后，再执行 --yes。",
                     Priority = 8,
                     IsRegistryMigrationNeeded = true
                 };

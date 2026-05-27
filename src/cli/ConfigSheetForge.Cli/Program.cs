@@ -1919,6 +1919,7 @@ public static class Program
         var plan = RegistryMigrator.Plan(snapshot, new RegistryMigrationOptions
         {
             Locale = locale,
+            Only = args.Get("only", ""),
             CleanupDefaultRows = args.HasFlag("cleanup-default-rows"),
             CleanupDefaultFields = args.HasFlag("cleanup-default-fields"),
             CleanupDuplicateBranchBindings = args.HasFlag("cleanup-duplicate-branch-bindings") || args.HasFlag("cleanup-duplicates")
@@ -1937,7 +1938,9 @@ public static class Program
             {
                 Action = "registry.migration.apply",
                 Status = "planned",
-                Message = "预览：不会写入 Base。"
+                Message = string.Equals(args.Get("only", ""), "review-status-options", StringComparison.OrdinalIgnoreCase)
+                    ? "预览：只检查 MergeReviews / SchemaReviews / Waivers 的状态选项，不会写入 Base。"
+                    : "预览：不会写入 Base。"
             });
         }
         else
@@ -2026,6 +2029,10 @@ public static class Program
                         await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-update", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--field-id", GetDetail(action, "fieldId"), "--json", optionsJson, "--yes" });
                         action.Status = "done";
                         action.Message = "已补齐状态单选选项：" + GetDetail(action, "missingOptions") + "。";
+                        break;
+                    case "registry.field.status_select_mismatch":
+                        action.Status = "blocked";
+                        action.Message = FirstNonEmpty(action.Message, "状态字段不是单选字段；registry-migrate 不会自动改字段类型。");
                         break;
                     case "registry.record.delete_empty":
                     case "registry.record.delete_duplicate_branch_binding":
@@ -3293,7 +3300,7 @@ public static class Program
         Console.WriteLine("  config-sheet-forge submit-merge-review --request <contract.json> --preview-result <compare-merge.result.json> --confirm");
         Console.WriteLine("  config-sheet-forge gate [--cache <dir>] [--details] [--annotations github]");
         Console.WriteLine("  config-sheet-forge apply-contract --request <contract.json> [--out <result.json>] [--dry-run]");
-        Console.WriteLine("  config-sheet-forge registry-migrate --base <token> [--locale zh-Hans] [--dry-run] [--cleanup-default-rows] [--cleanup-default-fields] [--cleanup-duplicate-branch-bindings] [--yes]");
+        Console.WriteLine("  config-sheet-forge registry-migrate --base <token> [--only review-status-options] [--locale zh-Hans] [--dry-run] [--cleanup-default-rows] [--cleanup-default-fields] [--cleanup-duplicate-branch-bindings] [--yes]");
     }
 
     private static int UnknownCommand(string command)

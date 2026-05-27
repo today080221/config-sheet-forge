@@ -286,9 +286,15 @@ foreach ($requiredV420CoreMarker in @("registry.field.options.ensure", "StatusOp
   }
 }
 
-foreach ($requiredV420UiMarker in @("已由配置负责人 waiver 临时放行", "复制 registry-migrate 命令", "BuildRegistryMigrateDryRunCommand", "注册中心字段需要迁移", "写入对象")) {
+foreach ($requiredV420UiMarker in @("已由配置负责人 waiver 临时放行", "BuildRegistryMigrateDryRunCommand", "注册中心字段需要迁移", "写入对象")) {
   if ($window -notlike "*$requiredV420UiMarker*") {
     throw "Unity v0.4.20 PR gate UX marker is missing: $requiredV420UiMarker"
+  }
+}
+
+foreach ($requiredV421Marker in @("review-status-options", "OnlyReviewStatusOptions", "复制状态选项窄迁移命令", "registry migration review-status-only narrows actions", "registry migrate review-status-only apply skips schema cleanup")) {
+  if (($coreContracts + "`n" + $cliProgram + "`n" + $window + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV421Marker*") {
+    throw "Unity v0.4.21 review-status-options narrow migration marker is missing: $requiredV421Marker"
   }
 }
 

@@ -372,6 +372,7 @@ namespace ConfigSheetForge.Core
         public bool CleanupDefaultRows { get; set; }
         public bool CleanupDefaultFields { get; set; }
         public bool CleanupDuplicateBranchBindings { get; set; }
+        public string Only { get; set; } = "";
     }
 
     public sealed class RegistrySnapshot
@@ -438,6 +439,16 @@ namespace ConfigSheetForge.Core
             }
 
             var plan = new RegistryMigrationPlan { DisplayNameMapping = RegistryLocalization.Default(options.Locale) };
+            if (OnlyReviewStatusOptions(options))
+            {
+                foreach (var table in snapshot.Tables)
+                {
+                    AddStatusOptionDiagnostics(plan, table);
+                }
+
+                return plan;
+            }
+
             foreach (var tableMapping in plan.DisplayNameMapping.Tables)
             {
                 var existing = snapshot.Tables.FirstOrDefault(t => string.Equals(t.MachineKey, tableMapping.Key, StringComparison.OrdinalIgnoreCase) ||
@@ -524,6 +535,14 @@ namespace ConfigSheetForge.Core
             return plan;
         }
 
+        public static bool OnlyReviewStatusOptions(RegistryMigrationOptions options)
+        {
+            return options != null &&
+                   (string.Equals(options.Only, "review-status-options", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(options.Only, "review-status", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(options.Only, "status-options", StringComparison.OrdinalIgnoreCase));
+        }
+
         public static IReadOnlyList<string> RequiredStatusOptions(string tableMachineKey)
         {
             return RequiredStatusOptionsByTable.TryGetValue(tableMachineKey ?? "", out var options)
@@ -568,11 +587,13 @@ namespace ConfigSheetForge.Core
 
             if (!IsSelectLikeStatusField(statusField))
             {
-                var mismatch = Add(plan, "registry.field.status_select_mismatch", "planned", "检测到 " + tableMachineKey + ".状态 不是单选字段；自动迁移不会改字段类型。请在 Base 中确认“状态”字段为单选后再提交审查。");
+                var mismatch = Add(plan, "registry.field.status_select_mismatch", "blocked", "检测到 " + tableMachineKey + ".状态 不是单选字段；自动迁移不会改字段类型。请负责人在 Base 中确认迁移方案，或显式使用单独的字段类型转换流程。");
                 mismatch.Details["table"] = FirstNonEmpty(table.MachineKey, table.DisplayName, table.TableId);
+                mismatch.Details["tableMachineKey"] = tableMachineKey;
                 mismatch.Details["tableId"] = table.TableId;
                 mismatch.Details["fieldId"] = statusField.FieldId;
                 mismatch.Details["fieldType"] = statusField.Type;
+                mismatch.Details["nextStep"] = tableMachineKey + ".状态 当前不是单选字段，请负责人在 Base 中确认迁移方案。";
                 return;
             }
 

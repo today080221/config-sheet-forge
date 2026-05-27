@@ -24,9 +24,11 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("registry migration cleans default rows and fields", () => RunSync(RegistryMigrationCleansDefaults)),
     ("registry migration detects governance status options", () => RunSync(RegistryMigrationDetectsGovernanceStatusOptions)),
     ("registry migration status option plan is idempotent", () => RunSync(RegistryMigrationStatusOptionPlanIsIdempotent)),
+    ("registry migration review-status-only narrows actions", () => RunSync(RegistryMigrationReviewStatusOnlyNarrowsActions)),
     ("lark base matrix record lookup finds existing record", () => RunSync(LarkBaseMatrixRecordLookupFindsExistingRecord)),
     ("lark 1.0.40 registry fixture hydrates and reports duplicate bindings", Lark140RegistryFixtureHydratesAndReportsDuplicateBindings),
     ("registry migrate keeps table and field list argv compatible", RegistryMigrateKeepsTableAndFieldListArgvCompatible),
+    ("registry migrate review-status-only apply skips schema cleanup", RegistryMigrateReviewStatusOnlyApplySkipsSchemaCleanup),
     ("registry migration reports branch binding cleanup risks", () => RunSync(RegistryMigrationReportsBranchBindingCleanupRisks)),
     ("branch workspace resolver creates stable slugs", () => RunSync(BranchWorkspaceResolverCreatesStableSlugs)),
     ("branch binding one-to-one conflict blocks lifecycle", BranchBindingOneToOneConflictBlocksLifecycle),
@@ -369,6 +371,33 @@ static void RegistryMigrationStatusOptionPlanIsIdempotent()
     AssertTrue(!plan.Actions.Any(a => a.Action == "registry.field.options.ensure"), "registry-migrate should be idempotent when governance status options already exist.");
 }
 
+static void RegistryMigrationReviewStatusOnlyNarrowsActions()
+{
+    var snapshot = new RegistrySnapshot();
+    var merge = BuildGovernanceTable("MergeReviews", "MergeReviews", "tbl_merge", Array.Empty<string>());
+    merge.Fields.Add(new RegistryFieldSnapshot { MachineKey = "GitBranch", FieldId = "fld_branch", DisplayName = "旧Git分支", Type = "text" });
+    merge.Fields.Add(new RegistryFieldSnapshot { MachineKey = "GitBranch", FieldId = "fld_branch_dup", DisplayName = "Git分支", Type = "text" });
+    snapshot.Tables.Add(merge);
+    snapshot.Tables.Add(new RegistryTableSnapshot
+    {
+        MachineKey = "SchemaReviews",
+        DisplayName = "SchemaReviews",
+        TableId = "tbl_schema",
+        Fields =
+        {
+            new RegistryFieldSnapshot { MachineKey = "Status", FieldId = "fld_schema_status", DisplayName = "状态", Type = "text" }
+        }
+    });
+    snapshot.Tables.Add(BuildGovernanceTable("Waivers", "Waivers", "tbl_waiver", new[] { "approved" }));
+
+    var plan = RegistryMigrator.Plan(snapshot, new RegistryMigrationOptions { Locale = "zh-Hans", Only = "review-status-options", CleanupDefaultFields = true, CleanupDefaultRows = true });
+    AssertTrue(plan.Actions.Count > 0, "narrow migration should still report governance status actions.");
+    AssertTrue(plan.Actions.All(a => a.Action == "registry.field.options.ensure" || a.Action == "registry.field.status_select_mismatch"), "narrow migration must not include field ensure/rename/ambiguous cleanup.");
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.field.options.ensure" && a.Details["tableMachineKey"] == "MergeReviews"), "narrow migration should include MergeReviews status options.");
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.field.options.ensure" && a.Details["tableMachineKey"] == "Waivers"), "narrow migration should include Waivers status options.");
+    AssertTrue(plan.Actions.Any(a => a.Action == "registry.field.status_select_mismatch" && a.Details["tableMachineKey"] == "SchemaReviews"), "narrow migration should warn when SchemaReviews status is not select.");
+}
+
 static RegistryTableSnapshot BuildGovernanceTable(string machineKey, string displayName, string tableId, IEnumerable<string> options)
 {
     return new RegistryTableSnapshot
@@ -593,6 +622,93 @@ static async Task RegistryMigrateKeepsTableAndFieldListArgvCompatible()
         AssertTrue(calls.Any(line => line.Contains("base +record-list") && line.Contains("--format json")), "record-list should still request JSON output explicitly.");
         var resultJson = await File.ReadAllTextAsync(output);
         AssertTrue(resultJson.Contains("rec_dup_a") && resultJson.Contains("rec_dup_b"), "dry-run should still list duplicate BranchBindings record ids.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(oldDir);
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static async Task RegistryMigrateReviewStatusOnlyApplySkipsSchemaCleanup()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-registry-status-only-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    var oldDir = Directory.GetCurrentDirectory();
+    var script = Path.Combine(temp, "lark-cli.cmd");
+    var log = Path.Combine(temp, "calls.log");
+    var output = Path.Combine(temp, "registry-migrate.json");
+    await File.WriteAllTextAsync(script,
+        "@echo off\r\n" +
+        "echo %*>>\"" + log + "\"\r\n" +
+        "echo %* | find \"doctor\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +table-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"tables\":[{\"id\":\"tbl_merge\",\"name\":\"MergeReviews\"},{\"id\":\"tbl_schema\",\"name\":\"SchemaReviews\"}],\"total\":2}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +field-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo %* | find \"tbl_merge\" >nul\r\n" +
+        "  if not errorlevel 1 (\r\n" +
+        "    echo {\"ok\":true,\"data\":{\"fields\":[{\"id\":\"fld_merge_status\",\"name\":\"Status\",\"type\":\"single_select\",\"options\":[]},{\"id\":\"fld_old_branch\",\"name\":\"旧Git分支\",\"type\":\"text\"},{\"id\":\"fld_branch\",\"name\":\"GitBranch\",\"type\":\"text\"}]}}\r\n" +
+        "    exit /b 0\r\n" +
+        "  )\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"fields\":[{\"id\":\"fld_schema_status\",\"name\":\"Status\",\"type\":\"text\"}]}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +record-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"fields\":[\"Status\"],\"data\":[],\"record_id_list\":[]}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +field-update\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo %* | find \"fld_schema_status\" >nul\r\n" +
+        "  if not errorlevel 1 (\r\n" +
+        "    echo schema status must not be converted 1>&2\r\n" +
+        "    exit /b 3\r\n" +
+        "  )\r\n" +
+        "  echo {\"ok\":true,\"updated\":true,\"field\":{\"field_id\":\"fld_merge_status\"}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo unexpected command %* 1>&2\r\n" +
+        "exit /b 2\r\n");
+
+    try
+    {
+        Directory.SetCurrentDirectory(temp);
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[]
+        {
+            "registry-migrate",
+            "--base", "base_mock",
+            "--only", "review-status-options",
+            "--locale", "zh-Hans",
+            "--yes",
+            "--lark-cli", script,
+            "--out", output
+        });
+        AssertEqual("0", exitCode.ToString(), "review-status-options apply should succeed without trying schema type conversion.");
+        var calls = File.ReadAllText(log);
+        AssertTrue(calls.Contains("base +field-update") && calls.Contains("fld_merge_status"), "narrow apply should update MergeReviews status options.");
+        AssertTrue(!calls.Contains("base +table-update"), "narrow apply must not rename tables.");
+        AssertTrue(!calls.Contains("fld_old_branch --yes"), "narrow apply must not rename unrelated fields.");
+        AssertTrue(!calls.Contains("fld_schema_status --yes"), "SchemaReviews text status must not be auto-converted.");
+        var resultJson = await File.ReadAllTextAsync(output);
+        AssertTrue(resultJson.Contains("registry.field.options.ensure"), "result should include options ensure action.");
+        AssertTrue(resultJson.Contains("registry.field.status_select_mismatch"), "result should include schema status mismatch warning.");
     }
     finally
     {
