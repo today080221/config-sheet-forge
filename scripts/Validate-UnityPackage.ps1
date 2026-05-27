@@ -280,6 +280,18 @@ foreach ($requiredV419UiMarker in @("提交合并审查记录", "RunSubmitMergeR
   }
 }
 
+foreach ($requiredV420CoreMarker in @("registry.field.options.ensure", "StatusOptionsReady", "WaivedFailures", "GateState", "missingStatusOptions")) {
+  if (($coreContracts + "`n" + $cliProgram) -notlike "*$requiredV420CoreMarker*") {
+    throw "Unity v0.4.20 waiver/status-options marker is missing: $requiredV420CoreMarker"
+  }
+}
+
+foreach ($requiredV420UiMarker in @("已由配置负责人 waiver 临时放行", "复制 registry-migrate 命令", "BuildRegistryMigrateDryRunCommand", "注册中心字段需要迁移", "写入对象")) {
+  if ($window -notlike "*$requiredV420UiMarker*") {
+    throw "Unity v0.4.20 PR gate UX marker is missing: $requiredV420UiMarker"
+  }
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

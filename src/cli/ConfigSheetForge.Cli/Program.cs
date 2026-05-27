@@ -1108,6 +1108,7 @@ public static class Program
             .OrderByDescending(r => GetRegistryRecordValue(r, "ExpiresAt", request.Locale, request.Registry), StringComparer.OrdinalIgnoreCase)
             .First();
         report.Waiver.RecordId = selected.RecordId;
+        report.Waiver.Status = GetRegistryRecordValue(selected, "Status", request.Locale, request.Registry);
         report.Waiver.ApprovedByRole = FirstNonEmpty(
             GetRegistryRecordValue(selected, "ApprovedByRole", request.Locale, request.Registry),
             GetRegistryRecordValue(selected, "ApproverRole", request.Locale, request.Registry));
@@ -1119,8 +1120,8 @@ public static class Program
         report.Waiver.Reason = FirstNonEmpty(
             GetRegistryRecordValue(selected, "Reason", request.Locale, request.Registry),
             GetRegistryRecordValue(selected, "原因", request.Locale, request.Registry));
-        report.Waiver.Approved = PrGateReportEvaluator.ReviewPassed(GetRegistryRecordValue(selected, "Status", request.Locale, request.Registry)) ||
-                                 string.Equals(report.Waiver.ApprovedByRole, "configOwner", StringComparison.OrdinalIgnoreCase);
+        report.Waiver.Approved = PrGateReportEvaluator.ReviewPassed(report.Waiver.Status) ||
+                                 (string.IsNullOrWhiteSpace(report.Waiver.Status) && string.Equals(report.Waiver.ApprovedByRole, "configOwner", StringComparison.OrdinalIgnoreCase));
     }
 
     private static List<string> BuildGateTableScope(LifecycleContractRequest request, PrGateReport report)
@@ -1941,9 +1942,9 @@ public static class Program
         }
         else
         {
-            if (plan.Actions.Any(IsDestructiveRegistryMigrationAction) && !args.HasFlag("yes"))
+            if (plan.Actions.Any(IsWritableRegistryMigrationAction) && !args.HasFlag("yes"))
             {
-                throw new CliException("registry-migrate apply 包含删除空白默认行/默认字段/重复 BranchBindings 等危险动作，必须显式传 --yes。建议先运行 --dry-run 审计 record_id 后再确认。", 2);
+                throw new CliException("registry-migrate apply 会写入在线 Base 注册中心，必须显式传 --yes。建议先运行 --dry-run 审计字段和 record_id 后再确认。", 2);
             }
 
             var gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
@@ -1968,6 +1969,14 @@ public static class Program
         return string.Equals(action.Action, "registry.record.delete_empty", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(action.Action, "registry.field.delete_default", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(action.Action, "registry.record.delete_duplicate_branch_binding", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsWritableRegistryMigrationAction(LifecycleActionResult action)
+    {
+        return IsDestructiveRegistryMigrationAction(action) ||
+               string.Equals(action.Action, "registry.table.rename", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(action.Action, "registry.field.rename", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(action.Action, "registry.field.options.ensure", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<RegistrySnapshot> LoadRegistrySnapshotFromLarkAsync(LarkCliGateway gateway, string baseToken, string locale, ParsedArgs args)
@@ -2010,6 +2019,14 @@ public static class Program
                         await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-update", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--field-id", GetDetail(action, "fieldId"), "--json", fieldJson, "--yes" });
                         action.Status = "done";
                         break;
+                    case "registry.field.options.ensure":
+                        var optionsJson = BuildSelectFieldUpdateJson(
+                            FirstNonEmpty(GetDetail(action, "fieldName"), "状态"),
+                            SplitCsv(GetDetail(action, "allOptions")).ToList());
+                        await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+field-update", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--field-id", GetDetail(action, "fieldId"), "--json", optionsJson, "--yes" });
+                        action.Status = "done";
+                        action.Message = "已补齐状态单选选项：" + GetDetail(action, "missingOptions") + "。";
+                        break;
                     case "registry.record.delete_empty":
                     case "registry.record.delete_duplicate_branch_binding":
                         await RunLarkCliStrictAsync(gateway, args, new[] { "base", "+record-delete", "--base-token", baseToken, "--table-id", GetDetail(action, "tableId"), "--record-id", GetDetail(action, "recordId"), "--yes" });
@@ -2028,6 +2045,45 @@ public static class Program
                 result.AddFailure(ex.Message);
             }
         }
+    }
+
+    private static string BuildSelectFieldUpdateJson(string fieldName, IReadOnlyList<string> options)
+    {
+        var palette = new[]
+        {
+            new { hue = "Green", lightness = "Light" },
+            new { hue = "Blue", lightness = "Light" },
+            new { hue = "Orange", lightness = "Light" },
+            new { hue = "Purple", lightness = "Light" },
+            new { hue = "Red", lightness = "Light" },
+            new { hue = "Grey", lightness = "Light" }
+        };
+        var optionObjects = new List<Dictionary<string, string>>();
+        for (var i = 0; i < options.Count; i++)
+        {
+            var name = options[i];
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            var color = palette[i % palette.Length];
+            optionObjects.Add(new Dictionary<string, string>
+            {
+                ["name"] = name,
+                ["hue"] = color.hue,
+                ["lightness"] = color.lightness
+            });
+        }
+
+        var body = new Dictionary<string, object>
+        {
+            ["name"] = fieldName,
+            ["type"] = "select",
+            ["multiple"] = false,
+            ["options"] = optionObjects
+        };
+        return JsonSerializer.Serialize(body, CompactJsonOptions);
     }
 
     private static async Task<LarkCliResult> RunLarkCliStrictAsync(LarkCliGateway gateway, ParsedArgs args, IEnumerable<string> commandArgs)
@@ -2491,8 +2547,52 @@ public static class Program
             DisplayName = displayName,
             MachineKey = ResolveMachineKey(displayName, RegistryLocalization.Default(locale).Fields),
             Type = GetJsonString(element, "type", "field_type", "fieldType"),
+            Options = ExtractFieldOptionNames(element),
             IsDefaultField = IsDefaultBaseField(displayName)
         });
+    }
+
+    private static List<string> ExtractFieldOptionNames(JsonElement element)
+    {
+        var options = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        CollectFieldOptionNames(element, options, seen);
+        return options;
+    }
+
+    private static void CollectFieldOptionNames(JsonElement element, ICollection<string> options, ISet<string> seen)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (string.Equals(property.Name, "options", StringComparison.OrdinalIgnoreCase) &&
+                    property.Value.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var option in property.Value.EnumerateArray())
+                    {
+                        var name = option.ValueKind == JsonValueKind.String
+                            ? option.GetString() ?? ""
+                            : GetJsonString(option, "name", "text", "value", "label", "option_name", "optionName");
+                        if (!string.IsNullOrWhiteSpace(name) && seen.Add(name))
+                        {
+                            options.Add(name);
+                        }
+                    }
+                }
+                else
+                {
+                    CollectFieldOptionNames(property.Value, options, seen);
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                CollectFieldOptionNames(child, options, seen);
+            }
+        }
     }
 
     public static IReadOnlyList<RegistryRecordSnapshot> FindMatchingRegistryRecords(IEnumerable<RegistryRecordSnapshot> records, IDictionary<string, string> keys, string locale)
@@ -3915,6 +4015,11 @@ public static class Program
                 return action;
             }
 
+            if (!EnsureStatusOptionsReady(action, table, registry, "MergeReviews", "MergeReviews.状态"))
+            {
+                return action;
+            }
+
             var sourceBranch = FirstNonEmpty(review.SourceBranch, summary.SourceBranch, _request.Git.Branch);
             var targetBranch = FirstNonEmpty(review.TargetBranch, summary.TargetBranch, "main");
             var tableId = FirstNonEmpty(review.TableId, "__project_pr_gate__");
@@ -4010,6 +4115,11 @@ public static class Program
                 return action;
             }
 
+            if (!EnsureStatusOptionsReady(action, table, registry, "SchemaReviews", "SchemaReviews.状态"))
+            {
+                return action;
+            }
+
             var branch = FirstNonEmpty(review.Branch, review.Profile, _request.Git.FeishuBranch, _request.Git.Profile, _request.Git.Branch);
             var record = table.Records
                 .Where(r => string.Equals(GetRegistryRecordValue(r, "TableId", _request.Locale, registry), review.TableId, StringComparison.OrdinalIgnoreCase))
@@ -4075,6 +4185,11 @@ public static class Program
                 return action;
             }
 
+            if (!EnsureStatusOptionsReady(action, table, registry, "Waivers", "Waivers.状态"))
+            {
+                return action;
+            }
+
             var body = new Dictionary<string, object>
             {
                 [tableIdField] = FirstNonEmpty(waiver.TableId, "__project_pr_gate__"),
@@ -4099,9 +4214,15 @@ public static class Program
 
         private string ResolveRegistryFieldName(RegistryTableSnapshot table, RegistryContract registry, string machineKey, params string[] aliases)
         {
+            var field = ResolveRegistryFieldSnapshot(table, registry, machineKey, aliases);
+            return field == null ? "" : FirstNonEmpty(field.DisplayName, field.FieldId, machineKey);
+        }
+
+        private RegistryFieldSnapshot? ResolveRegistryFieldSnapshot(RegistryTableSnapshot table, RegistryContract registry, string machineKey, params string[] aliases)
+        {
             if (table == null)
             {
-                return "";
+                return null;
             }
 
             var candidates = new List<string> { machineKey, RegistryLocalization.FieldDisplayName(machineKey, _request.Locale) };
@@ -4134,11 +4255,35 @@ public static class Program
                     string.Equals(f.FieldId, candidate, StringComparison.OrdinalIgnoreCase));
                 if (field != null)
                 {
-                    return FirstNonEmpty(field.DisplayName, field.FieldId, candidate);
+                    return field;
                 }
             }
 
-            return "";
+            return null;
+        }
+
+        private bool EnsureStatusOptionsReady(LifecycleActionResult action, RegistryTableSnapshot table, RegistryContract registry, string tableMachineKey, string label)
+        {
+            var statusField = ResolveRegistryFieldSnapshot(table, registry, "Status", "状态");
+            if (statusField == null || !RegistryMigrator.IsSelectLikeStatusField(statusField))
+            {
+                return true;
+            }
+
+            if (RegistryMigrator.StatusOptionsReady(statusField, tableMachineKey))
+            {
+                return true;
+            }
+
+            var required = RegistryMigrator.RequiredStatusOptions(tableMachineKey);
+            var existing = new HashSet<string>(statusField.Options ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+            var missing = required.Where(option => !existing.Contains(option)).ToList();
+            action.Status = "failed";
+            action.Message = label + " 单选字段缺少必要状态选项：" + string.Join(", ", missing) + "。请先运行 registry-migrate --dry-run 查看计划，再执行 registry-migrate --yes 补齐 " + tableMachineKey + " 状态选项。";
+            action.Details["missingStatusOptions"] = string.Join(",", missing);
+            action.Details["existingStatusOptions"] = string.Join(",", statusField.Options ?? new List<string>());
+            action.Details["nextStep"] = "请先运行 registry-migrate 补齐 " + tableMachineKey + " 状态选项。";
+            return false;
         }
 
         private void AddOptionalReviewField(Dictionary<string, object> body, RegistryTableSnapshot table, RegistryContract registry, string machineKey, string value, params string[] aliases)

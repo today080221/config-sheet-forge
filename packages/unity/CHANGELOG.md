@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.20
+
+- `registry-migrate --dry-run` 现在会检测 `MergeReviews`、`SchemaReviews`、`Waivers` 的 `状态` 单选字段是否缺少治理流程需要的选项，并预告要补齐的 `approved` / `completed` / `passed` 等值。
+- `registry-migrate` apply 对在线 Base 写入统一要求显式 `--yes`；补状态选项是幂等操作，只更新对应状态字段，不清理或改动无关字段。
+- `submit-merge-review` apply 在写 Base 前会先检查 `MergeReviews.状态` 是否具备必要单选选项；缺选项时中文阻断，并提示先运行 `registry-migrate`。
+- PR gate report 新增 `waived` / `gateState=waived` / `waivedFailures` 语义：有效 waiver 会显示“配置负责人临时放行”，不再同时输出普通用户容易误解的 hard failure。
+- Gate report 继续保留 waiver 的 `recordId`、`approvedByRole`、`expiresAt`、`reason`，便于 Unity UI 和 CI 展示审计信息。
+- Unity PR 检查页会区分“缺合并审查记录”和“已由配置负责人 waiver 临时放行”；注册中心状态选项缺失时提供 `registry-migrate --dry-run` 复制入口。
+- Unity 合并页在提交审查前展示本次将写入的 branch、target、table scope、fingerprint 和写入边界，明确不会写 main/cache/ProjectSettings/ExcelToSO。
+- 测试覆盖治理状态选项迁移、submit preflight 阻断、有效 waiver 放行语义，以及 Unity smoke 防回退。
+
 ## 0.4.19
 
 - 新增 `submit-merge-review` / `approve-merge-review` lifecycle：合并预览通过后，可以正式写入 Base `MergeReviews` 审查记录，不再需要项目侧或 AI agent 手工补 Base 行。

@@ -22,6 +22,8 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("datetime normalization does not assume local timezone", () => RunSync(DateTimeNormalizationDoesNotAssumeLocalTimezone)),
     ("registry localization keeps machine keys", () => RunSync(RegistryLocalizationKeepsMachineKeys)),
     ("registry migration cleans default rows and fields", () => RunSync(RegistryMigrationCleansDefaults)),
+    ("registry migration detects governance status options", () => RunSync(RegistryMigrationDetectsGovernanceStatusOptions)),
+    ("registry migration status option plan is idempotent", () => RunSync(RegistryMigrationStatusOptionPlanIsIdempotent)),
     ("lark base matrix record lookup finds existing record", () => RunSync(LarkBaseMatrixRecordLookupFindsExistingRecord)),
     ("lark 1.0.40 registry fixture hydrates and reports duplicate bindings", Lark140RegistryFixtureHydratesAndReportsDuplicateBindings),
     ("registry migrate keeps table and field list argv compatible", RegistryMigrateKeepsTableAndFieldListArgvCompatible),
@@ -34,6 +36,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("compare-merge dry-run fails without target workspace", CompareMergeDryRunFailsWithoutTargetWorkspace),
     ("compare-merge dry-run fingerprints merge review input", CompareMergeDryRunFingerprintsMergeReviewInput),
     ("pr gate hydrates live merge review records", PrGateHydratesLiveMergeReviewRecords),
+    ("submit-merge-review apply blocks missing status options", SubmitMergeReviewApplyBlocksMissingStatusOptions),
     ("seed registry lookup reuses existing branch binding record", () => RunSync(SeedRegistryLookupReusesExistingBranchBindingRecord)),
     ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
@@ -67,6 +70,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
     ("seed lifecycle rejects user fallback", SeedLifecycleRejectsUserFallback),
     ("gate report evaluator reports human failures", () => RunSync(GateReportEvaluatorReportsHumanFailures)),
+    ("gate report evaluator marks valid waiver as waived", () => RunSync(GateReportEvaluatorMarksValidWaiverAsWaived)),
     ("powershell json safety flags inline json params", () => RunSync(PowerShellJsonSafetyFlagsInlineJsonParams)),
     ("gate can print github annotations", GateCanPrintGitHubAnnotations)
 };
@@ -338,6 +342,52 @@ static void RegistryMigrationCleansDefaults()
     AssertTrue(plan.Actions.Any(a => a.Action == "registry.table.rename"), "Existing English table should be renamed for UI display.");
     AssertTrue(plan.Actions.Any(a => a.Action == "registry.record.delete_empty"), "Default empty rows should be cleaned.");
     AssertTrue(plan.Actions.Any(a => a.Action == "registry.field.delete_default"), "Default fields should be cleaned.");
+}
+
+static void RegistryMigrationDetectsGovernanceStatusOptions()
+{
+    var snapshot = new RegistrySnapshot();
+    snapshot.Tables.Add(BuildGovernanceTable("MergeReviews", "合并审查", "tbl_merge", Array.Empty<string>()));
+    snapshot.Tables.Add(BuildGovernanceTable("SchemaReviews", "Schema 审查", "tbl_schema", new[] { "approved" }));
+    snapshot.Tables.Add(BuildGovernanceTable("Waivers", "同步豁免", "tbl_waiver", new[] { "approved", "completed" }));
+
+    var plan = RegistryMigrator.Plan(snapshot, new RegistryMigrationOptions { Locale = "zh-Hans" });
+    var optionActions = plan.Actions.Where(a => a.Action == "registry.field.options.ensure").ToList();
+    AssertTrue(optionActions.Any(a => a.Details["tableMachineKey"] == "MergeReviews" && a.Details["missingOptions"].Contains("approved")), "MergeReviews empty select options should be planned.");
+    AssertTrue(optionActions.Any(a => a.Details["tableMachineKey"] == "SchemaReviews" && a.Details["missingOptions"].Contains("pending")), "SchemaReviews missing pending should be planned.");
+    AssertTrue(optionActions.Any(a => a.Details["tableMachineKey"] == "Waivers" && a.Details["missingOptions"].Contains("expired")), "Waivers missing expired should be planned.");
+}
+
+static void RegistryMigrationStatusOptionPlanIsIdempotent()
+{
+    var snapshot = new RegistrySnapshot();
+    snapshot.Tables.Add(BuildGovernanceTable("MergeReviews", "合并审查", "tbl_merge", new[] { "approved", "completed", "passed" }));
+    snapshot.Tables.Add(BuildGovernanceTable("SchemaReviews", "Schema 审查", "tbl_schema", new[] { "pending", "approved", "completed", "passed", "rejected" }));
+    snapshot.Tables.Add(BuildGovernanceTable("Waivers", "同步豁免", "tbl_waiver", new[] { "approved", "completed", "passed", "rejected", "expired" }));
+
+    var plan = RegistryMigrator.Plan(snapshot, new RegistryMigrationOptions { Locale = "zh-Hans" });
+    AssertTrue(!plan.Actions.Any(a => a.Action == "registry.field.options.ensure"), "registry-migrate should be idempotent when governance status options already exist.");
+}
+
+static RegistryTableSnapshot BuildGovernanceTable(string machineKey, string displayName, string tableId, IEnumerable<string> options)
+{
+    return new RegistryTableSnapshot
+    {
+        MachineKey = machineKey,
+        DisplayName = displayName,
+        TableId = tableId,
+        Fields =
+        {
+            new RegistryFieldSnapshot
+            {
+                MachineKey = "Status",
+                FieldId = "fld_status_" + machineKey,
+                DisplayName = "状态",
+                Type = "single_select",
+                Options = options.ToList()
+            }
+        }
+    };
 }
 
 static void LarkBaseMatrixRecordLookupFindsExistingRecord()
@@ -838,6 +888,122 @@ static async Task PrGateHydratesLiveMergeReviewRecords()
     AssertEqual("merge-feature-config-to-main-20260527-abc123", result.PrGateReport.MergeReview.ReviewId, "gate report should include review id.");
     AssertEqual("configOwner", result.PrGateReport.MergeReview.ApproverRole, "gate report should include approver role.");
     AssertEqual("__project_pr_gate__", result.PrGateReport.MergeReview.TableId, "gate report should include table id.");
+}
+
+static async Task SubmitMergeReviewApplyBlocksMissingStatusOptions()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-merge-review-options-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    var oldDir = Directory.GetCurrentDirectory();
+    var script = Path.Combine(temp, "lark-cli.cmd");
+    var log = Path.Combine(temp, "calls.log");
+    var requestPath = Path.Combine(temp, "submit.contract.json");
+    var previewPath = Path.Combine(temp, "compare.result.json");
+    var resultPath = Path.Combine(temp, "submit.result.json");
+    await File.WriteAllTextAsync(script,
+        "@echo off\r\n" +
+        "echo %*>>\"" + log + "\"\r\n" +
+        "echo %* | find \"doctor\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +table-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"tables\":[{\"id\":\"tbl_merge\",\"name\":\"MergeReviews\"}],\"total\":1}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +field-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"fields\":[{\"id\":\"fld_review\",\"name\":\"ReviewId\",\"type\":\"text\"},{\"id\":\"fld_table\",\"name\":\"TableId\",\"type\":\"text\"},{\"id\":\"fld_branch\",\"name\":\"GitBranch\",\"type\":\"text\"},{\"id\":\"fld_status\",\"name\":\"Status\",\"type\":\"single_select\",\"options\":[]},{\"id\":\"fld_role\",\"name\":\"ApproverRole\",\"type\":\"text\"},{\"id\":\"fld_update\",\"name\":\"UpdatedAt\",\"type\":\"datetime\"}]}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +record-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"fields\":[\"ReviewId\",\"TableId\",\"GitBranch\",\"Status\"],\"data\":[],\"record_id_list\":[]}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo unexpected command %* 1>&2\r\n" +
+        "exit /b 2\r\n");
+
+    try
+    {
+        Directory.SetCurrentDirectory(temp);
+        var request = new LifecycleContractRequest
+        {
+            Operation = "submit-merge-review",
+            DryRun = false,
+            Locale = "zh-Hans",
+            Registry = new RegistryContract { BaseToken = "base_mock" },
+            Git = new ContractGitSpec { Branch = "feature/config", Head = "abc123" },
+            MergeInputs = new MergeInputsContract
+            {
+                SourceBranch = "feature/config",
+                TargetBranch = "main",
+                PrNumber = "480",
+                PrUrl = "https://github.example/pull/480",
+                MergeReportPath = "Temp/merge-report.md",
+                MergedPath = "Temp/merged.semantic.json"
+            },
+            MergeReview = new MergeReviewContract
+            {
+                SourceBranch = "feature/config",
+                TargetBranch = "main",
+                TableId = "__project_pr_gate__",
+                TableIds = { "ItemsData" },
+                ConfirmSubmit = true
+            }
+        };
+        var summary = LifecycleExecutor.BuildMergeReviewInputSummary(request, request.MergeReview.TableIds);
+        request.MergeReview.RequestFingerprint = summary.Fingerprint;
+        var preview = new LifecycleContractResult
+        {
+            Operation = "compare-merge",
+            DryRun = true,
+            Success = true,
+            RequestFingerprint = summary.Fingerprint,
+            RequestSummary =
+            {
+                ["sourceBranch"] = summary.SourceBranch,
+                ["targetBranch"] = summary.TargetBranch,
+                ["tableIds"] = summary.TableIdsText,
+                ["prNumber"] = request.MergeInputs.PrNumber,
+                ["prUrl"] = request.MergeInputs.PrUrl,
+                ["mergeReportPath"] = request.MergeInputs.MergeReportPath,
+                ["mergedPath"] = request.MergeInputs.MergedPath
+            }
+        };
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request, CamelJsonOptions()));
+        await File.WriteAllTextAsync(previewPath, JsonSerializer.Serialize(preview, CamelJsonOptions()));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[]
+        {
+            "apply-contract",
+            "--request", requestPath,
+            "--preview-result", previewPath,
+            "--confirm",
+            "--lark-cli", script,
+            "--out", resultPath
+        });
+        AssertEqual("1", exitCode.ToString(), "submit-merge-review apply should fail before writing when status options are missing.");
+        var resultJson = await File.ReadAllTextAsync(resultPath);
+        AssertTrue(resultJson.Contains("MergeReviews.状态") && resultJson.Contains("registry-migrate"), "failure should tell users to run registry-migrate first.");
+        var calls = File.Exists(log) ? File.ReadAllText(log) : "";
+        AssertTrue(!calls.Contains("base +record-upsert"), "preflight should block before record-upsert.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(oldDir);
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
 }
 
 static LifecycleContractRequest SampleCompareMergeRequest()
@@ -1943,6 +2109,37 @@ static void GateReportEvaluatorReportsHumanFailures()
     });
     AssertTrue(expiredWaiver.HumanReadableFailures.Any(f => f.Contains("配置负责人")), "Waiver must be approved by configOwner.");
     AssertTrue(expiredWaiver.HumanReadableFailures.Any(f => f.Contains("过期")), "Expired waiver should block gate.");
+}
+
+static void GateReportEvaluatorMarksValidWaiverAsWaived()
+{
+    var report = PrGateReportEvaluator.Evaluate(new PrGateReport
+    {
+        GitHead = "abc",
+        Branch = "feature/config",
+        Permissions = new GatePermissions { CanReadRegistry = true, CanReadSheets = true },
+        MergeReview = new GateReviewState { Status = "" },
+        SchemaReview = new GateReviewState { Status = "approved" },
+        Waiver = new GateWaiverState
+        {
+            Approved = true,
+            Status = "approved",
+            ApprovedByRole = "configOwner",
+            ExpiresAt = DateTimeOffset.UtcNow.AddDays(1).ToString("o"),
+            Branch = "feature/config",
+            TableId = "__project_pr_gate__",
+            RecordId = "rec_waiver",
+            Reason = "临时放行人工审查记录。"
+        }
+    });
+
+    AssertTrue(report.Passed, "valid waiver should make the gate pass.");
+    AssertTrue(report.Waived, "report should explicitly mark waived=true.");
+    AssertEqual("waived", report.GateState, "gateState should be waived.");
+    AssertTrue(report.HumanReadableFailures.Count == 0, "valid waiver should not leave ordinary failure text.");
+    AssertTrue(report.WaivedFailures.Any(f => f.Contains("合并审查")), "waived failures should retain what was bypassed for audit.");
+    AssertEqual("rec_waiver", report.Waiver.RecordId, "waiver record id should be preserved.");
+    AssertEqual("configOwner", report.Waiver.ApprovedByRole, "waiver approver should be preserved.");
 }
 
 static void PowerShellJsonSafetyFlagsInlineJsonParams()

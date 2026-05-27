@@ -92,14 +92,14 @@ config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.Conf
 
 策划后续只改飞书 branch 在线表时，先让项目 adapter 生成 `sync-cache` lifecycle contract，再 dry-run / apply。无变化时 semantic hash gate 不会重写 `.xlsx`、`.semantic.json` 或 `.sha256`，mtime 保持不变。
 
-`sync-cache` 会从 Base 注册中心 live hydrate 当前 Git branch/profile 的 BranchBindings 与 ConfigSheets。若 Base 里同一 `GitBranch + Profile` 出现多条 BranchBindings，会阻断并列出 record_id；先用 `config-sheet-forge registry-migrate --base <base-token> --dry-run` 审计重复行、空白默认行和字段歧义，确认后再做 cleanup。
+`sync-cache` 会从 Base 注册中心 live hydrate 当前 Git branch/profile 的 BranchBindings 与 ConfigSheets。若 Base 里同一 `GitBranch + Profile` 出现多条 BranchBindings，会阻断并列出 record_id；先用 `config-sheet-forge registry-migrate --base <base-token> --dry-run` 审计重复行、空白默认行、字段歧义，以及 MergeReviews / SchemaReviews / Waivers 的 `状态` 单选选项。确认计划只补必要选项或清理目标记录后，再由负责人执行 `registry-migrate --yes`。
 
 ## Unity
 
 通过 Unity Package Manager 安装：
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.19
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.20
 ```
 
 打开 `Tools > Config Sheet Forge`。普通使用者优先看首页的 `推荐下一步` 和 [Unity 配表窗口 5 分钟说明](unity-window.md)。

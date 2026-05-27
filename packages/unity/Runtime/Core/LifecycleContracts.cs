@@ -394,6 +394,7 @@ namespace ConfigSheetForge.Core
         public string FieldId { get; set; } = "";
         public string DisplayName { get; set; } = "";
         public string Type { get; set; } = "";
+        public List<string> Options { get; set; } = new List<string>();
         public bool IsDefaultField { get; set; }
     }
 
@@ -417,6 +418,12 @@ namespace ConfigSheetForge.Core
     public static class RegistryMigrator
     {
         private static readonly ISet<string> DefaultFieldNames = new HashSet<string>(new[] { "Text", "Single option", "Date", "Attachment" }, StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string[]> RequiredStatusOptionsByTable = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["MergeReviews"] = new[] { "approved", "completed", "passed" },
+            ["SchemaReviews"] = new[] { "pending", "approved", "completed", "passed", "rejected" },
+            ["Waivers"] = new[] { "approved", "completed", "passed", "rejected", "expired" }
+        };
 
         public static RegistryMigrationPlan Plan(RegistrySnapshot snapshot, RegistryMigrationOptions options)
         {
@@ -510,10 +517,111 @@ namespace ConfigSheetForge.Core
                 }
 
                 AddFieldAmbiguityDiagnostics(plan, table);
+                AddStatusOptionDiagnostics(plan, table);
                 AddBranchBindingDuplicateDiagnostics(plan, table, options);
             }
 
             return plan;
+        }
+
+        public static IReadOnlyList<string> RequiredStatusOptions(string tableMachineKey)
+        {
+            return RequiredStatusOptionsByTable.TryGetValue(tableMachineKey ?? "", out var options)
+                ? options
+                : Array.Empty<string>();
+        }
+
+        public static bool StatusOptionsReady(RegistryFieldSnapshot field, string tableMachineKey)
+        {
+            if (field == null)
+            {
+                return false;
+            }
+
+            var required = RequiredStatusOptions(tableMachineKey);
+            if (required.Count == 0)
+            {
+                return true;
+            }
+
+            var existing = new HashSet<string>(field.Options ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+            return required.All(existing.Contains);
+        }
+
+        private static void AddStatusOptionDiagnostics(RegistryMigrationPlan plan, RegistryTableSnapshot table)
+        {
+            var tableMachineKey = ResolveGovernanceTableMachineKey(table, plan);
+            if (string.IsNullOrWhiteSpace(tableMachineKey) ||
+                !RequiredStatusOptionsByTable.TryGetValue(tableMachineKey, out var requiredOptions))
+            {
+                return;
+            }
+
+            var statusField = table.Fields.FirstOrDefault(f =>
+                string.Equals(f.MachineKey, "Status", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(f.DisplayName, "Status", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(f.DisplayName, plan.DisplayNameMapping.Fields["Status"], StringComparison.OrdinalIgnoreCase));
+            if (statusField == null)
+            {
+                return;
+            }
+
+            if (!IsSelectLikeStatusField(statusField))
+            {
+                var mismatch = Add(plan, "registry.field.status_select_mismatch", "planned", "检测到 " + tableMachineKey + ".状态 不是单选字段；自动迁移不会改字段类型。请在 Base 中确认“状态”字段为单选后再提交审查。");
+                mismatch.Details["table"] = FirstNonEmpty(table.MachineKey, table.DisplayName, table.TableId);
+                mismatch.Details["tableId"] = table.TableId;
+                mismatch.Details["fieldId"] = statusField.FieldId;
+                mismatch.Details["fieldType"] = statusField.Type;
+                return;
+            }
+
+            var existing = new HashSet<string>(statusField.Options ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+            var missing = requiredOptions.Where(option => !existing.Contains(option)).ToList();
+            if (missing.Count == 0)
+            {
+                return;
+            }
+
+            var merged = (statusField.Options ?? new List<string>())
+                .Where(option => !string.IsNullOrWhiteSpace(option))
+                .Concat(missing)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var action = Add(plan, "registry.field.options.ensure", "planned", "补齐 " + tableMachineKey + ".状态 单选选项：" + string.Join(", ", missing) + "。");
+            action.Details["table"] = FirstNonEmpty(table.MachineKey, table.DisplayName, table.TableId);
+            action.Details["tableMachineKey"] = tableMachineKey;
+            action.Details["tableId"] = table.TableId;
+            action.Details["fieldId"] = statusField.FieldId;
+            action.Details["fieldName"] = FirstNonEmpty(statusField.DisplayName, plan.DisplayNameMapping.Fields["Status"], "状态");
+            action.Details["fieldType"] = statusField.Type;
+            action.Details["existingOptions"] = string.Join(",", statusField.Options ?? new List<string>());
+            action.Details["missingOptions"] = string.Join(",", missing);
+            action.Details["requiredOptions"] = string.Join(",", requiredOptions);
+            action.Details["allOptions"] = string.Join(",", merged);
+        }
+
+        private static string ResolveGovernanceTableMachineKey(RegistryTableSnapshot table, RegistryMigrationPlan plan)
+        {
+            foreach (var machineKey in RequiredStatusOptionsByTable.Keys)
+            {
+                var displayName = plan.DisplayNameMapping.Tables.TryGetValue(machineKey, out var mapped) ? mapped : machineKey;
+                if (string.Equals(table.MachineKey, machineKey, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(table.DisplayName, machineKey, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(table.DisplayName, displayName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return machineKey;
+                }
+            }
+
+            return "";
+        }
+
+        public static bool IsSelectLikeStatusField(RegistryFieldSnapshot field)
+        {
+            var type = field != null ? field.Type ?? "" : "";
+            return type.IndexOf("select", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   type.IndexOf("option", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static void AddFieldAmbiguityDiagnostics(RegistryMigrationPlan plan, RegistryTableSnapshot table)
@@ -2349,6 +2457,8 @@ namespace ConfigSheetForge.Core
     public sealed class PrGateReport
     {
         public bool Passed { get; set; } = true;
+        public bool Waived { get; set; }
+        public string GateState { get; set; } = "";
         public string GitHead { get; set; } = "";
         public string Branch { get; set; } = "";
         public GatePermissions Permissions { get; set; } = new GatePermissions();
@@ -2362,6 +2472,7 @@ namespace ConfigSheetForge.Core
         public List<string> ChangedTables { get; set; } = new List<string>();
         public Dictionary<string, string> CacheHashes { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public List<string> HumanReadableFailures { get; set; } = new List<string>();
+        public List<string> WaivedFailures { get; set; } = new List<string>();
     }
 
     public sealed class GatePermissions
@@ -2393,12 +2504,14 @@ namespace ConfigSheetForge.Core
     public sealed class GateWaiverState
     {
         public bool Approved { get; set; }
+        public string Status { get; set; } = "";
         public string ApprovedByRole { get; set; } = "";
         public string ExpiresAt { get; set; } = "";
         public string Branch { get; set; } = "";
         public string TableId { get; set; } = "";
         public string Reason { get; set; } = "";
         public string RecordId { get; set; } = "";
+        public string Message { get; set; } = "";
     }
 
     public static class PrGateReportEvaluator
@@ -2411,6 +2524,9 @@ namespace ConfigSheetForge.Core
             }
 
             report.HumanReadableFailures.Clear();
+            report.WaivedFailures.Clear();
+            report.Waived = false;
+            report.GateState = "";
             AddMissingFieldFailures(report);
 
             if (!report.Permissions.CanReadRegistry)
@@ -2448,17 +2564,17 @@ namespace ConfigSheetForge.Core
                 Add(report, "检测到 schema 变化，但 Schema 审查还没有完成。请让审查人批准 SchemaReviews 记录。");
             }
 
-            if (report.Waiver.Approved || !string.IsNullOrWhiteSpace(report.Waiver.RecordId))
-            {
-                ValidateWaiver(report);
-            }
-
             if (report.ChangedTables.Count > 0 && report.CacheHashes.Count == 0)
             {
                 Add(report, "缺少同步报告。请先运行 sync，生成 semantic cache 和 sha256 后再跑 gate。");
             }
 
+            ApplyValidWaiver(report);
             report.Passed = report.HumanReadableFailures.Count == 0;
+            if (string.IsNullOrWhiteSpace(report.GateState))
+            {
+                report.GateState = report.Passed ? "passed" : "failed";
+            }
             return report;
         }
 
@@ -2482,6 +2598,11 @@ namespace ConfigSheetForge.Core
                 Add(report, "同步豁免没有批准。只有配置负责人批准的有效 waiver 才能放行。");
             }
 
+            if (!string.IsNullOrWhiteSpace(report.Waiver.Status) && !ReviewPassed(report.Waiver.Status))
+            {
+                Add(report, "同步豁免状态不是 approved/completed/passed。请让配置负责人重新批准 waiver。");
+            }
+
             if (!string.Equals(report.Waiver.ApprovedByRole, "configOwner", StringComparison.OrdinalIgnoreCase))
             {
                 Add(report, "同步豁免不是配置负责人批准的。请让配置负责人重新批准 waiver。");
@@ -2502,6 +2623,66 @@ namespace ConfigSheetForge.Core
             {
                 Add(report, "同步豁免属于分支 “" + report.Waiver.Branch + "”，不能用于当前分支 “" + report.Branch + "”。");
             }
+        }
+
+        private static void ApplyValidWaiver(PrGateReport report)
+        {
+            if (!HasWaiver(report))
+            {
+                return;
+            }
+
+            var beforeValidation = report.HumanReadableFailures.Count;
+            ValidateWaiver(report);
+            var waiverValidationFailed = report.HumanReadableFailures.Count > beforeValidation;
+            if (waiverValidationFailed)
+            {
+                return;
+            }
+
+            var retained = new List<string>();
+            var waived = new List<string>();
+            foreach (var failure in report.HumanReadableFailures)
+            {
+                if (IsNonWaivableFailure(failure))
+                {
+                    retained.Add(failure);
+                }
+                else
+                {
+                    waived.Add(failure);
+                }
+            }
+
+            if (waived.Count == 0)
+            {
+                return;
+            }
+
+            report.Waived = true;
+            report.GateState = "waived";
+            report.Waiver.Message = "已由配置负责人 waiver 临时放行。";
+            report.WaivedFailures.AddRange(waived);
+            report.HumanReadableFailures.Clear();
+            report.HumanReadableFailures.AddRange(retained);
+        }
+
+        private static bool HasWaiver(PrGateReport report)
+        {
+            return report.Waiver.Approved ||
+                   !string.IsNullOrWhiteSpace(report.Waiver.RecordId) ||
+                   !string.IsNullOrWhiteSpace(report.Waiver.Status);
+        }
+
+        private static bool IsNonWaivableFailure(string failure)
+        {
+            failure = failure ?? "";
+            return failure.IndexOf("gitHead", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   failure.IndexOf("缺少 branch", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   failure.IndexOf("无权", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   failure.IndexOf("权限", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   failure.IndexOf("读取 Base 注册中心", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   failure.IndexOf("读取在线 Sheet", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         public static bool ReviewPassed(string status)

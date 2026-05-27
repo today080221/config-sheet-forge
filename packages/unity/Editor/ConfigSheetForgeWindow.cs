@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.19";
+        private const string PackageVersion = "v0.4.20";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -1491,6 +1491,19 @@ namespace ConfigSheetForge.Unity.Editor
                 return;
             }
 
+            if (_gateReportSummary.Waived && _gateReportSummary.Failures.Count == 0)
+            {
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                EditorGUILayout.LabelField("已由配置负责人 waiver 临时放行", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField(_gateReportSummary.WaiverSummary, EditorStyles.wordWrappedLabel);
+                if (_gateReportSummary.WaivedFailures.Count > 0)
+                {
+                    EditorGUILayout.LabelField("本次临时放行覆盖的问题：" + string.Join("；", _gateReportSummary.WaivedFailures), EditorStyles.wordWrappedMiniLabel);
+                }
+                EditorGUILayout.EndVertical();
+                return;
+            }
+
             if (GateLooksPassed())
             {
                 EditorGUILayout.HelpBox("PR 检查通过：当前 cache、合并审查和权限检查看起来可以合并。", MessageType.Info);
@@ -1554,6 +1567,16 @@ namespace ConfigSheetForge.Unity.Editor
                 {
                     _selectedTab = GateTab;
                     _showWaiverEntry = true;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            else if (failure.IsRegistryMigrationNeeded)
+            {
+                EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button(new GUIContent("复制 registry-migrate 命令", "先 dry-run 看迁移计划；确认后再把 --dry-run 改为 --yes 执行。"), GUILayout.Height(26)))
+                {
+                    EditorGUIUtility.systemCopyBuffer = BuildRegistryMigrateDryRunCommand();
+                    SetImmediateOutput("已复制 registry-migrate dry-run 命令。", "先运行 dry-run 审计计划；确认只补状态选项后，再执行 registry-migrate --yes。");
                 }
                 EditorGUILayout.EndHorizontal();
             }
@@ -3627,10 +3650,14 @@ namespace ConfigSheetForge.Unity.Editor
             if (reviewReady)
             {
                 EditorGUILayout.LabelField("最近一次合并预览有效，可以提交审查记录。", EditorStyles.wordWrappedMiniLabel);
+                DrawReadonlyRow("当前分支", FirstNonEmpty(_projectConfig.GitBranch, _mergeSourceBranch, "未读取"), "写入 MergeReviews 的 Git分支。");
+                DrawReadonlyRow("目标分支", FirstNonEmpty(_targetBranch, _projectConfig.DefaultTargetBranch, "main"), "这次合并预览对应的目标分支。");
+                DrawReadonlyRow("表范围", FirstNonEmpty(BuildCompareMergeReviewTableIdsCsv(), "__project_pr_gate__"), "项目级审查会覆盖当前合并预览里的表范围。");
+                DrawReadonlyRow("请求指纹", _lastCompareMergeRequestFingerprint, "提交时 CLI 会校验它和最近一次合并预览一致。");
+                DrawReadonlyRow("写入对象", "Base MergeReviews", "不会写 main、本地 cache、ProjectSettings 或 ExcelToSO。");
                 if (_programView)
                 {
                     DrawReadonlyRow("预览 result", _lastCompareMergeResultPath, "提交时会校验这个 result 的 requestFingerprint。");
-                    DrawReadonlyRow("指纹", _lastCompareMergeRequestFingerprint, "CLI 会用它防止审查记录和预览输入不一致。");
                 }
             }
             else
@@ -3942,6 +3969,24 @@ namespace ConfigSheetForge.Unity.Editor
 
             var cli = ResolveCoreCli(FindProjectRoot());
             EditorGUIUtility.systemCopyBuffer = cli.ToCommandLine(BuildPrGateArgs());
+        }
+
+        private string BuildRegistryMigrateDryRunCommand()
+        {
+            var projectRoot = FindProjectRoot();
+            var cli = ResolveCoreCli(projectRoot);
+            var args = new List<string>
+            {
+                "registry-migrate",
+                "--base",
+                FirstNonEmpty(_projectConfig.RegistryBaseToken, "<registry-base-token>"),
+                "--locale",
+                "zh-Hans",
+                "--dry-run",
+                "--out",
+                GetUnityLifecyclePath(projectRoot, "registry-migrate.result.json")
+            };
+            return cli.ToCommandLine(CleanArgs(args));
         }
 
         private void CopyProjectLifecycleAdapterCommand(string operation, bool dryRun)
@@ -4455,6 +4500,11 @@ namespace ConfigSheetForge.Unity.Editor
                 return "未生成";
             }
 
+            if (_gateReportSummary.Waived)
+            {
+                return "临时放行";
+            }
+
             return GateLooksPassed() ? "通过" : _gateReportSummary.ShortText;
         }
 
@@ -4467,6 +4517,11 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GateLooksPassed())
             {
+                if (_gateReportSummary.Waived)
+                {
+                    return "已由配置负责人 waiver 临时放行；请注意过期时间。";
+                }
+
                 return "最近一次 PR 检查已通过。";
             }
 
@@ -5604,6 +5659,7 @@ namespace ConfigSheetForge.Unity.Editor
         public bool IsMergeReviewMissing { get; set; }
         public bool IsSchemaReviewMissing { get; set; }
         public bool IsWaiverProblem { get; set; }
+        public bool IsRegistryMigrationNeeded { get; set; }
 
         public static GateFailureView FromMessage(string message)
         {
@@ -5627,6 +5683,17 @@ namespace ConfigSheetForge.Unity.Editor
                     Reason = "lark-cli doctor 未通过",
                     NextStep = "请在终端运行 lark-cli doctor 和 lark-cli auth status，按提示修复登录、token 或版本问题后重试。",
                     Priority = 6
+                };
+            }
+
+            if (ContainsAny(message, "状态选项", "registry-migrate", "注册中心字段需要迁移", "单选字段缺少"))
+            {
+                return new GateFailureView
+                {
+                    Reason = "注册中心字段需要迁移",
+                    NextStep = "先运行 registry-migrate --dry-run 查看计划；确认只补状态选项后，再执行 registry-migrate --yes。",
+                    Priority = 8,
+                    IsRegistryMigrationNeeded = true
                 };
             }
 
@@ -5742,6 +5809,10 @@ namespace ConfigSheetForge.Unity.Editor
         public string DetailText { get; set; } = "";
         public bool HasReport { get; set; }
         public bool? Passed { get; set; }
+        public bool Waived { get; set; }
+        public string GateState { get; set; } = "";
+        public string WaiverSummary { get; set; } = "";
+        public List<string> WaivedFailures { get; } = new List<string>();
         public List<GateFailureView> Failures { get; } = new List<GateFailureView>();
 
         public static GateReportSummaryView NotFound(string path)
@@ -5761,7 +5832,10 @@ namespace ConfigSheetForge.Unity.Editor
         {
             json = json ?? "";
             var passed = ExtractBoolean(json, "passed");
+            var waived = ExtractBoolean(json, "waived") == true ||
+                         string.Equals(ExtractString(json, "gateState"), "waived", StringComparison.OrdinalIgnoreCase);
             var failureMessages = ExtractStringArray(json, "humanReadableFailures");
+            var waivedFailureMessages = ExtractStringArray(json, "waivedFailures");
             var failures = new List<GateFailureView>();
             foreach (var failure in failureMessages)
             {
@@ -5779,7 +5853,12 @@ namespace ConfigSheetForge.Unity.Editor
             failures.Sort((left, right) => left.Priority.CompareTo(right.Priority));
 
             var builder = new StringBuilder();
-            if (failures.Count > 0)
+            if (waived)
+            {
+                builder.AppendLine("已由配置负责人 waiver 临时放行。");
+                builder.AppendLine(BuildWaiverSummary(json));
+            }
+            else if (failures.Count > 0)
             {
                 foreach (var failure in failures)
                 {
@@ -5801,10 +5880,14 @@ namespace ConfigSheetForge.Unity.Editor
                 Path = path ?? "",
                 HasReport = true,
                 Passed = passed,
-                ShortText = BuildShortText(passed, failures),
+                Waived = waived,
+                GateState = ExtractString(json, "gateState"),
+                WaiverSummary = BuildWaiverSummary(json),
+                ShortText = BuildShortText(passed, failures, waived),
                 DetailText = builder.ToString().TrimEnd()
             };
             view.Failures.AddRange(failures);
+            view.WaivedFailures.AddRange(waivedFailureMessages);
             return view;
         }
 
@@ -5829,6 +5912,16 @@ namespace ConfigSheetForge.Unity.Editor
 
         private static string BuildShortText(bool? passed, List<GateFailureView> failures)
         {
+            return BuildShortText(passed, failures, false);
+        }
+
+        private static string BuildShortText(bool? passed, List<GateFailureView> failures, bool waived)
+        {
+            if (waived && failures.Count == 0)
+            {
+                return "临时放行";
+            }
+
             if (passed.HasValue && passed.Value && failures.Count == 0)
             {
                 return "通过";
@@ -5845,6 +5938,36 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return "状态未知";
+        }
+
+        private static string BuildWaiverSummary(string json)
+        {
+            var role = ExtractNestedString(json, "waiver", "approvedByRole");
+            var expiresAt = ExtractNestedString(json, "waiver", "expiresAt");
+            var reason = ExtractNestedString(json, "waiver", "reason");
+            var recordId = ExtractNestedString(json, "waiver", "recordId");
+            var parts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(role))
+            {
+                parts.Add("批准角色：" + role);
+            }
+
+            if (!string.IsNullOrWhiteSpace(expiresAt))
+            {
+                parts.Add("过期时间：" + expiresAt);
+            }
+
+            if (!string.IsNullOrWhiteSpace(reason))
+            {
+                parts.Add("原因：" + reason);
+            }
+
+            if (!string.IsNullOrWhiteSpace(recordId))
+            {
+                parts.Add("record_id：" + recordId);
+            }
+
+            return parts.Count == 0 ? "报告里有有效 waiver 记录。" : string.Join("；", parts);
         }
 
         private static bool? ExtractBoolean(string json, string propertyName)
@@ -5943,6 +6066,30 @@ namespace ConfigSheetForge.Unity.Editor
             return ParseJsonString(json, quote, out stringEnd);
         }
 
+        private static string ExtractNestedString(string json, string objectName, string propertyName)
+        {
+            var objectProperty = "\"" + objectName + "\"";
+            var objectIndex = json.IndexOf(objectProperty, StringComparison.OrdinalIgnoreCase);
+            if (objectIndex < 0)
+            {
+                return "";
+            }
+
+            var objectStart = json.IndexOf('{', objectIndex + objectProperty.Length);
+            if (objectStart < 0)
+            {
+                return "";
+            }
+
+            var objectEnd = FindObjectEnd(json, objectStart);
+            if (objectEnd < 0)
+            {
+                return "";
+            }
+
+            return ExtractString(json.Substring(objectStart, objectEnd - objectStart + 1), propertyName);
+        }
+
         private static int FindArrayEnd(string json, int start)
         {
             var depth = 0;
@@ -5979,6 +6126,54 @@ namespace ConfigSheetForge.Unity.Editor
                     depth++;
                 }
                 else if (c == ']')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        return i;
+                    }
+                }
+            }
+
+            return -1;
+        }
+
+        private static int FindObjectEnd(string json, int start)
+        {
+            var depth = 0;
+            var inString = false;
+            var escaped = false;
+            for (var i = start; i < json.Length; i++)
+            {
+                var c = json[i];
+                if (escaped)
+                {
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\' && inString)
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = !inString;
+                    continue;
+                }
+
+                if (inString)
+                {
+                    continue;
+                }
+
+                if (c == '{')
+                {
+                    depth++;
+                }
+                else if (c == '}')
                 {
                     depth--;
                     if (depth == 0)
