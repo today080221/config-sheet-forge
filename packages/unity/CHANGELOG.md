@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.19
+
+- 新增 `submit-merge-review` / `approve-merge-review` lifecycle：合并预览通过后，可以正式写入 Base `MergeReviews` 审查记录，不再需要项目侧或 AI agent 手工补 Base 行。
+- `compare-merge` dry-run 现在输出可复核的 `requestFingerprint` 和 source/target/tableIds/PR/report 摘要；提交合并审查记录时 CLI 会校验最近一次同输入 dry-run，不一致会中文阻断。
+- CLI apply 增加 live `MergeReviews` hydrate：PR gate 会按当前分支和项目级/单表范围读取 Base 审查记录，支持 `approved`、`completed`、`passed`、`通过`、`已通过`、`完成`、`已完成`。
+- Gate report 的 `MergeReview` 会写明 `recordId`、`reviewId`、`ApproverRole`、`GitBranch`、`TableId`，缺记录时提示去合并页提交合并审查记录。
+- Unity 合并页新增 `提交合并审查记录` 按钮：只在最近一次合并预览成功后启用，二次确认文案明确只写 Base `MergeReviews`，不写 main、不写本地 cache、不改 ProjectSettings/ExcelToSO。
+- PR 检查失败卡增加可执行导航：缺 MergeReviews 可跳到合并页并高亮提交入口；SchemaReviews / Waivers 提供轻量人工处理入口。
+- 新增 `approve-schema-review` 与 `approve-waiver` lifecycle 基础能力，并在 PR 检查页提供简易表单，方便人工闭环处理 Schema 审查和临时放行。
+- 测试覆盖 compare-merge 指纹、live MergeReviews gate hydrate，以及 Unity smoke 防止审查按钮和 lifecycle marker 回退。
+
 ## 0.4.18
 
 - 目标分支初始化 apply 增加最后护栏：必须传入最近一次同输入 dry-run result，CLI 会校验 `requestFingerprint`，输入不一致或 dry-run 未通过时直接阻断写入。

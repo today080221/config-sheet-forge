@@ -268,6 +268,18 @@ foreach ($requiredV418UiMarker in @("将写飞书", "--preview-result", "request
   }
 }
 
+foreach ($requiredV419CoreMarker in @("MergeReviewContract", "submit-merge-review", "registry.merge_reviews.upsert", "BuildMergeReviewInputSummary", "HydratePrGateReportFromRegistrySnapshot")) {
+  if (($coreContracts + "`n" + $cliProgram) -notlike "*$requiredV419CoreMarker*") {
+    throw "Unity v0.4.19 merge review source marker is missing: $requiredV419CoreMarker"
+  }
+}
+
+foreach ($requiredV419UiMarker in @("提交合并审查记录", "RunSubmitMergeReview", "BuildSubmitMergeReviewRequestJson", "approve-schema-review", "approve-waiver")) {
+  if ($window -notlike "*$requiredV419UiMarker*") {
+    throw "Unity v0.4.19 manual review UI marker is missing: $requiredV419UiMarker"
+  }
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

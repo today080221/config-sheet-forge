@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,6 +21,9 @@ namespace ConfigSheetForge.Core
         public UnityExcelToSoContract UnityExcelToSo { get; set; } = new UnityExcelToSoContract();
         public MergePolicyContract MergePolicy { get; set; } = new MergePolicyContract();
         public MergeInputsContract MergeInputs { get; set; } = new MergeInputsContract();
+        public MergeReviewContract MergeReview { get; set; } = new MergeReviewContract();
+        public SchemaReviewApprovalContract SchemaReviewApproval { get; set; } = new SchemaReviewApprovalContract();
+        public WaiverApprovalContract WaiverApproval { get; set; } = new WaiverApprovalContract();
         public PrGateReport GateReport { get; set; } = new PrGateReport();
         public SeedFromLocalXlsxContract SeedFromLocalXlsx { get; set; } = new SeedFromLocalXlsxContract();
         public TargetBranchBootstrapContract TargetBranchBootstrap { get; set; } = new TargetBranchBootstrapContract();
@@ -131,6 +135,60 @@ namespace ConfigSheetForge.Core
         public bool WriteBackToMain { get; set; }
         public bool ConfirmWriteMain { get; set; }
         public string TableId { get; set; } = "";
+    }
+
+    public sealed class MergeReviewContract
+    {
+        public string SourceBranch { get; set; } = "";
+        public string TargetBranch { get; set; } = "";
+        public List<string> TableIds { get; set; } = new List<string>();
+        public string TableId { get; set; } = "__project_pr_gate__";
+        public string PrNumber { get; set; } = "";
+        public string PrUrl { get; set; } = "";
+        public string MergeReportPath { get; set; } = "";
+        public string MergedPath { get; set; } = "";
+        public string RequestFingerprint { get; set; } = "";
+        public string RequiredPreviewFingerprint { get; set; } = "";
+        public string PreviewResultPath { get; set; } = "";
+        public string ApproverRole { get; set; } = "configOwner";
+        public string ReviewComment { get; set; } = "";
+        public string ReviewId { get; set; } = "";
+        public string Status { get; set; } = "approved";
+        public bool ConfirmSubmit { get; set; }
+    }
+
+    public sealed class SchemaReviewApprovalContract
+    {
+        public string TableId { get; set; } = "";
+        public string Branch { get; set; } = "";
+        public string Profile { get; set; } = "";
+        public string Status { get; set; } = "approved";
+        public string ApproverRole { get; set; } = "schemaReviewer";
+        public string ReviewComment { get; set; } = "";
+        public bool ConfirmSubmit { get; set; }
+    }
+
+    public sealed class WaiverApprovalContract
+    {
+        public string TableId { get; set; } = "__project_pr_gate__";
+        public string Branch { get; set; } = "";
+        public string Reason { get; set; } = "";
+        public string ExpiresAt { get; set; } = "";
+        public string ApprovedByRole { get; set; } = "configOwner";
+        public bool ConfirmApprove { get; set; }
+    }
+
+    public sealed class MergeReviewInputSummary
+    {
+        public string Fingerprint { get; set; } = "";
+        public string SourceBranch { get; set; } = "";
+        public string TargetBranch { get; set; } = "";
+        public string TableIdsText { get; set; } = "";
+        public List<string> TableIds { get; set; } = new List<string>();
+        public string PrNumber { get; set; } = "";
+        public string PrUrl { get; set; } = "";
+        public string MergeReportPath { get; set; } = "";
+        public string MergedPath { get; set; } = "";
     }
 
     public sealed class TargetBranchBootstrapContract
@@ -609,6 +667,13 @@ namespace ConfigSheetForge.Core
         Task<LifecycleActionResult> ApplyRegistryMigrationAsync(RegistryContract registry, RegistryMigrationPlan plan, CancellationToken cancellationToken);
     }
 
+    public interface IReviewRegistryPlatform
+    {
+        Task<LifecycleActionResult> UpsertMergeReviewAsync(RegistryContract registry, MergeReviewContract review, MergeReviewInputSummary summary, CancellationToken cancellationToken);
+        Task<LifecycleActionResult> UpsertSchemaReviewApprovalAsync(RegistryContract registry, SchemaReviewApprovalContract review, CancellationToken cancellationToken);
+        Task<LifecycleActionResult> UpsertWaiverApprovalAsync(RegistryContract registry, WaiverApprovalContract waiver, CancellationToken cancellationToken);
+    }
+
     public sealed class SheetCreationResult
     {
         public string SpreadsheetToken { get; set; } = "";
@@ -617,7 +682,7 @@ namespace ConfigSheetForge.Core
         public string WikiNodeToken { get; set; } = "";
     }
 
-    public sealed class PreviewLifecyclePlatform : ILifecyclePlatform, IBranchWorkspacePlatform
+    public sealed class PreviewLifecyclePlatform : ILifecyclePlatform, IBranchWorkspacePlatform, IReviewRegistryPlatform
     {
         public Task<RegistrySnapshot> GetRegistrySnapshotAsync(RegistryContract registry, CancellationToken cancellationToken)
         {
@@ -665,6 +730,33 @@ namespace ConfigSheetForge.Core
         public Task<LifecycleActionResult> ApplyRegistryMigrationAsync(RegistryContract registry, RegistryMigrationPlan plan, CancellationToken cancellationToken)
         {
             return Task.FromResult(Action("registry.migration.apply", "planned", "预览：应用注册中心本地化和默认数据清理。"));
+        }
+
+        public Task<LifecycleActionResult> UpsertMergeReviewAsync(RegistryContract registry, MergeReviewContract review, MergeReviewInputSummary summary, CancellationToken cancellationToken)
+        {
+            var action = Action("registry.merge_reviews.upsert", "planned", "预览：写入 MergeReviews 合并审查记录。");
+            action.Details["reviewId"] = FirstNonEmpty(review.ReviewId, "preview-merge-review-id");
+            action.Details["tableId"] = FirstNonEmpty(review.TableId, "__project_pr_gate__");
+            action.Details["sourceBranch"] = summary.SourceBranch;
+            action.Details["targetBranch"] = summary.TargetBranch;
+            action.Details["requestFingerprint"] = summary.Fingerprint;
+            return Task.FromResult(action);
+        }
+
+        public Task<LifecycleActionResult> UpsertSchemaReviewApprovalAsync(RegistryContract registry, SchemaReviewApprovalContract review, CancellationToken cancellationToken)
+        {
+            var action = Action("registry.schema_reviews.approve", "planned", "预览：更新 SchemaReviews 审查状态。");
+            action.Details["tableId"] = review.TableId;
+            action.Details["status"] = review.Status;
+            return Task.FromResult(action);
+        }
+
+        public Task<LifecycleActionResult> UpsertWaiverApprovalAsync(RegistryContract registry, WaiverApprovalContract waiver, CancellationToken cancellationToken)
+        {
+            var action = Action("registry.waivers.approve", "planned", "预览：写入/更新 Waivers 临时放行记录。");
+            action.Details["tableId"] = waiver.TableId;
+            action.Details["expiresAt"] = waiver.ExpiresAt;
+            return Task.FromResult(action);
         }
 
         public Task<BranchWorkspaceResolution> EnsureBranchWorkspaceAsync(BranchWorkspaceContract workspace, BranchWorkspaceResolution planned, CancellationToken cancellationToken)
@@ -761,6 +853,16 @@ namespace ConfigSheetForge.Core
                 case "compare-merge":
                     ApplyMergePolicy(request, result);
                     break;
+                case "submit-merge-review":
+                case "approve-merge-review":
+                    await SubmitMergeReviewAsync(request, platform, result, cancellationToken).ConfigureAwait(false);
+                    break;
+                case "approve-schema-review":
+                    await ApproveSchemaReviewAsync(request, platform, result, cancellationToken).ConfigureAwait(false);
+                    break;
+                case "approve-waiver":
+                    await ApproveWaiverAsync(request, platform, result, cancellationToken).ConfigureAwait(false);
+                    break;
                 case "pr-gate-report":
                     result.PrGateReport = PrGateReportEvaluator.Evaluate(request.GateReport);
                     result.Success = result.PrGateReport.Passed;
@@ -776,6 +878,64 @@ namespace ConfigSheetForge.Core
             }
 
             return result;
+        }
+
+        public static MergeReviewInputSummary BuildMergeReviewInputSummary(LifecycleContractRequest request, IEnumerable<string> tableIds)
+        {
+            request = request ?? new LifecycleContractRequest();
+            request.MergeInputs = request.MergeInputs ?? new MergeInputsContract();
+            request.MergeReview = request.MergeReview ?? new MergeReviewContract();
+            var tableSet = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var tableId in tableIds ?? Array.Empty<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(tableId))
+                {
+                    tableSet.Add(tableId.Trim());
+                }
+            }
+
+            foreach (var tableId in request.MergeReview.TableIds ?? new List<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(tableId))
+                {
+                    tableSet.Add(tableId.Trim());
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.MergeInputs.TableId))
+            {
+                tableSet.Add(request.MergeInputs.TableId.Trim());
+            }
+
+            var sourceBranch = FirstNonEmpty(request.MergeReview.SourceBranch, request.MergeInputs.SourceBranch, request.Git.Branch, request.BranchWorkspace.GitBranch, request.Git.FeishuBranch, request.Git.Profile);
+            var targetBranch = FirstNonEmpty(request.MergeReview.TargetBranch, request.MergeInputs.TargetBranch, request.BranchWorkspace.MainGitBranch, "main");
+            var prNumber = FirstNonEmpty(request.MergeReview.PrNumber, request.MergeInputs.PrNumber);
+            var prUrl = FirstNonEmpty(request.MergeReview.PrUrl, request.MergeInputs.PrUrl);
+            var mergeReportPath = FirstNonEmpty(request.MergeReview.MergeReportPath, request.MergeInputs.MergeReportPath, "Temp/ConfigSheetForge/merge-report.md");
+            var mergedPath = FirstNonEmpty(request.MergeReview.MergedPath, request.MergeInputs.MergedPath, "Temp/ConfigSheetForge/merged.semantic.json");
+
+            var basis = new StringBuilder();
+            basis.AppendLine("operation=compare-merge");
+            basis.AppendLine("sourceBranch=" + NormalizeFingerprintValue(sourceBranch));
+            basis.AppendLine("targetBranch=" + NormalizeFingerprintValue(targetBranch));
+            basis.AppendLine("tableIds=" + string.Join(",", tableSet.Select(NormalizeFingerprintValue)));
+            basis.AppendLine("prNumber=" + NormalizeFingerprintValue(prNumber));
+            basis.AppendLine("prUrl=" + NormalizeFingerprintValue(prUrl));
+            basis.AppendLine("mergeReportPath=" + NormalizeFingerprintValue(mergeReportPath));
+            basis.AppendLine("mergedPath=" + NormalizeFingerprintValue(mergedPath));
+
+            return new MergeReviewInputSummary
+            {
+                Fingerprint = Sha256Hex(basis.ToString()),
+                SourceBranch = sourceBranch,
+                TargetBranch = targetBranch,
+                TableIds = tableSet.ToList(),
+                TableIdsText = string.Join(", ", tableSet),
+                PrNumber = prNumber,
+                PrUrl = prUrl,
+                MergeReportPath = mergeReportPath,
+                MergedPath = mergedPath
+            };
         }
 
         public static IList<IList<string>> BuildExcelToSoTemplateRows(ContractTableSpec table)
@@ -985,6 +1145,7 @@ namespace ConfigSheetForge.Core
 
             var compareAction = result.AddAction("merge.compare", result.Success ? "planned" : "blocked", result.Success ? "预览：执行三方一致性/冲突检查，并生成合并报告。" : "在线表定位或表范围未就绪，已阻断三方比较。");
             AddMergePlanDetails(compareAction, request, branchWorkspace, targetWorkspace, tableIds, missingSourceTables, missingTargetTables, missingSourceLocators, missingTargetLocators);
+            ApplyMergeReviewRequestSummary(result, BuildMergeReviewInputSummaryForWorkspaces(request, tableIds, branchWorkspace, targetWorkspace));
 
             result.DocumentationTargets["sourceWikiNodeUrl"] = branchWorkspace.WikiNodeUrl;
             result.DocumentationTargets["targetWikiNodeUrl"] = FirstNonEmpty(targetWorkspace.WikiNodeUrl, request.MergeInputs.TargetBranchWikiNodeUrl);
@@ -1018,6 +1179,182 @@ namespace ConfigSheetForge.Core
                 var write = result.AddAction("merge.write_main", "ready", "已确认写回 main；执行前仍需通过冲突检查、Schema review 和 MergeReviews。");
                 AddMergePlanDetails(write, request, branchWorkspace, targetWorkspace, tableIds, missingSourceTables, missingTargetTables, missingSourceLocators, missingTargetLocators);
             }
+        }
+
+        private static async Task SubmitMergeReviewAsync(LifecycleContractRequest request, ILifecyclePlatform platform, LifecycleContractResult result, CancellationToken cancellationToken)
+        {
+            request.MergeReview = request.MergeReview ?? new MergeReviewContract();
+            request.MergeInputs = request.MergeInputs ?? new MergeInputsContract();
+            if (string.IsNullOrWhiteSpace(request.MergeReview.TableId))
+            {
+                request.MergeReview.TableId = "__project_pr_gate__";
+            }
+
+            request.MergeReview.SourceBranch = FirstNonEmpty(request.MergeReview.SourceBranch, request.MergeInputs.SourceBranch, request.Git.Branch, request.BranchWorkspace.GitBranch);
+            request.MergeReview.TargetBranch = FirstNonEmpty(request.MergeReview.TargetBranch, request.MergeInputs.TargetBranch, request.BranchWorkspace.MainGitBranch, "main");
+            request.MergeReview.PrNumber = FirstNonEmpty(request.MergeReview.PrNumber, request.MergeInputs.PrNumber);
+            request.MergeReview.PrUrl = FirstNonEmpty(request.MergeReview.PrUrl, request.MergeInputs.PrUrl);
+            request.MergeReview.MergeReportPath = FirstNonEmpty(request.MergeReview.MergeReportPath, request.MergeInputs.MergeReportPath, "Temp/ConfigSheetForge/merge-report.md");
+            request.MergeReview.MergedPath = FirstNonEmpty(request.MergeReview.MergedPath, request.MergeInputs.MergedPath, "Temp/ConfigSheetForge/merged.semantic.json");
+            request.MergeReview.ApproverRole = FirstNonEmpty(request.MergeReview.ApproverRole, request.MergePolicy.ApprovedByRole, "configOwner");
+            request.MergeReview.Status = FirstNonEmpty(request.MergeReview.Status, "approved");
+
+            var summary = BuildMergeReviewInputSummary(request, request.MergeReview.TableIds);
+            ApplyMergeReviewRequestSummary(result, summary);
+            result.DocumentationTargets["mergeReportPath"] = summary.MergeReportPath;
+            result.DocumentationTargets["mergedPath"] = summary.MergedPath;
+
+            var required = FirstNonEmpty(request.MergeReview.RequestFingerprint, request.MergeReview.RequiredPreviewFingerprint, request.RequiredPreviewFingerprint);
+            if (!string.IsNullOrWhiteSpace(required) &&
+                !string.Equals(required, summary.Fingerprint, StringComparison.OrdinalIgnoreCase))
+            {
+                result.AddFailure("提交合并审查记录的输入和最近一次合并预览不一致。请重新生成合并预览，再提交审查记录。");
+                return;
+            }
+
+            if (!request.DryRun && !request.MergeReview.ConfirmSubmit)
+            {
+                result.AddFailure("提交 MergeReviews 会写入 Base，必须在 Unity 窗口确认，或在 contract.mergeReview.confirmSubmit=true。");
+                return;
+            }
+
+            var reviewPlatform = request.DryRun ? new PreviewLifecyclePlatform() as IReviewRegistryPlatform : platform as IReviewRegistryPlatform;
+            if (reviewPlatform == null)
+            {
+                result.AddFailure("当前执行平台不支持写入 MergeReviews。请使用 config-sheet-forge CLI apply-contract，或升级项目 adapter。");
+                return;
+            }
+
+            var action = await reviewPlatform.UpsertMergeReviewAsync(request.Registry, request.MergeReview, summary, cancellationToken).ConfigureAwait(false);
+            result.Actions.Add(action);
+            if (!string.Equals(action.Status, "done", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(action.Status, "planned", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(action.Status, "reused", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(action.Status, "updated", StringComparison.OrdinalIgnoreCase))
+            {
+                result.AddFailure(FirstNonEmpty(action.Message, "MergeReviews 写入失败。请展开详细日志查看 Base 字段和权限。"));
+            }
+            else
+            {
+                var summaryAction = result.AddAction("merge_review.summary", request.DryRun ? "planned" : "done", request.DryRun ? "预览：合并审查记录可提交。" : "合并审查记录已提交；现在可以重新运行 PR 检查。");
+                summaryAction.Details["reviewId"] = FirstNonEmpty(action.Details.TryGetValue("reviewId", out var reviewId) ? reviewId : "", request.MergeReview.ReviewId);
+                summaryAction.Details["recordId"] = action.Details.TryGetValue("recordId", out var recordId) ? recordId : "";
+                summaryAction.Details["requestFingerprint"] = summary.Fingerprint;
+                summaryAction.Details["writesMain"] = "false";
+                summaryAction.Details["writesLocalCache"] = "false";
+                summaryAction.Details["writesProjectSettings"] = "false";
+                summaryAction.Details["writesExcelToSo"] = "false";
+            }
+        }
+
+        private static async Task ApproveSchemaReviewAsync(LifecycleContractRequest request, ILifecyclePlatform platform, LifecycleContractResult result, CancellationToken cancellationToken)
+        {
+            request.SchemaReviewApproval = request.SchemaReviewApproval ?? new SchemaReviewApprovalContract();
+            request.SchemaReviewApproval.Branch = FirstNonEmpty(request.SchemaReviewApproval.Branch, request.Git.FeishuBranch, request.Git.Profile, request.Git.Branch);
+            request.SchemaReviewApproval.Profile = FirstNonEmpty(request.SchemaReviewApproval.Profile, request.Git.Profile, request.Git.FeishuBranch, request.Git.Branch);
+            if (string.IsNullOrWhiteSpace(request.SchemaReviewApproval.TableId))
+            {
+                result.AddFailure("Schema 审查需要指定配表 ID。");
+                return;
+            }
+
+            if (!request.DryRun && !request.SchemaReviewApproval.ConfirmSubmit)
+            {
+                result.AddFailure("提交 SchemaReviews 审查结果会写入 Base，必须先确认。");
+                return;
+            }
+
+            var reviewPlatform = request.DryRun ? new PreviewLifecyclePlatform() as IReviewRegistryPlatform : platform as IReviewRegistryPlatform;
+            if (reviewPlatform == null)
+            {
+                result.AddFailure("当前执行平台不支持更新 SchemaReviews。");
+                return;
+            }
+
+            var action = await reviewPlatform.UpsertSchemaReviewApprovalAsync(request.Registry, request.SchemaReviewApproval, cancellationToken).ConfigureAwait(false);
+            result.Actions.Add(action);
+            if (!string.Equals(action.Status, "done", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(action.Status, "planned", StringComparison.OrdinalIgnoreCase))
+            {
+                result.AddFailure(FirstNonEmpty(action.Message, "SchemaReviews 更新失败。"));
+            }
+        }
+
+        private static async Task ApproveWaiverAsync(LifecycleContractRequest request, ILifecyclePlatform platform, LifecycleContractResult result, CancellationToken cancellationToken)
+        {
+            request.WaiverApproval = request.WaiverApproval ?? new WaiverApprovalContract();
+            request.WaiverApproval.Branch = FirstNonEmpty(request.WaiverApproval.Branch, request.Git.Branch, request.Git.FeishuBranch, request.Git.Profile);
+            if (string.IsNullOrWhiteSpace(request.WaiverApproval.Reason))
+            {
+                result.AddFailure("申请 waiver 必须填写原因。");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.WaiverApproval.ExpiresAt))
+            {
+                result.AddFailure("申请 waiver 必须填写过期时间。");
+            }
+
+            if (!string.Equals(request.WaiverApproval.ApprovedByRole, "configOwner", StringComparison.OrdinalIgnoreCase))
+            {
+                result.AddFailure("批准 waiver 需要配置负责人角色 configOwner。");
+            }
+
+            if (!result.Success)
+            {
+                return;
+            }
+
+            if (!request.DryRun && !request.WaiverApproval.ConfirmApprove)
+            {
+                result.AddFailure("批准 waiver 会写入 Base，必须先确认。");
+                return;
+            }
+
+            var reviewPlatform = request.DryRun ? new PreviewLifecyclePlatform() as IReviewRegistryPlatform : platform as IReviewRegistryPlatform;
+            if (reviewPlatform == null)
+            {
+                result.AddFailure("当前执行平台不支持写入 Waivers。");
+                return;
+            }
+
+            var action = await reviewPlatform.UpsertWaiverApprovalAsync(request.Registry, request.WaiverApproval, cancellationToken).ConfigureAwait(false);
+            result.Actions.Add(action);
+            if (!string.Equals(action.Status, "done", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(action.Status, "planned", StringComparison.OrdinalIgnoreCase))
+            {
+                result.AddFailure(FirstNonEmpty(action.Message, "Waivers 更新失败。"));
+            }
+        }
+
+        private static MergeReviewInputSummary BuildMergeReviewInputSummaryForWorkspaces(LifecycleContractRequest request, IEnumerable<string> tableIds, BranchWorkspaceResolution sourceWorkspace, BranchWorkspaceResolution targetWorkspace)
+        {
+            request.MergeReview = request.MergeReview ?? new MergeReviewContract();
+            var previousSource = request.MergeReview.SourceBranch;
+            var previousTarget = request.MergeReview.TargetBranch;
+            request.MergeReview.SourceBranch = FirstNonEmpty(request.MergeReview.SourceBranch, sourceWorkspace == null ? "" : sourceWorkspace.GitBranch);
+            request.MergeReview.TargetBranch = FirstNonEmpty(request.MergeReview.TargetBranch, targetWorkspace == null ? "" : targetWorkspace.GitBranch);
+            var summary = BuildMergeReviewInputSummary(request, tableIds);
+            request.MergeReview.SourceBranch = previousSource;
+            request.MergeReview.TargetBranch = previousTarget;
+            return summary;
+        }
+
+        private static void ApplyMergeReviewRequestSummary(LifecycleContractResult result, MergeReviewInputSummary summary)
+        {
+            if (result == null || summary == null)
+            {
+                return;
+            }
+
+            result.RequestFingerprint = summary.Fingerprint;
+            result.RequestSummary["sourceBranch"] = summary.SourceBranch;
+            result.RequestSummary["targetBranch"] = summary.TargetBranch;
+            result.RequestSummary["tableIds"] = summary.TableIdsText;
+            result.RequestSummary["tableCount"] = summary.TableIds.Count.ToString(CultureInfo.InvariantCulture);
+            result.RequestSummary["prNumber"] = summary.PrNumber;
+            result.RequestSummary["prUrl"] = summary.PrUrl;
+            result.RequestSummary["mergeReportPath"] = summary.MergeReportPath;
+            result.RequestSummary["mergedPath"] = summary.MergedPath;
         }
 
         private static LifecycleContractRequest BuildTargetMergeRequest(LifecycleContractRequest sourceRequest)
@@ -1257,6 +1594,26 @@ namespace ConfigSheetForge.Core
             }
 
             return "";
+        }
+
+        private static string NormalizeFingerprintValue(string value)
+        {
+            return (value ?? "").Replace("\\", "/").Trim();
+        }
+
+        private static string Sha256Hex(string value)
+        {
+            using (var sha = SHA256.Create())
+            {
+                var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value ?? ""));
+                var builder = new StringBuilder(bytes.Length * 2);
+                foreach (var b in bytes)
+                {
+                    builder.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+                }
+
+                return builder.ToString();
+            }
         }
     }
 
@@ -2019,6 +2376,10 @@ namespace ConfigSheetForge.Core
     {
         public string Status { get; set; } = "";
         public string RecordId { get; set; } = "";
+        public string ReviewId { get; set; } = "";
+        public string ApproverRole { get; set; } = "";
+        public string GitBranch { get; set; } = "";
+        public string TableId { get; set; } = "";
         public string Message { get; set; } = "";
     }
 
@@ -2035,6 +2396,8 @@ namespace ConfigSheetForge.Core
         public string ApprovedByRole { get; set; } = "";
         public string ExpiresAt { get; set; } = "";
         public string Branch { get; set; } = "";
+        public string TableId { get; set; } = "";
+        public string Reason { get; set; } = "";
         public string RecordId { get; set; } = "";
     }
 
@@ -2141,11 +2504,15 @@ namespace ConfigSheetForge.Core
             }
         }
 
-        private static bool ReviewPassed(string status)
+        public static bool ReviewPassed(string status)
         {
             return string.Equals(status, "approved", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(status, "passed", StringComparison.OrdinalIgnoreCase);
+                   string.Equals(status, "passed", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(status, "通过", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(status, "已通过", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(status, "完成", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(status, "已完成", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void Add(PrGateReport report, string message)

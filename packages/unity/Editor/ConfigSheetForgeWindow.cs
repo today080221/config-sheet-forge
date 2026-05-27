@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.18";
+        private const string PackageVersion = "v0.4.19";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -148,6 +149,17 @@ namespace ConfigSheetForge.Unity.Editor
         private string _lastCommand = "";
         private string _lastResultPath = "";
         private string _lastLifecycleDir = "";
+        private string _lastCompareMergeResultPath = "";
+        private string _lastCompareMergeRequestFingerprint = "";
+        private string _mergeReviewComment = "";
+        private bool _highlightMergeReview;
+        private bool _showSchemaReviewEntry;
+        private bool _showWaiverEntry;
+        private string _schemaReviewTableId = "";
+        private string _schemaReviewComment = "";
+        private string _waiverTableId = "__project_pr_gate__";
+        private string _waiverReason = "";
+        private string _waiverExpiresAt = "";
         private string _lastCompletedOperation = "";
         private string _lastCompletedInputFingerprint = "";
         private bool _lastCompletedDryRun;
@@ -505,6 +517,22 @@ namespace ConfigSheetForge.Unity.Editor
                 return "PR 检查";
             }
 
+            if (string.Equals(operation, "submit-merge-review", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(operation, "approve-merge-review", StringComparison.OrdinalIgnoreCase))
+            {
+                return "提交合并审查记录";
+            }
+
+            if (string.Equals(operation, "approve-schema-review", StringComparison.OrdinalIgnoreCase))
+            {
+                return "处理 Schema 审查";
+            }
+
+            if (string.Equals(operation, "approve-waiver", StringComparison.OrdinalIgnoreCase))
+            {
+                return "批准 waiver";
+            }
+
             if (string.Equals(operation, "seed-from-local-xlsx", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(operation, "bootstrap-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
             {
@@ -544,6 +572,22 @@ namespace ConfigSheetForge.Unity.Editor
             if (string.Equals(job.Operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase))
             {
                 return "安全性：初始化目标分支按分项确认写入；未勾选的 cache、ProjectSettings、ExcelToSO 不会写。";
+            }
+
+            if (string.Equals(job.Operation, "submit-merge-review", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(job.Operation, "approve-merge-review", StringComparison.OrdinalIgnoreCase))
+            {
+                return "安全性：只写 Base MergeReviews，不写 main、不写本地 cache、不改 ProjectSettings 或 ExcelToSO。";
+            }
+
+            if (string.Equals(job.Operation, "approve-schema-review", StringComparison.OrdinalIgnoreCase))
+            {
+                return "安全性：只写 Base SchemaReviews，不写 main、不写本地 cache、不改 ProjectSettings 或 ExcelToSO。";
+            }
+
+            if (string.Equals(job.Operation, "approve-waiver", StringComparison.OrdinalIgnoreCase))
+            {
+                return "安全性：只写 Base Waivers；waiver 必须有原因和过期时间，不会写 main 或 cache。";
             }
 
             return "安全性：后台任务已通过 UI 确认，完成后按钮会自动恢复。";
@@ -870,7 +914,9 @@ namespace ConfigSheetForge.Unity.Editor
         {
             if (LastPreviewPassed("compare-merge"))
             {
-                return "最近一次合并预览有效，下一步可以运行 PR 检查；如果缺 MergeReviews，请找配置负责人补审查记录。";
+                return GateHasMergeReviewFailure()
+                    ? "最近一次合并预览有效；PR gate 缺合并审查记录，下一步点“提交合并审查记录”。"
+                    : "最近一次合并预览有效，下一步可以提交合并审查记录或运行 PR 检查。";
             }
 
             if (LastPreviewPassed("sync-cache") && !CacheLooksFresh(projectRoot))
@@ -901,6 +947,15 @@ namespace ConfigSheetForge.Unity.Editor
         {
             if (LastPreviewPassed("compare-merge"))
             {
+                if (GateHasMergeReviewFailure() || CanSubmitMergeReview())
+                {
+                    return new DashboardAction(
+                        "提交合并审查记录",
+                        "写入 Base MergeReviews；不写 main、不写 cache。",
+                        "中风险：会写在线注册中心 MergeReviews，必须确认且最近一次合并预览通过。",
+                        () => { _selectedTab = MergeTab; _highlightMergeReview = true; });
+                }
+
                 return new DashboardAction(
                     "运行 PR 检查",
                     "合并预览有效后生成 pr-gate-report。",
@@ -941,6 +996,12 @@ namespace ConfigSheetForge.Unity.Editor
                 "读取当前分支在线注册中心并生成 sync-cache dry-run。",
                 "安全：只读取，不写飞书、不改本地 cache、不改 ProjectSettings。",
                 () => RunSyncCache(apply: false));
+        }
+
+        private bool GateHasMergeReviewFailure()
+        {
+            return _gateReportSummary != null &&
+                   _gateReportSummary.Failures.Any(f => f.IsMergeReviewMissing);
         }
 
         private DashboardAction BuildSecondaryDashboardAction(string projectRoot, string primaryLabel)
@@ -1272,6 +1333,19 @@ namespace ConfigSheetForge.Unity.Editor
                     RunProjectLifecycle("compare-merge", dryRun: true);
                 }
 
+                var reviewReady = CanSubmitMergeReview();
+                if (DrawJobButton(new GUIContent("提交合并审查记录", "写入 Base MergeReviews；不写 main、不写本地 cache、不改 ProjectSettings。"), reviewReady, GUILayout.Height(28)))
+                {
+                    if (EditorUtility.DisplayDialog(
+                        "提交合并审查记录",
+                        "这一步会写入 Base 的 MergeReviews，表示负责人已经审过最近一次合并预览。\n\n不会写回 main。\n不会写本地 cache。\n不会改 ProjectSettings。\n不会改 ExcelToSO。\n\n如果合并预览不是刚刚这次输入生成的，CLI 会阻断写入。",
+                        "提交审查记录",
+                        "取消"))
+                    {
+                        RunSubmitMergeReview();
+                    }
+                }
+
                 if (DrawJobButton(new GUIContent("确认写回 main", "危险操作：必须勾选申请写回、确认写回，并且最近一次合并预览成功。"), mergeWriteReady, GUILayout.Height(28)))
                 {
                     if (EditorUtility.DisplayDialog("确认写回 main", "将按项目 adapter 的 compare-merge contract 执行写回。请确认预览已经通过。", "确认执行", "取消"))
@@ -1280,6 +1354,7 @@ namespace ConfigSheetForge.Unity.Editor
                     }
                 }
                 EditorGUILayout.EndHorizontal();
+                DrawMergeReviewSubmitCard(reviewReady);
                 EditorGUILayout.EndVertical();
                 return;
             }
@@ -1325,6 +1400,86 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.LabelField(BuildGateStatusText(), EditorStyles.wordWrappedMiniLabel, GUILayout.MinWidth(220));
             EditorGUILayout.EndHorizontal();
             DrawGateReportCards();
+            DrawGateActionPanel();
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawGateActionPanel()
+        {
+            if (_gateReportSummary == null || !_gateReportSummary.HasReport || GateLooksPassed())
+            {
+                return;
+            }
+
+            GUILayout.Space(6);
+            EditorGUILayout.LabelField("可执行处理", EditorStyles.boldLabel);
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button(new GUIContent("处理 Schema 审查", "写入 Base SchemaReviews，不写 main 或 cache。"), GUILayout.Height(26)))
+            {
+                _showSchemaReviewEntry = !_showSchemaReviewEntry;
+            }
+
+            if (GUILayout.Button(new GUIContent("申请/批准 waiver", "写入 Base Waivers，必须填写原因和过期时间。"), GUILayout.Height(26)))
+            {
+                _showWaiverEntry = !_showWaiverEntry;
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (_showSchemaReviewEntry)
+            {
+                DrawSchemaReviewEntry();
+            }
+
+            if (_showWaiverEntry)
+            {
+                DrawWaiverEntry();
+            }
+        }
+
+        private void DrawSchemaReviewEntry()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("提交 Schema 审查结果", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("用于 schema 变化已经由负责人确认的情况。只写 Base SchemaReviews，不写 main、不写本地 cache。", EditorStyles.wordWrappedMiniLabel);
+            _schemaReviewTableId = EditorGUILayout.TextField(new GUIContent("配表ID", "要批准 schema 变化的配表 ID。"), _schemaReviewTableId);
+            _schemaReviewComment = EditorGUILayout.TextField(new GUIContent("审查备注", "可选。说明本次 schema 审查结论。"), _schemaReviewComment);
+            var ready = !string.IsNullOrWhiteSpace(_schemaReviewTableId);
+            if (!ready)
+            {
+                EditorGUILayout.HelpBox("请先填写配表ID。", MessageType.Info);
+            }
+
+            if (DrawJobButton(new GUIContent("批准 Schema 审查", "写入 SchemaReviews 状态 approved。"), ready, GUILayout.Height(26)))
+            {
+                if (EditorUtility.DisplayDialog("批准 Schema 审查", "将写入 Base SchemaReviews，状态为 approved。\n\n不会写 main。\n不会写本地 cache。\n不会改 ProjectSettings 或 ExcelToSO。", "确认写入", "取消"))
+                {
+                    RunSimpleReviewLifecycle("approve-schema-review");
+                }
+            }
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawWaiverEntry()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("申请/批准临时放行", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("waiver 必须有原因和过期时间，只能由配置负责人批准；默认 strict bot，不会用 user 身份绕过 gate。", EditorStyles.wordWrappedMiniLabel);
+            _waiverTableId = EditorGUILayout.TextField(new GUIContent("适用 TableId", "项目级放行用 __project_pr_gate__，单表放行填具体 TableId。"), FirstNonEmpty(_waiverTableId, "__project_pr_gate__"));
+            _waiverReason = EditorGUILayout.TextField(new GUIContent("原因", "必填。说明为什么需要临时放行。"), _waiverReason);
+            _waiverExpiresAt = EditorGUILayout.TextField(new GUIContent("过期时间", "必填。建议使用 ISO 时间，例如 2026-05-27T18:00:00+08:00。"), _waiverExpiresAt);
+            var ready = !string.IsNullOrWhiteSpace(_waiverReason) && !string.IsNullOrWhiteSpace(_waiverExpiresAt);
+            if (!ready)
+            {
+                EditorGUILayout.HelpBox("请填写原因和过期时间。", MessageType.Info);
+            }
+
+            if (DrawJobButton(new GUIContent("配置负责人批准 waiver", "写入 Waivers；过期后 gate 会重新阻断。"), ready, GUILayout.Height(26)))
+            {
+                if (EditorUtility.DisplayDialog("批准 waiver", "将写入 Base Waivers，批准角色为 configOwner。\n\n不会写 main。\n不会写本地 cache。\n不会改 ProjectSettings 或 ExcelToSO。", "确认写入", "取消"))
+                {
+                    RunSimpleReviewLifecycle("approve-waiver");
+                }
+            }
             EditorGUILayout.EndVertical();
         }
 
@@ -1361,11 +1516,47 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndVertical();
         }
 
-        private static void DrawGateFailureCard(GateFailureView failure)
+        private void DrawGateFailureCard(GateFailureView failure)
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("原因：" + failure.Reason, EditorStyles.wordWrappedLabel);
             EditorGUILayout.LabelField("下一步：" + failure.NextStep, EditorStyles.wordWrappedLabel);
+            if (failure.IsMergeReviewMissing)
+            {
+                EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button(new GUIContent("去合并页提交审查记录", "先确认最近一次合并预览，再写入 Base MergeReviews。"), GUILayout.Height(26)))
+                {
+                    _selectedTab = MergeTab;
+                    _highlightMergeReview = true;
+                }
+
+                if (GUILayout.Button(new GUIContent("生成合并预览", "只读预览，不写 main、不写 cache。"), GUILayout.Width(116), GUILayout.Height(26)))
+                {
+                    _selectedTab = MergeTab;
+                    RunProjectLifecycle("compare-merge", dryRun: true);
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            else if (failure.IsSchemaReviewMissing)
+            {
+                EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button(new GUIContent("处理 Schema 审查", "查看/提交 SchemaReviews 审查结果。"), GUILayout.Height(26)))
+                {
+                    _selectedTab = GateTab;
+                    _showSchemaReviewEntry = true;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            else if (failure.IsWaiverProblem)
+            {
+                EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button(new GUIContent("申请/更新 waiver", "waiver 必须填写原因和过期时间，并由配置负责人批准。"), GUILayout.Height(26)))
+                {
+                    _selectedTab = GateTab;
+                    _showWaiverEntry = true;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
             EditorGUILayout.EndVertical();
         }
 
@@ -2430,6 +2621,31 @@ namespace ConfigSheetForge.Unity.Editor
             return string.Join(",", ids);
         }
 
+        private string BuildCompareMergeReviewTableIdsCsv()
+        {
+            if (!string.IsNullOrWhiteSpace(_mergeTableId))
+            {
+                return _mergeTableId.Trim();
+            }
+
+            var ids = new List<string>();
+            var source = _projectConfig.CurrentBranchTables != null && _projectConfig.CurrentBranchTables.Count > 0
+                ? _projectConfig.CurrentBranchTables
+                : _projectConfig.Tables;
+            if (source != null)
+            {
+                foreach (var table in source)
+                {
+                    if (!string.IsNullOrWhiteSpace(table.TableId) && !ids.Contains(table.TableId))
+                    {
+                        ids.Add(table.TableId);
+                    }
+                }
+            }
+
+            return string.Join(",", ids);
+        }
+
         private void DrawProjectLifecycleCard(string title, string body, string buttonLabel, string operation, bool dryRun, bool includeNewTableSteps)
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
@@ -2821,6 +3037,7 @@ namespace ConfigSheetForge.Unity.Editor
                 _lastCompletedDryRun = _activeJob.DryRun;
                 _lastCompletedSuccess = _activeJob.Success;
                 _lastCompletedInputFingerprint = _activeJob.InputFingerprint;
+                CaptureCompletedLifecycleResult(_activeJob);
                 SetBottomOutputExpanded(false, persist: false);
                 _showDetailedLogs = false;
                 _activeJob = null;
@@ -2978,6 +3195,30 @@ namespace ConfigSheetForge.Unity.Editor
                    _lastCompletedDryRun &&
                    string.Equals(_lastCompletedOperation, operation, StringComparison.OrdinalIgnoreCase) &&
                    string.Equals(_lastCompletedInputFingerprint, BuildOperationFingerprint(operation), StringComparison.Ordinal);
+        }
+
+        private void CaptureCompletedLifecycleResult(ConfigSheetForgeBackgroundJob job)
+        {
+            if (job == null || string.IsNullOrWhiteSpace(job.ResultPath) || !File.Exists(job.ResultPath))
+            {
+                return;
+            }
+
+            if (string.Equals(job.Operation, "compare-merge", StringComparison.OrdinalIgnoreCase) && job.DryRun && job.Success)
+            {
+                var json = File.ReadAllText(job.ResultPath);
+                var fingerprint = ExtractJsonString(json, "requestFingerprint");
+                if (!string.IsNullOrWhiteSpace(fingerprint))
+                {
+                    _lastCompareMergeResultPath = job.ResultPath;
+                    _lastCompareMergeRequestFingerprint = fingerprint;
+                }
+            }
+
+            if (string.Equals(job.Operation, "submit-merge-review", StringComparison.OrdinalIgnoreCase) && job.Success)
+            {
+                _highlightMergeReview = false;
+            }
         }
 
         private string BuildOperationFingerprint(string operation)
@@ -3360,6 +3601,221 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 RunCliInternal(true, "gate", "--details", "--report", ResolveGateReportPath(FindProjectRoot()));
             }
+        }
+
+        private bool CanSubmitMergeReview()
+        {
+            return _projectConfig.Exists &&
+                   LastPreviewPassed("compare-merge") &&
+                   !string.IsNullOrWhiteSpace(_lastCompareMergeResultPath) &&
+                   File.Exists(_lastCompareMergeResultPath) &&
+                   !string.IsNullOrWhiteSpace(_lastCompareMergeRequestFingerprint);
+        }
+
+        private void DrawMergeReviewSubmitCard(bool reviewReady)
+        {
+            var previousColor = GUI.color;
+            if (_highlightMergeReview)
+            {
+                GUI.color = new Color(1f, 0.92f, 0.65f);
+            }
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.color = previousColor;
+            EditorGUILayout.LabelField("合并审查记录", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("“生成合并预览”只是看差异；“提交合并审查记录”会写 Base MergeReviews，让 PR gate 能知道这次预览已经审过。", EditorStyles.wordWrappedLabel);
+            if (reviewReady)
+            {
+                EditorGUILayout.LabelField("最近一次合并预览有效，可以提交审查记录。", EditorStyles.wordWrappedMiniLabel);
+                if (_programView)
+                {
+                    DrawReadonlyRow("预览 result", _lastCompareMergeResultPath, "提交时会校验这个 result 的 requestFingerprint。");
+                    DrawReadonlyRow("指纹", _lastCompareMergeRequestFingerprint, "CLI 会用它防止审查记录和预览输入不一致。");
+                }
+            }
+            else
+            {
+                EditorGUILayout.HelpBox("请先点击“生成合并预览”，预览成功后才可以提交合并审查记录。", MessageType.Info);
+            }
+
+            _mergeReviewComment = EditorGUILayout.TextField(new GUIContent("审查备注", "可选。写给 MergeReviews 的说明。"), _mergeReviewComment);
+            EditorGUILayout.EndVertical();
+        }
+
+        private void RunSubmitMergeReview()
+        {
+            if (!CanSubmitMergeReview())
+            {
+                SetImmediateOutput("还不能提交合并审查记录。", "请先生成合并预览，并确认预览成功后再提交审查记录。");
+                return;
+            }
+
+            var projectRoot = FindProjectRoot();
+            var workDir = GetUnityLifecycleDirectory(projectRoot);
+            Directory.CreateDirectory(workDir);
+            var requestPath = Path.Combine(workDir, "submit-merge-review.contract.json");
+            var resultPath = Path.Combine(workDir, "submit-merge-review.result.json");
+            File.WriteAllText(requestPath, BuildSubmitMergeReviewRequestJson(), Utf8NoBom);
+
+            var cli = ResolveCoreCli(projectRoot);
+            var args = new List<string>
+            {
+                "apply-contract",
+                "--request",
+                requestPath,
+                "--out",
+                resultPath,
+                "--preview-result",
+                _lastCompareMergeResultPath,
+                "--confirm"
+            };
+            _lastCommand = cli.ToCommandLine(args);
+            if (!cli.CanLaunch)
+            {
+                SetImmediateOutput(ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig), "");
+                return;
+            }
+
+            StartBackgroundJob(ConfigSheetForgeBackgroundJob.CreateSingleProcess(
+                "submit-merge-review",
+                dryRun: false,
+                commandLine: _lastCommand,
+                executable: cli.Executable,
+                arguments: cli.BuildArguments(args.ToArray()),
+                workingDirectory: projectRoot,
+                resultPath: resultPath,
+                lifecycleDirectory: workDir,
+                refreshReadonlyStatusOnComplete: true,
+                projectConfig: _projectConfig));
+        }
+
+        private string BuildSubmitMergeReviewRequestJson()
+        {
+            var tableIds = BuildCompareMergeReviewTableIdsCsv();
+            var sourceBranch = FirstNonEmpty(_mergeSourceBranch, _currentGitBranch, _projectConfig.GitBranch);
+            var targetBranch = FirstNonEmpty(_targetBranch, _defaultTargetBranch, "main");
+            var builder = new StringBuilder();
+            builder.AppendLine("{");
+            AppendJsonProperty(builder, "operation", "submit-merge-review", comma: true);
+            AppendJsonProperty(builder, "locale", "zh-Hans", comma: true);
+            AppendJsonProperty(builder, "dryRun", false, comma: true);
+            builder.AppendLine("  \"registry\": {");
+            AppendNestedJsonProperty(builder, "baseToken", _projectConfig.RegistryBaseToken, comma: true);
+            AppendNestedJsonProperty(builder, "baseUrl", _projectConfig.RegistryBaseUrl, comma: false);
+            builder.AppendLine("  },");
+            builder.AppendLine("  \"git\": {");
+            AppendNestedJsonProperty(builder, "branch", sourceBranch, comma: true);
+            AppendNestedJsonProperty(builder, "head", "", comma: false);
+            builder.AppendLine("  },");
+            builder.AppendLine("  \"mergeInputs\": {");
+            AppendNestedJsonProperty(builder, "sourceBranch", sourceBranch, comma: true);
+            AppendNestedJsonProperty(builder, "targetBranch", targetBranch, comma: true);
+            AppendNestedJsonProperty(builder, "prNumber", _prNumber, comma: true);
+            AppendNestedJsonProperty(builder, "prUrl", _prUrl, comma: true);
+            AppendNestedJsonProperty(builder, "mergeReportPath", _mergeReportPath, comma: true);
+            AppendNestedJsonProperty(builder, "mergedPath", _mergedPath, comma: false);
+            builder.AppendLine("  },");
+            builder.AppendLine("  \"mergeReview\": {");
+            AppendNestedJsonProperty(builder, "sourceBranch", sourceBranch, comma: true);
+            AppendNestedJsonProperty(builder, "targetBranch", targetBranch, comma: true);
+            AppendNestedJsonArrayProperty(builder, "tableIds", tableIds, comma: true);
+            AppendNestedJsonProperty(builder, "tableId", "__project_pr_gate__", comma: true);
+            AppendNestedJsonProperty(builder, "prNumber", _prNumber, comma: true);
+            AppendNestedJsonProperty(builder, "prUrl", _prUrl, comma: true);
+            AppendNestedJsonProperty(builder, "mergeReportPath", _mergeReportPath, comma: true);
+            AppendNestedJsonProperty(builder, "mergedPath", _mergedPath, comma: true);
+            AppendNestedJsonProperty(builder, "requestFingerprint", _lastCompareMergeRequestFingerprint, comma: true);
+            AppendNestedJsonProperty(builder, "requiredPreviewFingerprint", _lastCompareMergeRequestFingerprint, comma: true);
+            AppendNestedJsonProperty(builder, "previewResultPath", _lastCompareMergeResultPath, comma: true);
+            AppendNestedJsonProperty(builder, "approverRole", "configOwner", comma: true);
+            AppendNestedJsonProperty(builder, "reviewComment", _mergeReviewComment, comma: true);
+            AppendNestedJsonProperty(builder, "status", "approved", comma: true);
+            AppendNestedJsonProperty(builder, "confirmSubmit", true, comma: false);
+            builder.AppendLine("  }");
+            builder.AppendLine("}");
+            return builder.ToString();
+        }
+
+        private void RunSimpleReviewLifecycle(string operation)
+        {
+            var projectRoot = FindProjectRoot();
+            var workDir = GetUnityLifecycleDirectory(projectRoot);
+            Directory.CreateDirectory(workDir);
+            var requestPath = Path.Combine(workDir, operation + ".contract.json");
+            var resultPath = Path.Combine(workDir, operation + ".result.json");
+            File.WriteAllText(requestPath, BuildSimpleReviewRequestJson(operation), Utf8NoBom);
+
+            var cli = ResolveCoreCli(projectRoot);
+            var args = new List<string>
+            {
+                "apply-contract",
+                "--request",
+                requestPath,
+                "--out",
+                resultPath,
+                "--confirm"
+            };
+            _lastCommand = cli.ToCommandLine(args);
+            if (!cli.CanLaunch)
+            {
+                SetImmediateOutput(ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig), "");
+                return;
+            }
+
+            StartBackgroundJob(ConfigSheetForgeBackgroundJob.CreateSingleProcess(
+                operation,
+                dryRun: false,
+                commandLine: _lastCommand,
+                executable: cli.Executable,
+                arguments: cli.BuildArguments(args.ToArray()),
+                workingDirectory: projectRoot,
+                resultPath: resultPath,
+                lifecycleDirectory: workDir,
+                refreshReadonlyStatusOnComplete: true,
+                projectConfig: _projectConfig));
+        }
+
+        private string BuildSimpleReviewRequestJson(string operation)
+        {
+            var branch = FirstNonEmpty(_currentGitBranch, _projectConfig.GitBranch);
+            var builder = new StringBuilder();
+            builder.AppendLine("{");
+            AppendJsonProperty(builder, "operation", operation, comma: true);
+            AppendJsonProperty(builder, "locale", "zh-Hans", comma: true);
+            AppendJsonProperty(builder, "dryRun", false, comma: true);
+            builder.AppendLine("  \"registry\": {");
+            AppendNestedJsonProperty(builder, "baseToken", _projectConfig.RegistryBaseToken, comma: true);
+            AppendNestedJsonProperty(builder, "baseUrl", _projectConfig.RegistryBaseUrl, comma: false);
+            builder.AppendLine("  },");
+            builder.AppendLine("  \"git\": {");
+            AppendNestedJsonProperty(builder, "branch", branch, comma: false);
+            builder.AppendLine("  },");
+            if (string.Equals(operation, "approve-schema-review", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.AppendLine("  \"schemaReviewApproval\": {");
+                AppendNestedJsonProperty(builder, "tableId", _schemaReviewTableId, comma: true);
+                AppendNestedJsonProperty(builder, "branch", branch, comma: true);
+                AppendNestedJsonProperty(builder, "profile", _projectConfig.BranchProfile, comma: true);
+                AppendNestedJsonProperty(builder, "status", "approved", comma: true);
+                AppendNestedJsonProperty(builder, "approverRole", "schemaReviewer", comma: true);
+                AppendNestedJsonProperty(builder, "reviewComment", _schemaReviewComment, comma: true);
+                AppendNestedJsonProperty(builder, "confirmSubmit", true, comma: false);
+                builder.AppendLine("  }");
+            }
+            else
+            {
+                builder.AppendLine("  \"waiverApproval\": {");
+                AppendNestedJsonProperty(builder, "tableId", FirstNonEmpty(_waiverTableId, "__project_pr_gate__"), comma: true);
+                AppendNestedJsonProperty(builder, "branch", branch, comma: true);
+                AppendNestedJsonProperty(builder, "reason", _waiverReason, comma: true);
+                AppendNestedJsonProperty(builder, "expiresAt", _waiverExpiresAt, comma: true);
+                AppendNestedJsonProperty(builder, "approvedByRole", "configOwner", comma: true);
+                AppendNestedJsonProperty(builder, "confirmApprove", true, comma: false);
+                builder.AppendLine("  }");
+            }
+
+            builder.AppendLine("}");
+            return builder.ToString();
         }
 
         private void RunProjectLifecycle(string operation, bool dryRun)
@@ -4310,6 +4766,51 @@ namespace ConfigSheetForge.Unity.Editor
             builder.AppendLine();
         }
 
+        private static void AppendNestedJsonProperty(StringBuilder builder, string key, string value, bool comma)
+        {
+            builder.Append("    \"").Append(EscapeJson(key)).Append("\": \"").Append(EscapeJson(value)).Append("\"");
+            if (comma)
+            {
+                builder.Append(',');
+            }
+
+            builder.AppendLine();
+        }
+
+        private static void AppendNestedJsonProperty(StringBuilder builder, string key, bool value, bool comma)
+        {
+            builder.Append("    \"").Append(EscapeJson(key)).Append("\": ").Append(value ? "true" : "false");
+            if (comma)
+            {
+                builder.Append(',');
+            }
+
+            builder.AppendLine();
+        }
+
+        private static void AppendNestedJsonArrayProperty(StringBuilder builder, string key, string csv, bool comma)
+        {
+            builder.Append("    \"").Append(EscapeJson(key)).Append("\": [");
+            var values = (csv ?? "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            for (var i = 0; i < values.Length; i++)
+            {
+                if (i > 0)
+                {
+                    builder.Append(", ");
+                }
+
+                builder.Append("\"").Append(EscapeJson(values[i].Trim())).Append("\"");
+            }
+
+            builder.Append("]");
+            if (comma)
+            {
+                builder.Append(',');
+            }
+
+            builder.AppendLine();
+        }
+
         private static void AppendJsonArrayProperty(StringBuilder builder, string key, string csv, bool comma)
         {
             builder.Append("  \"").Append(EscapeJson(key)).Append("\": [");
@@ -5100,6 +5601,9 @@ namespace ConfigSheetForge.Unity.Editor
         public string Reason { get; set; } = "";
         public string NextStep { get; set; } = "";
         public int Priority { get; set; }
+        public bool IsMergeReviewMissing { get; set; }
+        public bool IsSchemaReviewMissing { get; set; }
+        public bool IsWaiverProblem { get; set; }
 
         public static GateFailureView FromMessage(string message)
         {
@@ -5131,8 +5635,9 @@ namespace ConfigSheetForge.Unity.Editor
                 return new GateFailureView
                 {
                     Reason = "缺少 MergeReviews 合并审查记录",
-                    NextStep = "去“合并”页生成合并预览，通过后补审查记录，再重新运行 PR 检查。",
-                    Priority = 10
+                    NextStep = "去“合并”页生成合并预览，通过后点“提交合并审查记录”，再重新运行 PR 检查。",
+                    Priority = 10,
+                    IsMergeReviewMissing = true
                 };
             }
 
@@ -5142,7 +5647,8 @@ namespace ConfigSheetForge.Unity.Editor
                 {
                     Reason = "Schema review 未完成",
                     NextStep = "请负责人完成 SchemaReviews 审查，或补充变更说明后重新运行 PR 检查。",
-                    Priority = 20
+                    Priority = 20,
+                    IsSchemaReviewMissing = true
                 };
             }
 
@@ -5152,7 +5658,8 @@ namespace ConfigSheetForge.Unity.Editor
                 {
                     Reason = "waiver 已过期或无效",
                     NextStep = "请更新豁免记录，或移除豁免后按正常审查流程重新检查。",
-                    Priority = 30
+                    Priority = 30,
+                    IsWaiverProblem = true
                 };
             }
 

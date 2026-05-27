@@ -54,6 +54,8 @@ public static class Program
                 "merge" => await MergeAsync(parsed),
                 "gate" => await GateAsync(parsed),
                 "apply-contract" => await ApplyContractAsync(parsed),
+                "submit-merge-review" => await ApplyContractAsync(parsed.WithDefault("operation", "submit-merge-review")),
+                "approve-merge-review" => await ApplyContractAsync(parsed.WithDefault("operation", "approve-merge-review")),
                 "registry-migrate" => await RegistryMigrateAsync(parsed),
                 _ => UnknownCommand(command)
             };
@@ -756,6 +758,153 @@ public static class Program
         request.TargetBranchBootstrap.PreviewResultPath = fullPreviewPath;
     }
 
+    private static void ApplyMergeReviewArgs(LifecycleContractRequest request, ParsedArgs args)
+    {
+        request.MergeReview ??= new MergeReviewContract();
+        request.MergeInputs ??= new MergeInputsContract();
+        request.MergeReview.SourceBranch = FirstNonEmpty(args.Get("source-branch", ""), request.MergeReview.SourceBranch, request.MergeInputs.SourceBranch, request.Git.Branch);
+        request.MergeReview.TargetBranch = FirstNonEmpty(args.Get("target-branch", ""), request.MergeReview.TargetBranch, request.MergeInputs.TargetBranch, request.BranchWorkspace.MainGitBranch, "main");
+        request.MergeReview.PrNumber = FirstNonEmpty(args.Get("pr-number", ""), request.MergeReview.PrNumber, request.MergeInputs.PrNumber);
+        request.MergeReview.PrUrl = FirstNonEmpty(args.Get("pr-url", ""), request.MergeReview.PrUrl, request.MergeInputs.PrUrl);
+        request.MergeReview.MergeReportPath = FirstNonEmpty(args.Get("merge-report", ""), args.Get("merge-report-path", ""), request.MergeReview.MergeReportPath, request.MergeInputs.MergeReportPath);
+        request.MergeReview.MergedPath = FirstNonEmpty(args.Get("merged", ""), args.Get("merged-path", ""), request.MergeReview.MergedPath, request.MergeInputs.MergedPath);
+        request.MergeReview.PreviewResultPath = FirstNonEmpty(args.Get("preview-result", ""), args.Get("require-preview", ""), request.MergeReview.PreviewResultPath);
+        request.MergeReview.RequestFingerprint = FirstNonEmpty(args.Get("request-fingerprint", ""), request.MergeReview.RequestFingerprint);
+        request.MergeReview.RequiredPreviewFingerprint = FirstNonEmpty(args.Get("required-preview-fingerprint", ""), request.MergeReview.RequiredPreviewFingerprint, request.RequiredPreviewFingerprint);
+        request.MergeReview.ApproverRole = FirstNonEmpty(args.Get("approver-role", ""), request.MergeReview.ApproverRole, "configOwner");
+        request.MergeReview.ReviewComment = FirstNonEmpty(args.Get("review-comment", ""), request.MergeReview.ReviewComment);
+        request.MergeReview.TableId = FirstNonEmpty(args.Get("table-id", ""), request.MergeReview.TableId, "__project_pr_gate__");
+        request.MergeReview.Status = FirstNonEmpty(args.Get("status", ""), request.MergeReview.Status, "approved");
+        request.MergeReview.ConfirmSubmit = request.MergeReview.ConfirmSubmit || args.HasFlag("yes") || args.HasFlag("confirm");
+
+        var tableIds = args.Get("table-ids", "");
+        if (!string.IsNullOrWhiteSpace(tableIds))
+        {
+            request.MergeReview.TableIds.Clear();
+            foreach (var value in tableIds.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var tableId = value.Trim();
+                if (!string.IsNullOrWhiteSpace(tableId))
+                {
+                    request.MergeReview.TableIds.Add(tableId);
+                }
+            }
+        }
+    }
+
+    private static async Task RequireMatchingCompareMergePreviewAsync(LifecycleContractRequest request, ParsedArgs args)
+    {
+        if (!MergeReviewOperationRequested(request.Operation) || request.DryRun)
+        {
+            return;
+        }
+
+        request.MergeReview ??= new MergeReviewContract();
+        if (args.HasFlag("allow-user-fallback"))
+        {
+            throw new CliException("提交 MergeReviews 默认使用 strict bot 权限；不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+        }
+
+        var previewPath = FirstNonEmpty(
+            args.Get("preview-result", ""),
+            args.Get("require-preview", ""),
+            request.MergeReview.PreviewResultPath);
+        if (string.IsNullOrWhiteSpace(previewPath))
+        {
+            throw new CliException("提交合并审查记录必须带最近一次同输入 compare-merge dry-run result。请先在 Unity 点“生成合并预览”，再提交审查记录。", 2);
+        }
+
+        var fullPreviewPath = Path.GetFullPath(previewPath);
+        if (!File.Exists(fullPreviewPath))
+        {
+            throw new CliException("找不到 compare-merge dry-run result，已阻断 MergeReviews 写入。请重新生成合并预览。", 2, fullPreviewPath);
+        }
+
+        var preview = await ReadJsonAsync<LifecycleContractResult>(fullPreviewPath);
+        if (!string.Equals(preview.Operation, "compare-merge", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException("preview-result 不是合并预览结果，已阻断 MergeReviews 写入。请重新生成“生成合并预览”。", 2, fullPreviewPath);
+        }
+
+        if (!preview.DryRun)
+        {
+            throw new CliException("preview-result 不是 dry-run 结果，不能作为提交审查记录的前置证明。", 2, fullPreviewPath);
+        }
+
+        if (!preview.Success)
+        {
+            throw new CliException("最近一次合并预览没有通过，不能提交合并审查记录。请先处理预览里的失败原因。", 2, string.Join(Environment.NewLine, preview.HumanReadableFailures));
+        }
+
+        if (string.IsNullOrWhiteSpace(preview.RequestFingerprint))
+        {
+            throw new CliException("合并预览结果缺少 requestFingerprint，无法确认审查输入是否一致。请用 v0.4.19 或更新版本重新生成合并预览。", 2, fullPreviewPath);
+        }
+
+        BackfillMergeReviewFromPreview(request, preview, fullPreviewPath);
+        var expected = LifecycleExecutor.BuildMergeReviewInputSummary(request, request.MergeReview.TableIds);
+        var requiredFingerprint = FirstNonEmpty(
+            args.Get("required-preview-fingerprint", ""),
+            request.MergeReview.RequiredPreviewFingerprint,
+            request.MergeReview.RequestFingerprint,
+            request.RequiredPreviewFingerprint);
+        if (!string.IsNullOrWhiteSpace(requiredFingerprint) &&
+            !string.Equals(requiredFingerprint, expected.Fingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException("提交合并审查记录的输入和指定 fingerprint 不一致。请重新生成合并预览，再提交审查。", 2, "expected=" + expected.Fingerprint + "\nprovided=" + requiredFingerprint);
+        }
+
+        if (!string.Equals(preview.RequestFingerprint, expected.Fingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException(
+                "提交合并审查记录的输入和最近一次合并预览不一致，已阻断写入。请重新生成合并预览，再提交审查记录。",
+                2,
+                "dryRunFingerprint=" + preview.RequestFingerprint + "\nsubmitFingerprint=" + expected.Fingerprint + "\nsourceBranch=" + expected.SourceBranch + "\ntargetBranch=" + expected.TargetBranch + "\ntables=" + expected.TableIdsText);
+        }
+
+        request.MergeReview.RequestFingerprint = expected.Fingerprint;
+        request.MergeReview.RequiredPreviewFingerprint = expected.Fingerprint;
+        request.MergeReview.PreviewResultPath = fullPreviewPath;
+        request.RequiredPreviewFingerprint = expected.Fingerprint;
+    }
+
+    private static void BackfillMergeReviewFromPreview(LifecycleContractRequest request, LifecycleContractResult preview, string previewPath)
+    {
+        request.MergeReview ??= new MergeReviewContract();
+        var summary = preview.RequestSummary ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        request.MergeReview.SourceBranch = FirstNonEmpty(request.MergeReview.SourceBranch, SummaryValue(summary, "sourceBranch"), preview.Branch, request.Git.Branch);
+        request.MergeReview.TargetBranch = FirstNonEmpty(request.MergeReview.TargetBranch, SummaryValue(summary, "targetBranch"), request.MergeInputs != null ? request.MergeInputs.TargetBranch : "", "main");
+        request.MergeReview.PrNumber = FirstNonEmpty(request.MergeReview.PrNumber, SummaryValue(summary, "prNumber"));
+        request.MergeReview.PrUrl = FirstNonEmpty(request.MergeReview.PrUrl, SummaryValue(summary, "prUrl"));
+        request.MergeReview.MergeReportPath = FirstNonEmpty(request.MergeReview.MergeReportPath, SummaryValue(summary, "mergeReportPath"));
+        request.MergeReview.MergedPath = FirstNonEmpty(request.MergeReview.MergedPath, SummaryValue(summary, "mergedPath"));
+        request.MergeReview.PreviewResultPath = FirstNonEmpty(request.MergeReview.PreviewResultPath, previewPath);
+        if (request.MergeReview.TableIds.Count == 0)
+        {
+            foreach (var tableId in SplitCsv(SummaryValue(summary, "tableIds")))
+            {
+                request.MergeReview.TableIds.Add(tableId);
+            }
+        }
+    }
+
+    private static string SummaryValue(Dictionary<string, string> summary, string key)
+    {
+        return summary != null && summary.TryGetValue(key, out var value) ? value : "";
+    }
+
+    private static IEnumerable<string> SplitCsv(string csv)
+    {
+        foreach (var value in (csv ?? "").Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = value.Trim();
+            if (!string.IsNullOrWhiteSpace(trimmed))
+            {
+                yield return trimmed;
+            }
+        }
+    }
+
     private static async Task HydrateSyncCacheRequestFromRegistryAsync(LifecycleContractRequest request, ParsedArgs args, string selectedTable)
     {
         if (request == null || request.Registry == null || string.IsNullOrWhiteSpace(request.Registry.BaseToken))
@@ -778,6 +927,258 @@ public static class Program
         var gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
         var snapshot = await LoadRegistrySnapshotFromLarkAsync(gateway, request.Registry.BaseToken, request.Locale, args);
         HydrateCompareMergeRequestFromRegistrySnapshot(request, snapshot, selectedTable);
+    }
+
+    private static async Task HydratePrGateReportFromRegistryAsync(LifecycleContractRequest request, ParsedArgs args)
+    {
+        if (request == null || request.Registry == null || string.IsNullOrWhiteSpace(request.Registry.BaseToken))
+        {
+            return;
+        }
+
+        try
+        {
+            var gateway = new LarkCliGateway(args.Get("lark-cli", "lark-cli"));
+            var snapshot = await LoadRegistrySnapshotFromLarkAsync(gateway, request.Registry.BaseToken, request.Locale, args);
+            HydratePrGateReportFromRegistrySnapshot(request, snapshot);
+        }
+        catch (CliException ex)
+        {
+            request.GateReport ??= new PrGateReport();
+            request.GateReport.Permissions ??= new GatePermissions();
+            request.GateReport.Permissions.CanReadRegistry = false;
+            request.GateReport.Permissions.RegistryMessage = "读取在线注册中心失败：" + ex.Message;
+        }
+    }
+
+    public static void HydratePrGateReportFromRegistrySnapshot(LifecycleContractRequest request, RegistrySnapshot snapshot)
+    {
+        if (request == null || snapshot == null)
+        {
+            return;
+        }
+
+        request.GateReport ??= new PrGateReport();
+        var report = request.GateReport;
+        var branch = FirstNonEmpty(report.Branch, request.MergeInputs != null ? request.MergeInputs.SourceBranch : "", request.Git.Branch, request.BranchWorkspace.GitBranch, request.Git.FeishuBranch, request.Git.Profile);
+        if (!string.IsNullOrWhiteSpace(branch))
+        {
+            report.Branch = branch;
+        }
+
+        HydrateMergeReviewGateState(request, snapshot, report, branch);
+        HydrateSchemaReviewGateState(request, snapshot, report, branch);
+        HydrateWaiverGateState(request, snapshot, report, branch);
+    }
+
+    private static void HydrateMergeReviewGateState(LifecycleContractRequest request, RegistrySnapshot snapshot, PrGateReport report, string branch)
+    {
+        var table = FindRegistryTable(snapshot, "MergeReviews", request.Locale);
+        if (table == null)
+        {
+            report.MergeReview.Status = "";
+            report.MergeReview.Message = "注册中心没有读到 MergeReviews 表。请先运行 registry-migrate，或检查项目配置表是否包含“合并审查”。";
+            return;
+        }
+
+        var tableScope = BuildGateTableScope(request, report);
+        var matches = table.Records
+            .Where(r => !r.IsEmpty)
+            .Where(r => string.Equals(GetRegistryRecordValue(r, "GitBranch", request.Locale, request.Registry), branch, StringComparison.OrdinalIgnoreCase))
+            .Where(r => TableMatchesGateScope(GetRegistryRecordValue(r, "TableId", request.Locale, request.Registry), tableScope))
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            report.MergeReview.Status = "";
+            report.MergeReview.Message = "缺少 MergeReviews 合并审查记录。请去合并页提交合并审查记录。";
+            return;
+        }
+
+        var passed = matches.FirstOrDefault(r => PrGateReportEvaluator.ReviewPassed(GetRegistryRecordValue(r, "Status", request.Locale, request.Registry)));
+        var selected = passed ?? matches[0];
+        report.MergeReview.Status = GetRegistryRecordValue(selected, "Status", request.Locale, request.Registry);
+        report.MergeReview.RecordId = selected.RecordId;
+        report.MergeReview.ReviewId = GetRegistryRecordValue(selected, "ReviewId", request.Locale, request.Registry);
+        report.MergeReview.ApproverRole = FirstNonEmpty(
+            GetRegistryRecordValue(selected, "ApproverRole", request.Locale, request.Registry),
+            GetRegistryRecordValue(selected, "ApprovedByRole", request.Locale, request.Registry));
+        report.MergeReview.GitBranch = GetRegistryRecordValue(selected, "GitBranch", request.Locale, request.Registry);
+        report.MergeReview.TableId = GetRegistryRecordValue(selected, "TableId", request.Locale, request.Registry);
+        report.MergeReview.Message = PrGateReportEvaluator.ReviewPassed(report.MergeReview.Status)
+            ? "已从 MergeReviews 读取到有效合并审查记录。record_id=" + FirstNonEmpty(report.MergeReview.RecordId, "(无 record_id)")
+            : "找到了 MergeReviews 记录，但状态不是 approved/completed/passed。请在合并页重新提交或让负责人完成审查。";
+    }
+
+    private static void HydrateSchemaReviewGateState(LifecycleContractRequest request, RegistrySnapshot snapshot, PrGateReport report, string branch)
+    {
+        if (!report.SchemaChangeDetected)
+        {
+            return;
+        }
+
+        var table = FindRegistryTable(snapshot, "SchemaReviews", request.Locale);
+        if (table == null)
+        {
+            report.SchemaReview.Status = "";
+            report.SchemaReview.Message = "注册中心没有读到 SchemaReviews 表。请先运行 registry-migrate，或检查项目配置表是否包含“Schema 审查”。";
+            return;
+        }
+
+        var tableScope = BuildGateTableScope(request, report).Where(t => !IsProjectGateTableId(t)).ToList();
+        if (tableScope.Count == 0)
+        {
+            tableScope.AddRange(report.ChangedTables.Where(t => !string.IsNullOrWhiteSpace(t)));
+        }
+
+        var missing = new List<string>();
+        var pending = new List<string>();
+        var approved = new List<string>();
+        foreach (var tableId in tableScope.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var matches = table.Records
+                .Where(r => !r.IsEmpty)
+                .Where(r => string.Equals(GetRegistryRecordValue(r, "TableId", request.Locale, request.Registry), tableId, StringComparison.OrdinalIgnoreCase))
+                .Where(r =>
+                {
+                    var recordBranch = FirstNonEmpty(
+                        GetRegistryRecordValue(r, "GitBranch", request.Locale, request.Registry),
+                        GetRegistryRecordValue(r, "Branch", request.Locale, request.Registry),
+                        GetRegistryRecordValue(r, "Profile", request.Locale, request.Registry));
+                    return string.IsNullOrWhiteSpace(recordBranch) || string.Equals(recordBranch, branch, StringComparison.OrdinalIgnoreCase);
+                })
+                .ToList();
+            if (matches.Count == 0)
+            {
+                missing.Add(tableId);
+                continue;
+            }
+
+            var passed = matches.FirstOrDefault(r => PrGateReportEvaluator.ReviewPassed(GetRegistryRecordValue(r, "Status", request.Locale, request.Registry)));
+            if (passed == null)
+            {
+                pending.Add(tableId);
+            }
+            else
+            {
+                approved.Add(tableId + ":" + FirstNonEmpty(passed.RecordId, "(无 record_id)"));
+                report.SchemaReview.RecordId = FirstNonEmpty(report.SchemaReview.RecordId, passed.RecordId);
+                report.SchemaReview.Status = FirstNonEmpty(report.SchemaReview.Status, GetRegistryRecordValue(passed, "Status", request.Locale, request.Registry));
+            }
+        }
+
+        if (missing.Count == 0 && pending.Count == 0)
+        {
+            report.SchemaReview.Status = FirstNonEmpty(report.SchemaReview.Status, "approved");
+            report.SchemaReview.Message = "已从 SchemaReviews 读取到 schema 审查通过记录：" + string.Join(", ", approved);
+        }
+        else
+        {
+            report.SchemaReview.Status = "";
+            report.SchemaReview.Message = "Schema 审查未完成。缺少：" + string.Join(", ", missing) + "；待处理：" + string.Join(", ", pending) + "。请去 PR 检查页处理 Schema 审查。";
+        }
+    }
+
+    private static void HydrateWaiverGateState(LifecycleContractRequest request, RegistrySnapshot snapshot, PrGateReport report, string branch)
+    {
+        var table = FindRegistryTable(snapshot, "Waivers", request.Locale);
+        if (table == null)
+        {
+            return;
+        }
+
+        var tableScope = BuildGateTableScope(request, report);
+        var matches = table.Records
+            .Where(r => !r.IsEmpty)
+            .Where(r =>
+            {
+                var waiverBranch = FirstNonEmpty(
+                    GetRegistryRecordValue(r, "GitBranch", request.Locale, request.Registry),
+                    GetRegistryRecordValue(r, "Branch", request.Locale, request.Registry));
+                return string.IsNullOrWhiteSpace(waiverBranch) || string.Equals(waiverBranch, branch, StringComparison.OrdinalIgnoreCase);
+            })
+            .Where(r => TableMatchesGateScope(GetRegistryRecordValue(r, "TableId", request.Locale, request.Registry), tableScope))
+            .ToList();
+        if (matches.Count == 0)
+        {
+            return;
+        }
+
+        var selected = matches
+            .OrderByDescending(r => GetRegistryRecordValue(r, "ExpiresAt", request.Locale, request.Registry), StringComparer.OrdinalIgnoreCase)
+            .First();
+        report.Waiver.RecordId = selected.RecordId;
+        report.Waiver.ApprovedByRole = FirstNonEmpty(
+            GetRegistryRecordValue(selected, "ApprovedByRole", request.Locale, request.Registry),
+            GetRegistryRecordValue(selected, "ApproverRole", request.Locale, request.Registry));
+        report.Waiver.ExpiresAt = GetRegistryRecordValue(selected, "ExpiresAt", request.Locale, request.Registry);
+        report.Waiver.Branch = FirstNonEmpty(
+            GetRegistryRecordValue(selected, "GitBranch", request.Locale, request.Registry),
+            GetRegistryRecordValue(selected, "Branch", request.Locale, request.Registry));
+        report.Waiver.TableId = GetRegistryRecordValue(selected, "TableId", request.Locale, request.Registry);
+        report.Waiver.Reason = FirstNonEmpty(
+            GetRegistryRecordValue(selected, "Reason", request.Locale, request.Registry),
+            GetRegistryRecordValue(selected, "原因", request.Locale, request.Registry));
+        report.Waiver.Approved = PrGateReportEvaluator.ReviewPassed(GetRegistryRecordValue(selected, "Status", request.Locale, request.Registry)) ||
+                                 string.Equals(report.Waiver.ApprovedByRole, "configOwner", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static List<string> BuildGateTableScope(LifecycleContractRequest request, PrGateReport report)
+    {
+        var scope = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var tableId in report.ChangedTables ?? new List<string>())
+        {
+            if (!string.IsNullOrWhiteSpace(tableId))
+            {
+                scope.Add(tableId);
+            }
+        }
+
+        if (request.MergeReview != null)
+        {
+            foreach (var tableId in request.MergeReview.TableIds ?? new List<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(tableId))
+                {
+                    scope.Add(tableId);
+                }
+            }
+        }
+
+        if (request.MergeInputs != null && !string.IsNullOrWhiteSpace(request.MergeInputs.TableId))
+        {
+            scope.Add(request.MergeInputs.TableId);
+        }
+
+        if (request.Table != null && !string.IsNullOrWhiteSpace(request.Table.TableId))
+        {
+            scope.Add(request.Table.TableId);
+        }
+
+        scope.Add("__project_pr_gate__");
+        scope.Add("project-config");
+        return scope.ToList();
+    }
+
+    private static bool TableMatchesGateScope(string recordTableId, IList<string> tableScope)
+    {
+        if (string.IsNullOrWhiteSpace(recordTableId))
+        {
+            return false;
+        }
+
+        if (IsProjectGateTableId(recordTableId))
+        {
+            return true;
+        }
+
+        return tableScope.Any(t => string.Equals(t, recordTableId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsProjectGateTableId(string tableId)
+    {
+        return string.Equals(tableId, "__project_pr_gate__", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(tableId, "project-config", StringComparison.OrdinalIgnoreCase);
     }
 
     public static void HydrateCompareMergeRequestFromRegistrySnapshot(LifecycleContractRequest request, RegistrySnapshot snapshot, string selectedTable)
@@ -1357,6 +1758,7 @@ public static class Program
         }
 
         var request = await ReadJsonAsync<LifecycleContractRequest>(requestPath);
+        request.Operation = FirstNonEmpty(args.Get("operation", ""), request.Operation);
         if (args.HasFlag("dry-run"))
         {
             request.DryRun = true;
@@ -1405,6 +1807,29 @@ public static class Program
             }
 
             await HydrateCompareMergeRequestFromRegistryAsync(request, args, FirstNonEmpty(request.MergeInputs.TableId, request.SyncCache != null ? request.SyncCache.TableId : "", request.Table != null ? request.Table.TableId : ""));
+        }
+
+        if (MergeReviewOperationRequested(request.Operation))
+        {
+            ApplyMergeReviewArgs(request, args);
+            await RequireMatchingCompareMergePreviewAsync(request, args);
+        }
+
+        if (SchemaReviewApprovalOperationRequested(request.Operation))
+        {
+            request.SchemaReviewApproval ??= new SchemaReviewApprovalContract();
+            request.SchemaReviewApproval.ConfirmSubmit = request.SchemaReviewApproval.ConfirmSubmit || args.HasFlag("yes") || args.HasFlag("confirm");
+        }
+
+        if (WaiverApprovalOperationRequested(request.Operation))
+        {
+            request.WaiverApproval ??= new WaiverApprovalContract();
+            request.WaiverApproval.ConfirmApprove = request.WaiverApproval.ConfirmApprove || args.HasFlag("yes") || args.HasFlag("confirm");
+        }
+
+        if (string.Equals(request.Operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
+        {
+            await HydratePrGateReportFromRegistryAsync(request, args);
         }
 
         ILifecyclePlatform platform = request.DryRun && !SeedOperationRequested(request.Operation)
@@ -2364,6 +2789,22 @@ public static class Program
         return string.Equals(operation, "compare-merge", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool MergeReviewOperationRequested(string operation)
+    {
+        return string.Equals(operation, "submit-merge-review", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(operation, "approve-merge-review", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool SchemaReviewApprovalOperationRequested(string operation)
+    {
+        return string.Equals(operation, "approve-schema-review", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool WaiverApprovalOperationRequested(string operation)
+    {
+        return string.Equals(operation, "approve-waiver", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool GetJsonBool(JsonElement element, bool fallback, params string[] names)
     {
         var value = GetJsonProperty(element, names);
@@ -2749,6 +3190,7 @@ public static class Program
         Console.WriteLine("  config-sheet-forge bootstrap-target-branch-from-local-xlsx --all --manifest <project-config-or-contract> --target-branch main --preview-result <dry-run-result.json> --confirm-create-online-sheets --confirm-registry-upsert --confirm-schema-reviews");
         Console.WriteLine("    apply flags: --confirm-create-online-sheets --confirm-registry-upsert --confirm-schema-reviews [--confirm-write-local-cache] [--confirm-write-project-config] [--confirm-excel-to-so]");
         Console.WriteLine("  config-sheet-forge merge --base <file> --ours <file> --theirs <file> [--out <report.md>]");
+        Console.WriteLine("  config-sheet-forge submit-merge-review --request <contract.json> --preview-result <compare-merge.result.json> --confirm");
         Console.WriteLine("  config-sheet-forge gate [--cache <dir>] [--details] [--annotations github]");
         Console.WriteLine("  config-sheet-forge apply-contract --request <contract.json> [--out <result.json>] [--dry-run]");
         Console.WriteLine("  config-sheet-forge registry-migrate --base <token> [--locale zh-Hans] [--dry-run] [--cleanup-default-rows] [--cleanup-default-fields] [--cleanup-duplicate-branch-bindings] [--yes]");
@@ -2994,7 +3436,7 @@ public static class Program
         return value.Length <= 8 ? "********" : value.Substring(0, 4) + "..." + value.Substring(value.Length - 4);
     }
 
-    private sealed class CliLifecyclePlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform, IBranchWorkspacePlatform, ITargetBranchBootstrapPostflightPlatform
+    private sealed class CliLifecyclePlatform : ILifecyclePlatform, ISeedFromLocalXlsxPlatform, IBranchWorkspacePlatform, ITargetBranchBootstrapPostflightPlatform, IReviewRegistryPlatform
     {
         private readonly ParsedArgs _args;
         private readonly LifecycleContractRequest _request;
@@ -3400,6 +3842,397 @@ public static class Program
             action.Details["schemaReviewId"] = FirstNonEmpty(ParseRecordId(CombinedJsonOutput(upsert)), recordId);
             action.Details["reason"] = reason;
             return action;
+        }
+
+        public async Task<LifecycleActionResult> UpsertMergeReviewAsync(RegistryContract registry, MergeReviewContract review, MergeReviewInputSummary summary, CancellationToken cancellationToken)
+        {
+            var action = new LifecycleActionResult
+            {
+                Action = "registry.merge_reviews.upsert",
+                Status = "running",
+                Message = "正在写入 MergeReviews 合并审查记录。"
+            };
+            registry ??= new RegistryContract();
+            review ??= new MergeReviewContract();
+            summary ??= LifecycleExecutor.BuildMergeReviewInputSummary(_request, review.TableIds);
+
+            if (string.IsNullOrWhiteSpace(registry.BaseToken))
+            {
+                action.Status = "failed";
+                action.Message = "无法写入 MergeReviews：contract.registry.baseToken 为空。请检查项目配置的 live registry。";
+                return action;
+            }
+
+            RegistrySnapshot snapshot;
+            try
+            {
+                snapshot = await LoadRegistrySnapshotFromLarkAsync(_gateway, registry.BaseToken, _request.Locale, _args);
+            }
+            catch (CliException ex)
+            {
+                action.Status = "failed";
+                action.Message = "读取注册中心失败，无法提交合并审查记录：" + ex.Message;
+                action.Details["error"] = ex.Detail;
+                return action;
+            }
+
+            var table = FindRegistryTable(snapshot, "MergeReviews", _request.Locale);
+            if (table == null)
+            {
+                action.Status = "failed";
+                action.Message = "注册中心没有找到 MergeReviews/合并审查 表。请先运行 registry-migrate 或检查项目配置表结构。";
+                return action;
+            }
+
+            var reviewIdField = ResolveRegistryFieldName(table, registry, "ReviewId", "审查ID", "reviewId");
+            var tableIdField = ResolveRegistryFieldName(table, registry, "TableId", "配表ID", "tableId");
+            var gitBranchField = ResolveRegistryFieldName(table, registry, "GitBranch", "Git分支", "sourceBranch");
+            var statusField = ResolveRegistryFieldName(table, registry, "Status", "状态");
+            var approverRoleField = ResolveRegistryFieldName(table, registry, "ApproverRole", "批准角色", "ApprovedByRole", "approverRole");
+            var updatedAtField = ResolveRegistryFieldName(table, registry, "UpdatedAt", "更新时间", "updatedAt");
+            var missingFields = new List<string>();
+            foreach (var pair in new[]
+            {
+                new KeyValuePair<string, string>("审查ID", reviewIdField),
+                new KeyValuePair<string, string>("配表ID", tableIdField),
+                new KeyValuePair<string, string>("Git分支", gitBranchField),
+                new KeyValuePair<string, string>("状态", statusField),
+                new KeyValuePair<string, string>("ApproverRole", approverRoleField),
+                new KeyValuePair<string, string>("更新时间", updatedAtField)
+            })
+            {
+                if (string.IsNullOrWhiteSpace(pair.Value))
+                {
+                    missingFields.Add(pair.Key);
+                }
+            }
+
+            if (missingFields.Count > 0)
+            {
+                action.Status = "failed";
+                action.Message = "MergeReviews 表缺少必要字段：" + string.Join(", ", missingFields) + "。请在 Base 中补字段或运行 registry-migrate 后重试。";
+                action.Details["availableFields"] = string.Join(", ", table.Fields.Select(f => FirstNonEmpty(f.DisplayName, f.FieldId)));
+                return action;
+            }
+
+            var sourceBranch = FirstNonEmpty(review.SourceBranch, summary.SourceBranch, _request.Git.Branch);
+            var targetBranch = FirstNonEmpty(review.TargetBranch, summary.TargetBranch, "main");
+            var tableId = FirstNonEmpty(review.TableId, "__project_pr_gate__");
+            var reviewId = FirstNonEmpty(review.ReviewId, BuildMergeReviewId(sourceBranch, targetBranch, _request.Git.Head));
+            var body = new Dictionary<string, object>
+            {
+                [reviewIdField] = reviewId,
+                [tableIdField] = tableId,
+                [gitBranchField] = sourceBranch,
+                [statusField] = FirstNonEmpty(review.Status, "approved"),
+                [approverRoleField] = FirstNonEmpty(review.ApproverRole, "configOwner"),
+                [updatedAtField] = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+            };
+            AddOptionalReviewField(body, table, registry, "ReviewComment", FirstNonEmpty(review.ReviewComment, "Unity 提交合并审查记录。"), "审查说明", "评论", "Comment");
+            AddOptionalReviewField(body, table, registry, "PrNumber", FirstNonEmpty(review.PrNumber, summary.PrNumber), "PR", "PR号", "prNumber");
+            AddOptionalReviewField(body, table, registry, "PrUrl", FirstNonEmpty(review.PrUrl, summary.PrUrl), "PR链接", "prUrl");
+            AddOptionalReviewField(body, table, registry, "MergeReportPath", FirstNonEmpty(review.MergeReportPath, summary.MergeReportPath), "合并报告", "mergeReportPath");
+            AddOptionalReviewField(body, table, registry, "MergedPath", FirstNonEmpty(review.MergedPath, summary.MergedPath), "合并结果", "mergedPath");
+            AddOptionalReviewField(body, table, registry, "RequestFingerprint", FirstNonEmpty(review.RequestFingerprint, summary.Fingerprint), "请求指纹", "Fingerprint", "requestFingerprint");
+
+            string recordId;
+            try
+            {
+                recordId = FindUniqueMergeReviewRecordId(table, reviewIdField, reviewId, tableIdField, tableId, gitBranchField, sourceBranch);
+            }
+            catch (CliException ex)
+            {
+                action.Status = "failed";
+                action.Message = ex.Message;
+                action.Details["error"] = ex.Detail;
+                return action;
+            }
+
+            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", table.TableId, "--json", JsonSerializer.Serialize(body, CompactJsonOptions) };
+            if (!string.IsNullOrWhiteSpace(recordId))
+            {
+                command.Add("--record-id");
+                command.Add(recordId);
+            }
+
+            try
+            {
+                var upsert = await RunLarkCliStrictAsync(_gateway, _args, command);
+                action.Status = string.IsNullOrWhiteSpace(recordId) ? "done" : "updated";
+                action.Message = "已写入 MergeReviews 合并审查记录；不会写 main、不会写本地 cache、不会改 ProjectSettings 或 ExcelToSO。";
+                action.Details["recordId"] = FirstNonEmpty(ParseRecordId(CombinedJsonOutput(upsert)), recordId);
+                action.Details["reviewId"] = reviewId;
+                action.Details["tableId"] = tableId;
+                action.Details["sourceBranch"] = sourceBranch;
+                action.Details["targetBranch"] = targetBranch;
+                action.Details["approverRole"] = FirstNonEmpty(review.ApproverRole, "configOwner");
+                action.Details["requestFingerprint"] = FirstNonEmpty(review.RequestFingerprint, summary.Fingerprint);
+                return action;
+            }
+            catch (CliException ex)
+            {
+                action.Status = "failed";
+                action.Message = HumanizeMergeReviewUpsertFailure(ex);
+                action.Details["error"] = ex.Message;
+                action.Details["detail"] = ex.Detail;
+                return action;
+            }
+        }
+
+        public async Task<LifecycleActionResult> UpsertSchemaReviewApprovalAsync(RegistryContract registry, SchemaReviewApprovalContract review, CancellationToken cancellationToken)
+        {
+            var action = new LifecycleActionResult { Action = "registry.schema_reviews.approve", Status = "running", Message = "正在更新 SchemaReviews 审查状态。" };
+            registry ??= new RegistryContract();
+            review ??= new SchemaReviewApprovalContract();
+            if (string.IsNullOrWhiteSpace(registry.BaseToken))
+            {
+                action.Status = "failed";
+                action.Message = "无法更新 SchemaReviews：registry.baseToken 为空。";
+                return action;
+            }
+
+            var snapshot = await LoadRegistrySnapshotFromLarkAsync(_gateway, registry.BaseToken, _request.Locale, _args);
+            var table = FindRegistryTable(snapshot, "SchemaReviews", _request.Locale);
+            if (table == null)
+            {
+                action.Status = "failed";
+                action.Message = "注册中心没有找到 SchemaReviews 表。";
+                return action;
+            }
+
+            var tableIdField = ResolveRegistryFieldName(table, registry, "TableId", "配表ID");
+            var branchField = ResolveRegistryFieldName(table, registry, "Branch", "Feishu分支", "GitBranch", "Git分支", "Profile");
+            var statusField = ResolveRegistryFieldName(table, registry, "Status", "状态");
+            if (string.IsNullOrWhiteSpace(tableIdField) || string.IsNullOrWhiteSpace(statusField))
+            {
+                action.Status = "failed";
+                action.Message = "SchemaReviews 表缺少配表ID或状态字段。";
+                return action;
+            }
+
+            var branch = FirstNonEmpty(review.Branch, review.Profile, _request.Git.FeishuBranch, _request.Git.Profile, _request.Git.Branch);
+            var record = table.Records
+                .Where(r => string.Equals(GetRegistryRecordValue(r, "TableId", _request.Locale, registry), review.TableId, StringComparison.OrdinalIgnoreCase))
+                .FirstOrDefault(r => string.IsNullOrWhiteSpace(branchField) || string.Equals(GetRegistryRecordValue(r, branchField, _request.Locale, registry), branch, StringComparison.OrdinalIgnoreCase));
+            var body = new Dictionary<string, object>
+            {
+                [tableIdField] = review.TableId,
+                [statusField] = FirstNonEmpty(review.Status, "approved")
+            };
+            if (!string.IsNullOrWhiteSpace(branchField))
+            {
+                body[branchField] = branch;
+            }
+
+            AddOptionalReviewField(body, table, registry, "ApproverRole", FirstNonEmpty(review.ApproverRole, "schemaReviewer"), "ApprovedByRole", "批准角色");
+            AddOptionalReviewField(body, table, registry, "ReviewComment", review.ReviewComment, "审查说明", "评论", "Comment");
+            AddOptionalReviewField(body, table, registry, "UpdatedAt", DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture), "更新时间");
+            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", table.TableId, "--json", JsonSerializer.Serialize(body, CompactJsonOptions) };
+            if (record != null && !string.IsNullOrWhiteSpace(record.RecordId))
+            {
+                command.Add("--record-id");
+                command.Add(record.RecordId);
+            }
+
+            var upsert = await RunLarkCliStrictAsync(_gateway, _args, command);
+            action.Status = "done";
+            action.Message = "已更新 SchemaReviews 审查状态。";
+            action.Details["recordId"] = FirstNonEmpty(ParseRecordId(CombinedJsonOutput(upsert)), record == null ? "" : record.RecordId);
+            action.Details["tableId"] = review.TableId;
+            return action;
+        }
+
+        public async Task<LifecycleActionResult> UpsertWaiverApprovalAsync(RegistryContract registry, WaiverApprovalContract waiver, CancellationToken cancellationToken)
+        {
+            var action = new LifecycleActionResult { Action = "registry.waivers.approve", Status = "running", Message = "正在写入 Waivers 临时放行记录。" };
+            registry ??= new RegistryContract();
+            waiver ??= new WaiverApprovalContract();
+            if (string.IsNullOrWhiteSpace(registry.BaseToken))
+            {
+                action.Status = "failed";
+                action.Message = "无法写入 Waivers：registry.baseToken 为空。";
+                return action;
+            }
+
+            var snapshot = await LoadRegistrySnapshotFromLarkAsync(_gateway, registry.BaseToken, _request.Locale, _args);
+            var table = FindRegistryTable(snapshot, "Waivers", _request.Locale);
+            if (table == null)
+            {
+                action.Status = "failed";
+                action.Message = "注册中心没有找到 Waivers 表。";
+                return action;
+            }
+
+            var tableIdField = ResolveRegistryFieldName(table, registry, "TableId", "配表ID");
+            var branchField = ResolveRegistryFieldName(table, registry, "Branch", "GitBranch", "Git分支", "Feishu分支");
+            var statusField = ResolveRegistryFieldName(table, registry, "Status", "状态");
+            var expiresField = ResolveRegistryFieldName(table, registry, "ExpiresAt", "过期时间", "expiresAt");
+            var approverField = ResolveRegistryFieldName(table, registry, "ApprovedByRole", "ApproverRole", "批准角色");
+            if (string.IsNullOrWhiteSpace(tableIdField) || string.IsNullOrWhiteSpace(branchField) || string.IsNullOrWhiteSpace(statusField) || string.IsNullOrWhiteSpace(expiresField))
+            {
+                action.Status = "failed";
+                action.Message = "Waivers 表缺少配表ID、分支、状态或过期时间字段。";
+                return action;
+            }
+
+            var body = new Dictionary<string, object>
+            {
+                [tableIdField] = FirstNonEmpty(waiver.TableId, "__project_pr_gate__"),
+                [branchField] = waiver.Branch,
+                [statusField] = "approved",
+                [expiresField] = waiver.ExpiresAt
+            };
+            if (!string.IsNullOrWhiteSpace(approverField))
+            {
+                body[approverField] = FirstNonEmpty(waiver.ApprovedByRole, "configOwner");
+            }
+
+            AddOptionalReviewField(body, table, registry, "Reason", waiver.Reason, "原因", "说明");
+            var command = new List<string> { "base", "+record-upsert", "--base-token", registry.BaseToken, "--table-id", table.TableId, "--json", JsonSerializer.Serialize(body, CompactJsonOptions) };
+            var upsert = await RunLarkCliStrictAsync(_gateway, _args, command);
+            action.Status = "done";
+            action.Message = "已写入 Waivers 临时放行记录。";
+            action.Details["recordId"] = ParseRecordId(CombinedJsonOutput(upsert));
+            action.Details["expiresAt"] = waiver.ExpiresAt;
+            return action;
+        }
+
+        private string ResolveRegistryFieldName(RegistryTableSnapshot table, RegistryContract registry, string machineKey, params string[] aliases)
+        {
+            if (table == null)
+            {
+                return "";
+            }
+
+            var candidates = new List<string> { machineKey, RegistryLocalization.FieldDisplayName(machineKey, _request.Locale) };
+            if (aliases != null)
+            {
+                candidates.AddRange(aliases);
+            }
+
+            if (registry != null)
+            {
+                foreach (var tableFields in registry.FieldDisplayNames.Values)
+                {
+                    foreach (var pair in tableFields)
+                    {
+                        if (string.Equals(pair.Key, machineKey, StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(pair.Value, machineKey, StringComparison.OrdinalIgnoreCase))
+                        {
+                            candidates.Add(pair.Key);
+                            candidates.Add(pair.Value);
+                        }
+                    }
+                }
+            }
+
+            foreach (var candidate in candidates.Where(c => !string.IsNullOrWhiteSpace(c)).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var field = table.Fields.FirstOrDefault(f =>
+                    string.Equals(f.MachineKey, candidate, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(f.DisplayName, candidate, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(f.FieldId, candidate, StringComparison.OrdinalIgnoreCase));
+                if (field != null)
+                {
+                    return FirstNonEmpty(field.DisplayName, field.FieldId, candidate);
+                }
+            }
+
+            return "";
+        }
+
+        private void AddOptionalReviewField(Dictionary<string, object> body, RegistryTableSnapshot table, RegistryContract registry, string machineKey, string value, params string[] aliases)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+
+            var fieldName = ResolveRegistryFieldName(table, registry, machineKey, aliases);
+            if (!string.IsNullOrWhiteSpace(fieldName) && !body.ContainsKey(fieldName))
+            {
+                body[fieldName] = value;
+            }
+        }
+
+        private string FindUniqueMergeReviewRecordId(RegistryTableSnapshot table, string reviewIdField, string reviewId, string tableIdField, string tableId, string gitBranchField, string gitBranch)
+        {
+            var reviewMatches = table.Records
+                .Where(r => string.Equals(GetRegistryRecordValue(r, reviewIdField, _request.Locale, _request.Registry), reviewId, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (reviewMatches.Count > 1)
+            {
+                throw BuildDuplicateRegistryRecordException(table.TableId, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    [reviewIdField] = reviewId
+                }, reviewMatches);
+            }
+
+            if (reviewMatches.Count == 1)
+            {
+                return reviewMatches[0].RecordId;
+            }
+
+            var keyMatches = table.Records
+                .Where(r => string.Equals(GetRegistryRecordValue(r, tableIdField, _request.Locale, _request.Registry), tableId, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(GetRegistryRecordValue(r, gitBranchField, _request.Locale, _request.Registry), gitBranch, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (keyMatches.Count > 1)
+            {
+                throw BuildDuplicateRegistryRecordException(table.TableId, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    [tableIdField] = tableId,
+                    [gitBranchField] = gitBranch
+                }, keyMatches);
+            }
+
+            return keyMatches.Count == 1 ? keyMatches[0].RecordId : "";
+        }
+
+        private static string BuildMergeReviewId(string sourceBranch, string targetBranch, string gitHead)
+        {
+            var shortHead = FirstNonEmpty(gitHead, "unknown");
+            if (shortHead.Length > 8)
+            {
+                shortHead = shortHead.Substring(0, 8);
+            }
+
+            return "merge-" + Slugify(sourceBranch) + "-to-" + Slugify(targetBranch) + "-" + DateTimeOffset.UtcNow.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + "-" + shortHead;
+        }
+
+        private static string Slugify(string value)
+        {
+            value = (value ?? "").Trim();
+            var builder = new StringBuilder();
+            foreach (var c in value)
+            {
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+                {
+                    builder.Append(char.ToLowerInvariant(c));
+                }
+                else if (builder.Length == 0 || builder[builder.Length - 1] != '-')
+                {
+                    builder.Append('-');
+                }
+            }
+
+            return builder.ToString().Trim('-');
+        }
+
+        private static string HumanizeMergeReviewUpsertFailure(CliException ex)
+        {
+            var text = (ex.Message + "\n" + ex.Detail).ToLowerInvariant();
+            if (text.Contains("option") || text.Contains("select") || text.Contains("单选") || text.Contains("状态"))
+            {
+                return "MergeReviews.状态 字段缺少 approved/completed 选项，无法写入审查记录。请在 Base 的“状态”单选字段里加入 approved（或 completed），再重试。";
+            }
+
+            if (text.Contains("permission") || text.Contains("forbidden") || text.Contains("权限") || text.Contains("无权"))
+            {
+                return "bot 没有写入 MergeReviews 的权限。请把注册中心 Base 授权给 bot，并确认应用拥有 Base 记录写入 scope。";
+            }
+
+            return "写入 MergeReviews 失败：" + ex.Message;
         }
 
         public async Task<LifecycleActionResult> ApplyRegistryMigrationAsync(RegistryContract registry, RegistryMigrationPlan plan, CancellationToken cancellationToken)
@@ -4788,6 +5621,16 @@ public sealed class ParsedArgs
     public string Get(string key, string fallback)
     {
         return _options.TryGetValue(key, out var value) ? value : fallback;
+    }
+
+    public ParsedArgs WithDefault(string key, string value)
+    {
+        if (!_options.ContainsKey(key) && !_flags.Contains(key) && !string.IsNullOrWhiteSpace(key))
+        {
+            _options[key] = value ?? "";
+        }
+
+        return this;
     }
 
     public int GetInt(string key, int fallback)

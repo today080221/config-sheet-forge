@@ -32,6 +32,8 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("sync-cache hydrates branch workspace from registry snapshot", SyncCacheHydratesBranchWorkspaceFromRegistrySnapshot),
     ("compare-merge dry-run hydrates workspaces and table scope", CompareMergeDryRunHydratesWorkspacesAndTableScope),
     ("compare-merge dry-run fails without target workspace", CompareMergeDryRunFailsWithoutTargetWorkspace),
+    ("compare-merge dry-run fingerprints merge review input", CompareMergeDryRunFingerprintsMergeReviewInput),
+    ("pr gate hydrates live merge review records", PrGateHydratesLiveMergeReviewRecords),
     ("seed registry lookup reuses existing branch binding record", () => RunSync(SeedRegistryLookupReusesExistingBranchBindingRecord)),
     ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
@@ -743,6 +745,99 @@ static async Task CompareMergeDryRunFailsWithoutTargetWorkspace()
     AssertTrue(!result.Success, "compare-merge dry-run must not report success when target workspace/table locators are missing.");
     AssertTrue(result.Actions.Any(a => a.Action == "merge.inputs.prepare" && a.Status == "blocked"), "blocked compare-merge should still show the missing input plan action.");
     AssertTrue(result.HumanReadableFailures.Any(f => f.Contains("目标分支") && (f.Contains("BranchBindings") || f.Contains("ConfigSheets"))), "failure should explain that target branch registry data is missing.");
+}
+
+static async Task CompareMergeDryRunFingerprintsMergeReviewInput()
+{
+    var request = SampleCompareMergeRequest();
+    var snapshot = SampleCompareMergeRegistrySnapshot(includeTarget: true);
+    ConfigSheetForge.Cli.Program.HydrateCompareMergeRequestFromRegistrySnapshot(request, snapshot, "");
+
+    var compare = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+    AssertTrue(compare.Success, "compare-merge dry-run should pass.");
+    AssertTrue(!string.IsNullOrWhiteSpace(compare.RequestFingerprint), "compare-merge result should include requestFingerprint for later review submission.");
+    AssertEqual("feature/config", compare.RequestSummary["sourceBranch"], "fingerprint summary should include source branch.");
+    AssertEqual("main", compare.RequestSummary["targetBranch"], "fingerprint summary should include target branch.");
+    AssertTrue(compare.RequestSummary["tableIds"].Contains("ItemsData") && compare.RequestSummary["tableIds"].Contains("SkillsData"), "fingerprint summary should include table scope.");
+
+    var reviewRequest = new LifecycleContractRequest
+    {
+        Operation = "submit-merge-review",
+        DryRun = true,
+        Locale = "zh-Hans",
+        Registry = new RegistryContract { BaseToken = "base_mock" },
+        Git = new ContractGitSpec { Branch = "feature/config" },
+        MergeInputs = request.MergeInputs,
+        MergeReview = new MergeReviewContract
+        {
+            SourceBranch = "feature/config",
+            TargetBranch = "main",
+            TableIds = new List<string> { "ItemsData", "SkillsData" },
+            PrNumber = "480",
+            PrUrl = "https://github.example/pull/480",
+            MergeReportPath = "Temp/ConfigSheetForge/merge-report.md",
+            MergedPath = "Temp/ConfigSheetForge/merged.semantic.json",
+            RequestFingerprint = compare.RequestFingerprint,
+            ConfirmSubmit = true
+        }
+    };
+
+    var review = await LifecycleExecutor.ExecuteAsync(reviewRequest, new PreviewLifecyclePlatform(), CancellationToken.None);
+    AssertTrue(review.Success, "submit-merge-review dry-run should pass when fingerprint matches.");
+    AssertEqual(compare.RequestFingerprint, review.RequestFingerprint, "merge review fingerprint must match the compare preview fingerprint.");
+    AssertTrue(review.Actions.Any(a => a.Action == "registry.merge_reviews.upsert"), "submit-merge-review should plan a MergeReviews upsert.");
+}
+
+static async Task PrGateHydratesLiveMergeReviewRecords()
+{
+    var request = new LifecycleContractRequest
+    {
+        Operation = "pr-gate-report",
+        Locale = "zh-Hans",
+        Registry = new RegistryContract { BaseToken = "base_mock" },
+        Git = new ContractGitSpec { Branch = "feature/config", Head = "abc123" },
+        GateReport = new PrGateReport
+        {
+            GitHead = "abc123",
+            Branch = "feature/config",
+            Permissions = new GatePermissions { CanReadRegistry = true, CanReadSheets = true },
+            PortableSubset = new GateCheckState { Passed = true },
+            Triangulation = new GateCheckState { Passed = true },
+            ChangedTables = { "ItemsData" },
+            CacheHashes = { ["ItemsData"] = "hash" }
+        }
+    };
+    var snapshot = new RegistrySnapshot();
+    snapshot.Tables.Add(new RegistryTableSnapshot
+    {
+        MachineKey = "MergeReviews",
+        TableId = "tbl_merge",
+        DisplayName = "合并审查",
+        Records =
+        {
+            new RegistryRecordSnapshot
+            {
+                RecordId = "rec_merge",
+                Values =
+                {
+                    ["审查ID"] = "merge-feature-config-to-main-20260527-abc123",
+                    ["配表ID"] = "__project_pr_gate__",
+                    ["Git分支"] = "feature/config",
+                    ["状态"] = "已通过",
+                    ["ApproverRole"] = "configOwner",
+                    ["更新时间"] = "2026-05-27T12:00:00Z"
+                }
+            }
+        }
+    });
+
+    ConfigSheetForge.Cli.Program.HydratePrGateReportFromRegistrySnapshot(request, snapshot);
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+    AssertTrue(result.Success, "PR gate should pass when live MergeReviews has an approved project-level record.");
+    AssertEqual("rec_merge", result.PrGateReport.MergeReview.RecordId, "gate report should include live MergeReviews record id.");
+    AssertEqual("merge-feature-config-to-main-20260527-abc123", result.PrGateReport.MergeReview.ReviewId, "gate report should include review id.");
+    AssertEqual("configOwner", result.PrGateReport.MergeReview.ApproverRole, "gate report should include approver role.");
+    AssertEqual("__project_pr_gate__", result.PrGateReport.MergeReview.TableId, "gate report should include table id.");
 }
 
 static LifecycleContractRequest SampleCompareMergeRequest()
