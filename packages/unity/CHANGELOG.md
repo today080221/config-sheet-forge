@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.24
+
+- 修复 Lark provider 在 `Range` 为空时依赖 `sheets +read` no-range 默认行为的问题：现在会优先从导出的 xlsx 推导显式 `sheetId!A1:<col><row>`，导出不可用时读取 `sheets +info` 的 grid 信息；遇到 `90202 wrong startRange` 会自动改用显式范围重试。
+- `lark.read_failed` 诊断会带出 tableId、脱敏 spreadsheet token、sheetId、attemptedRange、retryRange、lark error code/message 和 retry 结果，避免把 no-range 问题误导成 bot 权限问题。
+- Unity 在 `sync-cache` dry-run `cacheStatus=blocked` 时不再推荐“写入本地 cache”，写入按钮保持禁用，并显示“同步预检未通过”和 blocked tables；在线表状态仍信任 live registry。
+- `sync-status` 不再只给 `unknown`：它会只读 live registry 和本地 cache/sha 文件，输出 per-table local cache state，不读取/导出在线 Sheet、不写文件。
+- `bootstrap-current-branch-from-target` 增加 safe apply 路径：要求最近一次同输入 dry-run result/fingerprint，并分项确认创建/复用在线 Sheet、写 BranchBindings/ConfigSheets、登记 SchemaReviews；默认不写本地 cache、不改 ProjectSettings、不改 ExcelToSO。
+- 降低 `cell.bool_invalid` warning 噪音：同一表/列的非阻断布尔解析 warning 会聚合显示，避免淹没真正的 blocked error。
+
 ## 0.4.23
 
 - 新增只读 `registry-status` / `branch-status` / `sync-status` lifecycle：Unity 可以后台读取 Feishu Base 注册中心，判断当前分支 BranchBindings、ConfigSheets、缺失表、缺定位、重复记录和下一步建议；不会读取/导出在线 Sheet，也不会写任何文件。

@@ -1710,6 +1710,7 @@ namespace ConfigSheetForge.Core
             var targetProfile = FirstNonEmpty(request.MergeInputs.TargetFeishuProfile, request.BranchWorkspace.MainFeishuBranch, targetBranch);
             var tableIds = BuildExpectedTableIds(request, request.SyncCache != null ? request.SyncCache.TableId : "");
             var targetRows = FindConfigSheetRowsForProfile(request, targetProfile, request.SyncCache != null ? request.SyncCache.TableId : "");
+            result.RequestFingerprint = BuildCurrentBranchBootstrapFingerprint(branchWorkspace.GitBranch, FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch), targetBranch, targetProfile, tableIds, targetRows);
             var targetRegistered = new HashSet<string>(
                 targetRows.Select(t => t.TableId).Where(t => !string.IsNullOrWhiteSpace(t)),
                 StringComparer.OrdinalIgnoreCase);
@@ -1734,6 +1735,7 @@ namespace ConfigSheetForge.Core
             plan.Details["targetProfile"] = targetProfile;
             plan.Details["currentBranch"] = branchWorkspace.GitBranch;
             plan.Details["currentProfile"] = FirstNonEmpty(branchWorkspace.Profile, branchWorkspace.FeishuBranch);
+            plan.Details["requestFingerprint"] = result.RequestFingerprint;
             plan.Details["branchNodeTitle"] = branchWorkspace.NodeTitle;
             plan.Details["tableCount"] = tableIds.Count.ToString(CultureInfo.InvariantCulture);
             plan.Details["tableIds"] = string.Join(", ", tableIds);
@@ -1767,6 +1769,39 @@ namespace ConfigSheetForge.Core
             {
                 result.AddFailure("从目标分支初始化当前分支在线表的 apply 需要项目 adapter 或后续 CLI 复制实现；当前版本先提供一等 dry-run 入口，避免误导用户去做本地 Excel Seed。");
             }
+        }
+
+        private static string BuildCurrentBranchBootstrapFingerprint(string currentBranch, string currentProfile, string targetBranch, string targetProfile, IList<string> tableIds, IList<SeedTableContract> targetRows)
+        {
+            var rowLines = new List<string>();
+            foreach (var row in targetRows ?? new List<SeedTableContract>())
+            {
+                if (row == null || string.IsNullOrWhiteSpace(row.TableId))
+                {
+                    continue;
+                }
+
+                rowLines.Add(string.Join("|", new[]
+                {
+                    NormalizeFingerprintValue(row.TableId),
+                    NormalizeFingerprintValue(row.DisplayName),
+                    NormalizeFingerprintValue(row.SpreadsheetToken),
+                    NormalizeFingerprintValue(row.SpreadsheetUrl),
+                    NormalizeFingerprintValue(row.SheetId),
+                    NormalizeFingerprintValue(row.SemanticHash)
+                }));
+            }
+
+            rowLines.Sort(StringComparer.OrdinalIgnoreCase);
+            var basis = new StringBuilder();
+            basis.AppendLine("operation=bootstrap-current-branch-from-target");
+            basis.AppendLine("currentBranch=" + NormalizeFingerprintValue(currentBranch));
+            basis.AppendLine("currentProfile=" + NormalizeFingerprintValue(currentProfile));
+            basis.AppendLine("targetBranch=" + NormalizeFingerprintValue(targetBranch));
+            basis.AppendLine("targetProfile=" + NormalizeFingerprintValue(targetProfile));
+            basis.AppendLine("tableIds=" + string.Join(",", (tableIds ?? new List<string>()).Select(NormalizeFingerprintValue).OrderBy(v => v, StringComparer.OrdinalIgnoreCase)));
+            basis.AppendLine("targetRows=" + string.Join(",", rowLines));
+            return Sha256Hex(basis.ToString());
         }
 
         private static void PopulateBranchStatus(LifecycleContractRequest request, LifecycleContractResult result, BranchWorkspaceResolution branchWorkspace)

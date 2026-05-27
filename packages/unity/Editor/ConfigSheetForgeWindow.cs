@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.23";
+        private const string PackageVersion = "v0.4.24";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -129,6 +129,9 @@ namespace ConfigSheetForge.Unity.Editor
         private bool _confirmTargetWriteLocalCache;
         private bool _confirmTargetWriteProjectConfig;
         private bool _confirmTargetExcelToSo;
+        private bool _confirmCurrentBranchCreateOnlineSheets;
+        private bool _confirmCurrentBranchRegistryUpsert;
+        private bool _confirmCurrentBranchSchemaReviews;
         private bool _confirmSyncApply;
         private bool _confirmNewTableApply;
         private bool _showAdvancedDiagnostics;
@@ -955,6 +958,11 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             var next = BuildNextStepText(projectRoot);
+            if (string.Equals(next, "修复同步预检问题", StringComparison.OrdinalIgnoreCase))
+            {
+                return "同步预检未通过，先修复在线读取或三方一致性问题；本次不会推荐写入本地 cache。";
+            }
+
             if (string.Equals(next, "初始化当前分支在线表", StringComparison.OrdinalIgnoreCase))
             {
                 return "当前 Git 分支还没有完整在线工作区；下一步从 main/目标分支初始化当前分支在线表，先生成预览，不写本地文件。";
@@ -1013,6 +1021,21 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             var next = BuildNextStepText(projectRoot);
+            if (string.Equals(next, "修复同步预检问题", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DashboardAction(
+                    "查看同步预检问题",
+                    "打开最近结果，先处理 blocked tables；同步预检失败时不会写 cache。",
+                    "安全：只查看诊断，不写飞书、不改本地 cache。",
+                    () =>
+                    {
+                        _selectedTab = TablesTab;
+                        _showSyncSection = true;
+                        SetBottomOutputExpanded(true, persist: true);
+                        SetImmediateOutput("同步预检未通过，先修复在线读取/三方一致性问题。", BuildSyncCacheStatusText());
+                    });
+            }
+
             if (string.Equals(next, "初始化当前分支在线表", StringComparison.OrdinalIgnoreCase))
             {
                 return new DashboardAction(
@@ -1309,6 +1332,11 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (_projectConfig.Exists)
             {
+                if (ShouldShowCurrentBranchBootstrapCard())
+                {
+                    DrawCurrentBranchBootstrapCard();
+                }
+
                 _showSyncSection = EditorGUILayout.Foldout(_showSyncSection, "同步当前分支 cache", true);
                 if (_showSyncSection)
                 {
@@ -1702,7 +1730,11 @@ namespace ConfigSheetForge.Unity.Editor
             DrawReadonlyRow("最近同步结论", BuildSyncCacheStatusText(), "来自最近一次 sync-cache dry-run/apply result。");
             _confirmSyncApply = EditorGUILayout.Toggle(new GUIContent("确认写入本地 cache", "允许更新 .config-sheet-forge/cache 和 excel-cache；必须先预览通过。"), _confirmSyncApply);
             var syncApplyReady = _confirmSyncApply && LastPreviewPassed("sync-cache") && SyncPreviewRequiresCacheWrite();
-            if (_confirmSyncApply && !LastPreviewPassed("sync-cache"))
+            if (string.Equals(_projectConfig.SyncCacheStatus, "blocked", StringComparison.OrdinalIgnoreCase))
+            {
+                EditorGUILayout.HelpBox("同步预检未通过，先修复在线读取/三方一致性问题；本次不会允许写入本地 cache。阻断表：" + string.Join(", ", _projectConfig.SyncCacheBlockedTables), MessageType.Error);
+            }
+            else if (_confirmSyncApply && !LastPreviewPassed("sync-cache"))
             {
                 EditorGUILayout.HelpBox("请先预览同步计划，并确认预览成功后再写入本地 cache。", MessageType.Warning);
             }
@@ -1721,6 +1753,50 @@ namespace ConfigSheetForge.Unity.Editor
                 if (EditorUtility.DisplayDialog("确认同步 cache", "将读取当前 branch/profile 的在线 Sheet，导出 xlsx，三方一致后更新本地 cache。无变化时会显示“无变化，未重写 cache”。", "确认执行", "取消"))
                 {
                     RunSyncCache(apply: true);
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.EndVertical();
+        }
+
+        private bool ShouldShowCurrentBranchBootstrapCard()
+        {
+            return string.Equals(BuildNextStepText(FindProjectRoot()), "初始化当前分支在线表", StringComparison.OrdinalIgnoreCase) ||
+                   LastPreviewPassed("bootstrap-current-branch-from-target") ||
+                   LastPreviewPassed("branch-workspace-bootstrap-from-target");
+        }
+
+        private void DrawCurrentBranchBootstrapCard()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("从目标分支派生当前分支在线表", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("用于新 git 分支第一次建立飞书工作区：从 main/PR base 复制在线 Source of Truth，创建当前分支 Wiki 节点、在线 Sheet、BranchBindings、ConfigSheets 和 SchemaReviews。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.HelpBox("默认不会写本地 cache，不改 ProjectSettings，不改 ExcelToSO，也不会碰历史 OneDrive Excel。先 dry-run，apply 必须同输入预览通过并勾选三项确认。", MessageType.Info);
+            _confirmCurrentBranchCreateOnlineSheets = EditorGUILayout.Toggle(new GUIContent("确认创建/复用当前分支在线 Sheet", "会在当前分支工作区下创建或复用在线表副本。"), _confirmCurrentBranchCreateOnlineSheets);
+            _confirmCurrentBranchRegistryUpsert = EditorGUILayout.Toggle(new GUIContent("确认写 BranchBindings / ConfigSheets", "会写入 Feishu Base 注册中心，用于后续同步和 PR gate。"), _confirmCurrentBranchRegistryUpsert);
+            _confirmCurrentBranchSchemaReviews = EditorGUILayout.Toggle(new GUIContent("确认登记 SchemaReviews baseline", "会写入 SchemaReviews baseline，便于 PR gate 识别后续 schema 变化。"), _confirmCurrentBranchSchemaReviews);
+            var applyReady = LastPreviewPassed("bootstrap-current-branch-from-target") &&
+                             _confirmCurrentBranchCreateOnlineSheets &&
+                             _confirmCurrentBranchRegistryUpsert &&
+                             _confirmCurrentBranchSchemaReviews &&
+                             !string.IsNullOrWhiteSpace(_lastResultPath) &&
+                             File.Exists(_lastResultPath);
+            if (!LastPreviewPassed("bootstrap-current-branch-from-target"))
+            {
+                EditorGUILayout.HelpBox("请先生成“从目标分支派生当前分支”的 dry-run 预览。", MessageType.None);
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            if (DrawJobButton(new GUIContent("预览派生当前分支", "只生成从 main/目标分支派生当前分支在线表的计划，不写飞书、不改本地。"), GUILayout.Height(28)))
+            {
+                RunCurrentBranchBootstrapPreview();
+            }
+
+            if (DrawJobButton(new GUIContent("执行派生当前分支", "会写飞书当前分支工作区、在线 Sheet 和注册中心；不写本地 cache/ProjectSettings/ExcelToSO。"), applyReady, GUILayout.Height(28)))
+            {
+                if (EditorUtility.DisplayDialog("确认派生当前分支", "将从目标分支复制在线 Source of Truth，写入当前分支飞书工作区、在线 Sheet、BranchBindings、ConfigSheets 和 SchemaReviews。\n\n不会写本地 cache，不改 ProjectSettings，不改 ExcelToSO，不碰历史 Excel。", "确认执行", "取消"))
+                {
+                    RunCurrentBranchBootstrapApply();
                 }
             }
             EditorGUILayout.EndHorizontal();
@@ -3747,6 +3823,61 @@ namespace ConfigSheetForge.Unity.Editor
                 projectConfig: _projectConfig));
         }
 
+        private void RunCurrentBranchBootstrapApply()
+        {
+            RefreshReadonlyStatus();
+            if (!_projectConfig.Exists)
+            {
+                SetImmediateOutput("未发现项目配置。请确认 ProjectSettings 下存在 *ConfigSheetForge*.json。", "");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(_lastResultPath) || !File.Exists(_lastResultPath))
+            {
+                SetImmediateOutput("找不到最近一次派生当前分支 dry-run result。", "请先点“预览派生当前分支”。");
+                return;
+            }
+
+            var projectRoot = FindProjectRoot();
+            var resultPath = GetUnityLifecyclePath(projectRoot, "bootstrap-current-branch-from-target.apply.result.json");
+            var args = new List<string>
+            {
+                "bootstrap-current-branch-from-target",
+                "--manifest",
+                _projectConfig.ProjectConfigPath,
+                "--target-branch",
+                FirstNonEmpty(_targetBranch, _projectConfig.DefaultTargetBranch, "main"),
+                "--preview-result",
+                _lastResultPath,
+                "--out",
+                resultPath,
+                "--details",
+                "--apply",
+                "--confirm-create-online-sheets",
+                "--confirm-registry-upsert",
+                "--confirm-schema-reviews"
+            };
+            var cli = ResolveCoreCli(projectRoot);
+            _lastCommand = cli.ToCommandLine(args.ToArray());
+            if (!cli.CanLaunch)
+            {
+                SetImmediateOutput(ConfigSheetForgeEditorUtility.FormatCliLaunchFailure(_lastCommand, cli.FailureReason, _projectConfig), "");
+                return;
+            }
+
+            StartBackgroundJob(ConfigSheetForgeBackgroundJob.CreateSingleProcess(
+                "bootstrap-current-branch-from-target",
+                dryRun: false,
+                commandLine: _lastCommand,
+                executable: cli.Executable,
+                arguments: cli.BuildArguments(args.ToArray()),
+                workingDirectory: projectRoot,
+                resultPath: resultPath,
+                lifecycleDirectory: GetUnityLifecycleDirectory(projectRoot),
+                refreshReadonlyStatusOnComplete: true,
+                projectConfig: _projectConfig));
+        }
+
         private void RunSyncCacheCli(bool apply)
         {
             RefreshReadonlyStatus();
@@ -4846,6 +4977,11 @@ namespace ConfigSheetForge.Unity.Editor
                 return "运行 PR 检查";
             }
 
+            if (string.Equals(_projectConfig.SyncCacheStatus, "blocked", StringComparison.OrdinalIgnoreCase))
+            {
+                return "修复同步预检问题";
+            }
+
             if (string.Equals(_projectConfig.SyncCacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(_projectConfig.SyncCacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase))
             {
@@ -4883,6 +5019,11 @@ namespace ConfigSheetForge.Unity.Editor
                 return "运行 PR 检查";
             }
 
+            if (string.Equals(next, "修复同步预检问题", StringComparison.OrdinalIgnoreCase))
+            {
+                return "查看同步问题";
+            }
+
             if (string.Equals(next, "可以提交 PR", StringComparison.OrdinalIgnoreCase))
             {
                 return "刷新状态";
@@ -4918,6 +5059,15 @@ namespace ConfigSheetForge.Unity.Editor
                 _selectedTab = TablesTab;
                 _showSyncSection = true;
                 SetImmediateOutput("请在“配表”页确认写入本地 cache。", "写入前需要最近一次同步预览通过，并勾选确认。");
+                return;
+            }
+
+            if (string.Equals(next, "修复同步预检问题", StringComparison.OrdinalIgnoreCase))
+            {
+                _selectedTab = TablesTab;
+                _showSyncSection = true;
+                SetBottomOutputExpanded(true, persist: true);
+                SetImmediateOutput("同步预检未通过，先修复在线读取/三方一致性问题。", BuildSyncCacheStatusText());
                 return;
             }
 
@@ -6121,7 +6271,7 @@ namespace ConfigSheetForge.Unity.Editor
                 return new GateFailureView
                 {
                     Reason = "当前分支的在线工作区未绑定或绑定冲突",
-                    NextStep = "先预览同步计划，确认当前分支只对应一个有效在线工作区；权限不足时请找配置负责人处理。",
+                    NextStep = "如果这是新功能分支，请先从 main/PR base 派生当前分支在线表；如果提示重复绑定，请让配置负责人清理重复 BranchBindings。",
                     Priority = 50
                 };
             }
@@ -6131,7 +6281,7 @@ namespace ConfigSheetForge.Unity.Editor
                 return new GateFailureView
                 {
                     Reason = "当前分支没有在线表记录",
-                    NextStep = "先确认这个分支是否已经 Seed；如果只是预览新分支，请点“预览同步计划”；如果要迁移旧 Excel，请展开“本地 Excel Seed”。",
+                    NextStep = "如果这是新功能分支，请先从 main/PR base 派生当前分支在线表；只有历史 Excel 迁移才使用“本地 Excel Seed”。",
                     Priority = 60
                 };
             }

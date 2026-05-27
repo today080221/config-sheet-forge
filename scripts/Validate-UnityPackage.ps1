@@ -310,6 +310,13 @@ foreach ($requiredV423Marker in @("BranchStatusSummary", "SyncCacheSummary", "re
   }
 }
 
+$larkProvider = Get-Content -Raw src/providers/lark/ConfigSheetForge.Providers.Lark/LarkCliWorkbookProvider.cs
+foreach ($requiredV424Marker in @("lark.read_retry_success", "BuildDefaultReadRange", "TryBuildRangeFromXlsx", "sync-status.local_cache.inspect", "DrawCurrentBranchBootstrapCard", "RunCurrentBranchBootstrapApply", "修复同步预检问题", "cell.bool_invalid", "lark read wrong startRange retries explicit range")) {
+  if (($coreContracts + "`n" + $cliProgram + "`n" + $window + "`n" + $larkProvider + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV424Marker*") {
+    throw "Unity v0.4.24 sync-cache/current-branch bootstrap marker is missing: $requiredV424Marker"
+  }
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

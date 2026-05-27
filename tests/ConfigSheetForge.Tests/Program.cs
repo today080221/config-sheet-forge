@@ -37,6 +37,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("sync-cache exposes live registry branch status", SyncCacheExposesLiveRegistryBranchStatus),
     ("project config probe trusts live registry locators over empty project settings", () => RunSync(ProjectConfigProbeTrustsLiveRegistryLocatorsOverEmptyProjectSettings)),
     ("sync-cache dry-run summary drives next action", () => RunSync(SyncCacheDryRunSummaryDrivesNextAction)),
+    ("sync-status inspects local cache without online reads", SyncStatusInspectsLocalCacheWithoutOnlineReads),
     ("current branch bootstrap from target plans instead of seed", CurrentBranchBootstrapFromTargetPlansInsteadOfSeed),
     ("compare-merge dry-run hydrates workspaces and table scope", CompareMergeDryRunHydratesWorkspacesAndTableScope),
     ("compare-merge dry-run fails without target workspace", CompareMergeDryRunFailsWithoutTargetWorkspace),
@@ -71,11 +72,13 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("target branch bootstrap postflight failure blocks apply result", TargetBranchBootstrapPostflightFailureBlocksApplyResult),
     ("apply-contract target branch bootstrap requires preview result", ApplyContractTargetBranchBootstrapRequiresPreviewResult),
     ("apply-contract target branch bootstrap rejects preview fingerprint mismatch", ApplyContractTargetBranchBootstrapRejectsPreviewFingerprintMismatch),
+    ("apply-contract current branch bootstrap requires preview result", ApplyContractCurrentBranchBootstrapRequiresPreviewResult),
     ("seed manifest does not treat cache excelPath as source", SeedManifestDoesNotTreatCacheExcelPathAsSource),
     ("seed dry-run blocks merged xlsx cells", SeedDryRunBlocksMergedCells),
     ("sheet write ranges support columns past z", () => RunSync(SheetWriteRangeSupportsColumnsPastZ)),
     ("portable subset blocks unsupported structures", () => RunSync(PortableSubsetBlocksUnsupportedStructures)),
     ("triangulation passes and fails with readable diffs", () => RunSync(TriangulationPassesAndFailsWithReadableDiffs)),
+    ("lark read wrong startRange retries explicit range", LarkReadWrongStartRangeRetriesExplicitRange),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
     ("seed lifecycle rejects user fallback", SeedLifecycleRejectsUserFallback),
@@ -994,6 +997,84 @@ static void SyncCacheDryRunSummaryDrivesNextAction()
     AssertTrue(summary.LiveMissingTables.Count == 0 && summary.LiveMissingLocators.Count == 0, "Live status should not invent missing tables.");
 }
 
+static async Task SyncStatusInspectsLocalCacheWithoutOnlineReads()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-sync-status-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        Directory.SetCurrentDirectory(root);
+        var cacheDir = Path.Combine(root, ".config-sheet-forge", "cache");
+        var excelDir = Path.Combine(root, ".config-sheet-forge", "excel-cache");
+        Directory.CreateDirectory(cacheDir);
+        Directory.CreateDirectory(excelDir);
+        File.WriteAllText(Path.Combine(cacheDir, "ItemsData.semantic.json"), "{\"tableId\":\"ItemsData\"}");
+        File.WriteAllText(Path.Combine(cacheDir, "ItemsData.sha256"), "hash_items");
+        File.WriteAllText(Path.Combine(excelDir, "ItemsData.xlsx"), "placeholder");
+
+        var request = new LifecycleContractRequest
+        {
+            Operation = "sync-status",
+            DryRun = true,
+            Git = new ContractGitSpec { Branch = "feature/config", Profile = "feature-config" },
+            BranchWorkspace = new BranchWorkspaceContract
+            {
+                GitBranch = "feature/config",
+                Profile = "feature-config",
+                ExistingWikiNodeToken = "wik_feature",
+                ExistingWikiNodeUrl = "https://example.feishu.cn/wiki/wik_feature"
+            },
+            SyncCache = new SyncCacheContract
+            {
+                CacheDirectory = cacheDir,
+                ExcelCacheDirectory = excelDir
+            }
+        };
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract
+        {
+            TableId = "ItemsData",
+            DisplayName = "Items",
+            Profile = "feature-config",
+            SpreadsheetToken = "sht_items",
+            SheetId = "sheet_items",
+            SemanticHash = "hash_items"
+        });
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract
+        {
+            TableId = "SkillsData",
+            DisplayName = "Skills",
+            Profile = "feature-config",
+            SpreadsheetToken = "sht_skills",
+            SheetId = "sheet_skills",
+            SemanticHash = "hash_skills"
+        });
+
+        var requestPath = Path.Combine(root, "request.json");
+        var resultPath = Path.Combine(root, "sync-status.result.json");
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request, CamelJsonOptions()));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "apply-contract", "--request", requestPath, "--out", resultPath });
+
+        AssertEqual("0", exitCode.ToString(), "sync-status should be a read-only successful lifecycle.");
+        var json = await File.ReadAllTextAsync(resultPath);
+        AssertTrue(json.Contains("\"cacheStatus\":\"missingCache\"") || json.Contains("\"cacheStatus\": \"missingCache\""), "sync-status should compute local cache state instead of unknown.");
+        AssertTrue(json.Contains("sync-status.local_cache.inspect"), "sync-status should record the read-only local cache inspection action.");
+        AssertTrue(json.Contains("\"upToDateTables\"") && json.Contains("ItemsData"), "sync-status should mark local matching cache as up-to-date.");
+        AssertTrue(json.Contains("\"missingCacheTables\"") && json.Contains("SkillsData"), "sync-status should report missing local cache per table.");
+        AssertTrue(!json.Contains("sync-cache.online_read"), "sync-status must not read online Sheet values.");
+        AssertTrue(!json.Contains("sync-cache.export_xlsx"), "sync-status must not export online xlsx.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
 static async Task CurrentBranchBootstrapFromTargetPlansInsteadOfSeed()
 {
     var request = new LifecycleContractRequest
@@ -1018,6 +1099,7 @@ static async Task CurrentBranchBootstrapFromTargetPlansInsteadOfSeed()
     var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
 
     AssertTrue(result.Success, "Current branch bootstrap dry-run should be a first-class safe plan.");
+    AssertTrue(!string.IsNullOrWhiteSpace(result.RequestFingerprint), "Current branch bootstrap preview should produce a request fingerprint for safe apply.");
     AssertTrue(result.Actions.Any(a => a.Action == "current_branch.bootstrap_from_target.plan" && a.Details["targetBranch"] == "main"), "Plan should identify target branch.");
     AssertTrue(result.Actions.Any(a => a.Action == "current_branch.sheets.copy_from_target"), "Plan should describe deriving online sheets from target branch, not local Excel Seed.");
 }
@@ -2347,6 +2429,63 @@ static async Task ApplyContractTargetBranchBootstrapRejectsPreviewFingerprintMis
     }
 }
 
+static async Task ApplyContractCurrentBranchBootstrapRequiresPreviewResult()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-current-bootstrap-preview-required-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        Directory.SetCurrentDirectory(root);
+        var request = new LifecycleContractRequest
+        {
+            Operation = "bootstrap-current-branch-from-target",
+            DryRun = false,
+            Git = new ContractGitSpec { Branch = "feature/config", Profile = "feature-config" },
+            BranchWorkspace = new BranchWorkspaceContract
+            {
+                MainGitBranch = "main",
+                MainFeishuBranch = "main",
+                ProfileNameTemplate = "{gitBranch}",
+                BranchNodeTitleTemplate = "branch-{slug}"
+            },
+            MergeInputs = new MergeInputsContract { TargetBranch = "main", TargetFeishuProfile = "main" },
+            TargetBranchBootstrap = new TargetBranchBootstrapContract
+            {
+                ConfirmCreateOnlineSheets = true,
+                ConfirmRegistryUpsert = true,
+                ConfirmSchemaReviews = true
+            }
+        };
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract { TableId = "ItemsData", DisplayName = "Items" });
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract
+        {
+            TableId = "ItemsData",
+            DisplayName = "Items",
+            Profile = "main",
+            SpreadsheetToken = "sht_items_main",
+            SheetId = "sheet_items"
+        });
+
+        var requestPath = Path.Combine(root, "request.json");
+        var resultPath = Path.Combine(root, "result.json");
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request, CamelJsonOptions()));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "apply-contract", "--request", requestPath, "--out", resultPath });
+
+        AssertEqual("2", exitCode.ToString(), "Current branch bootstrap apply-contract must require a matching dry-run result.");
+        AssertTrue(!File.Exists(resultPath), "Blocked current branch apply should fail before emitting a lifecycle result.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
 static async Task SeedManifestDoesNotTreatCacheExcelPathAsSource()
 {
     var root = Path.Combine(Path.GetTempPath(), "csforge-seed-manifest-source-" + Guid.NewGuid().ToString("N"));
@@ -2457,6 +2596,68 @@ static void TriangulationPassesAndFailsWithReadableDiffs()
     var fail = SemanticTriangulator.Compare(online, exported, normalized);
     AssertTrue(!fail.Passed, "Changed xlsx semantic should fail triangulation.");
     AssertTrue(fail.DiffSummary.Any(d => d.Contains("item_sword") && d.Contains("power")), "Diff should identify the changed row and column.");
+}
+
+static async Task LarkReadWrongStartRangeRetriesExplicitRange()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-lark-range-retry-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    var log = Path.Combine(temp, "calls.log");
+    var script = Path.Combine(temp, "lark-cli.ps1");
+    await File.WriteAllTextAsync(script,
+        "$ErrorActionPreference = 'Continue'\n" +
+        "$log = '" + EscapePowerShellSingleQuoted(log) + "'\n" +
+        "Add-Content -LiteralPath $log -Value ($args -join ' ')\n" +
+        "if ($args -contains 'doctor') { exit 0 }\n" +
+        "if ($args -contains '+export') { Write-Error '{\"code\":90202,\"msg\":\"export unavailable in test\"}'; exit 7 }\n" +
+        "if ($args -contains '+info') { Write-Error '{\"code\":90202,\"msg\":\"info unavailable in test\"}'; exit 8 }\n" +
+        "if ($args -contains '+read') {\n" +
+        "  if (-not ($args -contains '--range')) { Write-Error '{\"code\":90202,\"msg\":\"wrong startRange=f83835\"}'; exit 3 }\n" +
+        "  $i = [array]::IndexOf($args, '--range')\n" +
+        "  $range = $args[$i + 1]\n" +
+        "  if ($range -ne 'f83835!A1:T200') { Write-Error ('unexpected range ' + $range); exit 4 }\n" +
+        "  Write-Output '{\"data\":{\"values\":[[\"id\",\"name\"],[\"item_001\",\"Sword\"]]}}'\n" +
+        "  exit 0\n" +
+        "}\n" +
+        "Write-Output '{}'\n" +
+        "exit 0\n");
+
+    try
+    {
+        var provider = new LarkCliWorkbookProvider();
+        var context = new ProviderContext { WorkspaceRoot = temp };
+        context.Settings["larkCliPath"] = script;
+        context.Settings["larkCliIdentity"] = "bot";
+        var result = await provider.ExportAsync(context, new ProviderExportRequest
+        {
+            SpreadsheetTokenOrUrl = "TCkxsBImChmzXTt5HnEcOYOSnqf",
+            TableId = "BuffData",
+            SheetId = "f83835",
+            CacheDirectory = Path.Combine(temp, "cache")
+        }, CancellationToken.None);
+
+        var calls = File.ReadAllText(log);
+        AssertTrue(result.Workbook != null, "Provider should recover from wrong startRange by retrying an explicit A1 range.");
+        AssertTrue(!result.Findings.Any(f => f.Severity == FindingSeverity.Error && f.Code == "lark.read_failed"), "Retry success should not leave lark.read_failed.");
+        AssertTrue(result.Findings.Any(f => f.Code == "lark.read_retry_success" && f.Details.TryGetValue("retryRange", out var range) && range == "f83835!A1:T200"), "Retry finding should expose the explicit range.");
+        AssertTrue(calls.Contains("sheets +read --spreadsheet-token TCkxsBImChmzXTt5HnEcOYOSnqf --sheet-id f83835 --as bot"), "The first read should exercise the no-range failure path with strict bot.");
+        AssertTrue(calls.Contains("--range f83835!A1:T200"), "The provider should retry with an explicit range.");
+        AssertTrue(!calls.Contains("--as user"), "Strict bot mode must not fallback to user.");
+    }
+    finally
+    {
+        Directory.Delete(temp, recursive: true);
+    }
+}
+
+static string EscapePowerShellSingleQuoted(string value)
+{
+    return (value ?? "").Replace("'", "''");
 }
 
 static async Task SyncLocalInputDoesNotRewriteUnchangedCache()

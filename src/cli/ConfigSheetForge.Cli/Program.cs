@@ -381,7 +381,7 @@ public static class Program
                 TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
             }, CancellationToken.None);
 
-            foreach (var finding in result.Findings)
+            foreach (var finding in CollapseNoisyProviderFindings(table.Id, result.Findings))
             {
                 PrintFinding(finding, args.HasFlag("details"));
                 summary.PortableSubsetFindings.Add(table.Id + ": " + finding.Code + " " + finding.Message);
@@ -441,7 +441,7 @@ public static class Program
                     DataStartRow = table.DataStartRow,
                     TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
                 });
-                foreach (var finding in xlsxImport.Report.Findings)
+                foreach (var finding in CollapseNoisyValidationFindings(table.Id, xlsxImport.Report.Findings))
                 {
                     PrintValidation(finding, args.HasFlag("details"));
                     summary.PortableSubsetFindings.Add(table.Id + ": " + finding.Code + " " + finding.Message);
@@ -603,6 +603,85 @@ public static class Program
         }
     }
 
+    private static void ApplyReadOnlySyncStatus(LifecycleContractResult result, LifecycleContractRequest request)
+    {
+        request.SyncCache ??= new SyncCacheContract();
+        var branchStatus = result.BranchStatus ?? new BranchStatusSummary();
+        var summary = new SyncCacheSummary
+        {
+            TableCount = branchStatus.TableCountExpected > 0 ? branchStatus.TableCountExpected : branchStatus.TableCountRegistered,
+            WillWriteFiles = false,
+            NoChangeKeepsMtime = true,
+            ResolvedOnlineTables = branchStatus.RegisteredOnlineTables.ToList()
+        };
+
+        if (branchStatus.MissingTables.Count > 0 ||
+            branchStatus.MissingLocators.Count > 0 ||
+            branchStatus.DuplicateConfigSheets.Count > 0)
+        {
+            summary.BlockedTables.AddRange(branchStatus.MissingTables);
+            summary.BlockedTables.AddRange(branchStatus.MissingLocators);
+            summary.BlockedTables.AddRange(branchStatus.DuplicateConfigSheets);
+        }
+
+        foreach (var table in branchStatus.RegisteredOnlineTables)
+        {
+            if (string.IsNullOrWhiteSpace(table.TableId))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(table.BlockingReason))
+            {
+                summary.BlockedTables.Add(table.TableId);
+                continue;
+            }
+
+            var paths = BuildCacheFilePaths(request.SyncCache.CacheDirectory, request.SyncCache.ExcelCacheDirectory, table.TableId)
+                .Select(Path.GetFullPath)
+                .ToList();
+            var semanticPath = paths.Count > 0 ? paths[0] : "";
+            var shaPath = paths.Count > 1 ? paths[1] : "";
+            var xlsxPath = paths.Count > 2 ? paths[2] : "";
+            if (!File.Exists(semanticPath) || !File.Exists(shaPath) || !File.Exists(xlsxPath))
+            {
+                summary.MissingCacheTables.Add(table.TableId);
+                continue;
+            }
+
+            var localHash = File.ReadAllText(shaPath).Trim();
+            if (!string.IsNullOrWhiteSpace(table.SemanticHash) &&
+                !string.Equals(localHash, table.SemanticHash, StringComparison.OrdinalIgnoreCase))
+            {
+                summary.ChangedTables.Add(table.TableId);
+                continue;
+            }
+
+            summary.UpToDateTables.Add(table.TableId);
+            if (string.IsNullOrWhiteSpace(table.SemanticHash))
+            {
+                summary.PortableSubsetFindings.Add(table.TableId + ": registry.semanticHash 缺失，sync-status 只能确认本地 cache 文件存在；请用 sync-cache dry-run 做最终判断。");
+            }
+        }
+
+        summary.ChangedTables = DistinctSorted(summary.ChangedTables);
+        summary.MissingCacheTables = DistinctSorted(summary.MissingCacheTables);
+        summary.UpToDateTables = DistinctSorted(summary.UpToDateTables);
+        summary.BlockedTables = DistinctSorted(summary.BlockedTables);
+        summary.PortableSubsetFindings = DistinctSorted(summary.PortableSubsetFindings);
+        summary.CacheStatus = ComputeSyncCacheStatus(summary, summary.BlockedTables.Count > 0);
+        result.SyncCacheSummary = summary;
+        result.ResolvedOnlineTables = summary.ResolvedOnlineTables;
+
+        var action = result.AddAction("sync-status.local_cache.inspect", "done", "只读：已根据 live registry 与本地 cache/sha 文件估算当前 cache 状态；没有读取/导出在线 Sheet，也没有写文件。");
+        action.Details["cacheStatus"] = summary.CacheStatus;
+        action.Details["tableCount"] = summary.TableCount.ToString(CultureInfo.InvariantCulture);
+        action.Details["upToDateTables"] = string.Join(", ", summary.UpToDateTables);
+        action.Details["changedTables"] = string.Join(", ", summary.ChangedTables);
+        action.Details["missingCacheTables"] = string.Join(", ", summary.MissingCacheTables);
+        action.Details["blockedTables"] = string.Join(", ", summary.BlockedTables);
+    }
+
     private sealed class CacheState
     {
         public bool Missing { get; set; }
@@ -756,6 +835,11 @@ public static class Program
         request.SyncCache.TableId = args.Get("table", request.SyncCache.TableId);
         await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
         var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+        if (string.Equals(operation, "sync-status", StringComparison.OrdinalIgnoreCase))
+        {
+            ApplyReadOnlySyncStatus(result, request);
+        }
+
         await EmitLifecycleResultAsync(args, result);
         foreach (var failure in result.HumanReadableFailures)
         {
@@ -789,13 +873,29 @@ public static class Program
             ? await ReadSeedManifestAsync(workspace, manifestPath, args)
             : NewSeedRequestFromWorkspace(workspace, args);
         request.Operation = operation;
-        request.DryRun = args.HasFlag("dry-run") || !args.HasFlag("yes");
+        var hasApplyConfirmations = args.HasFlag("confirm-create-online-sheets") ||
+                                    args.HasFlag("confirm-registry-upsert") ||
+                                    args.HasFlag("confirm-schema-reviews") ||
+                                    args.HasFlag("confirm-write-local-cache") ||
+                                    args.HasFlag("confirm-project-config") ||
+                                    args.HasFlag("confirm-write-project-config") ||
+                                    args.HasFlag("confirm-excel-to-so");
+        request.DryRun = args.HasFlag("dry-run") || !(args.HasFlag("apply") || hasApplyConfirmations);
         request.SyncCache ??= new SyncCacheContract();
         request.MergeInputs ??= new MergeInputsContract();
+        request.TargetBranchBootstrap ??= new TargetBranchBootstrapContract();
         request.MergeInputs.TargetBranch = FirstNonEmpty(args.Get("target-branch", ""), request.MergeInputs.TargetBranch, request.BranchWorkspace.MainGitBranch, "main");
         request.MergeInputs.TargetFeishuProfile = FirstNonEmpty(args.Get("target-profile", ""), args.Get("target-feishu-profile", ""), request.MergeInputs.TargetFeishuProfile, request.BranchWorkspace.MainFeishuBranch, request.MergeInputs.TargetBranch);
+        request.TargetBranchBootstrap.ConfirmCreateOnlineSheets = request.TargetBranchBootstrap.ConfirmCreateOnlineSheets || args.HasFlag("confirm-create-online-sheets");
+        request.TargetBranchBootstrap.ConfirmRegistryUpsert = request.TargetBranchBootstrap.ConfirmRegistryUpsert || args.HasFlag("confirm-registry-upsert");
+        request.TargetBranchBootstrap.ConfirmSchemaReviews = request.TargetBranchBootstrap.ConfirmSchemaReviews || args.HasFlag("confirm-schema-reviews");
+        request.TargetBranchBootstrap.ConfirmWriteLocalCache = request.TargetBranchBootstrap.ConfirmWriteLocalCache || args.HasFlag("confirm-write-local-cache");
+        request.TargetBranchBootstrap.ConfirmWriteProjectConfig = request.TargetBranchBootstrap.ConfirmWriteProjectConfig || args.HasFlag("confirm-project-config") || args.HasFlag("confirm-write-project-config");
+        request.TargetBranchBootstrap.ConfirmExcelToSoSettings = request.TargetBranchBootstrap.ConfirmExcelToSoSettings || args.HasFlag("confirm-excel-to-so");
         await HydrateCurrentBranchBootstrapRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
-        var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+        var result = request.DryRun
+            ? await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None)
+            : await ApplyCurrentBranchBootstrapFromTargetAsync(workspace, args, request, operation);
         await EmitLifecycleResultAsync(args, result);
         foreach (var failure in result.HumanReadableFailures)
         {
@@ -803,6 +903,294 @@ public static class Program
         }
 
         return result.Success ? 0 : 1;
+    }
+
+    private static async Task<LifecycleContractResult> ApplyCurrentBranchBootstrapFromTargetAsync(Workspace workspace, ParsedArgs args, LifecycleContractRequest request, string operation)
+    {
+        var originalDryRun = request.DryRun;
+        request.DryRun = true;
+        var previewPlan = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+        request.DryRun = originalDryRun;
+        await RequireMatchingCurrentBranchBootstrapPreviewAsync(previewPlan, args);
+
+        var confirmations = request.TargetBranchBootstrap ?? new TargetBranchBootstrapContract();
+        if (!confirmations.ConfirmCreateOnlineSheets)
+        {
+            previewPlan.DryRun = false;
+            previewPlan.AddFailure("从目标分支初始化当前分支需要创建/复用在线 Sheet。apply 前必须显式确认 confirm-create-online-sheets。");
+            return previewPlan;
+        }
+
+        if (!confirmations.ConfirmRegistryUpsert)
+        {
+            previewPlan.DryRun = false;
+            previewPlan.AddFailure("从目标分支初始化当前分支需要写 BranchBindings / ConfigSheets。apply 前必须显式确认 confirm-registry-upsert。");
+            return previewPlan;
+        }
+
+        if (!confirmations.ConfirmSchemaReviews)
+        {
+            previewPlan.DryRun = false;
+            previewPlan.AddFailure("从目标分支初始化当前分支需要登记 SchemaReviews baseline。apply 前必须显式确认 confirm-schema-reviews。");
+            return previewPlan;
+        }
+
+        if (!previewPlan.Success)
+        {
+            previewPlan.DryRun = false;
+            previewPlan.AddFailure("从目标分支初始化当前分支 apply 前预览未通过，请先修复目标分支在线表定位。");
+            return previewPlan;
+        }
+
+        var seedBuild = await BuildCurrentBranchSeedRequestFromTargetAsync(workspace, args, request, previewPlan);
+        if (!seedBuild.Success)
+        {
+            seedBuild.FailureResult.Operation = operation;
+            seedBuild.FailureResult.DryRun = false;
+            seedBuild.FailureResult.RequestFingerprint = previewPlan.RequestFingerprint;
+            return seedBuild.FailureResult;
+        }
+
+        var applyRequest = seedBuild.Request;
+        var result = await LifecycleExecutor.ExecuteAsync(applyRequest, new CliLifecyclePlatform(args, applyRequest), CancellationToken.None);
+        result.Operation = operation;
+        result.DryRun = false;
+        result.RequestFingerprint = previewPlan.RequestFingerprint;
+        result.RequestSummary["sourceMode"] = "target-branch";
+        result.RequestSummary["targetBranch"] = request.MergeInputs.TargetBranch;
+        result.RequestSummary["targetProfile"] = request.MergeInputs.TargetFeishuProfile;
+        result.RequestSummary["writesLocalCache"] = confirmations.ConfirmWriteLocalCache.ToString().ToLowerInvariant();
+        result.RequestSummary["writesProjectSettings"] = confirmations.ConfirmWriteProjectConfig.ToString().ToLowerInvariant();
+        result.RequestSummary["writesExcelToSo"] = confirmations.ConfirmExcelToSoSettings.ToString().ToLowerInvariant();
+        result.Actions.Insert(0, new LifecycleActionResult
+        {
+            Action = "current_branch.bootstrap_from_target.apply",
+            Status = result.Success ? "done" : "blocked",
+            Message = result.Success
+                ? "已从目标分支在线 Source of Truth 派生当前分支在线工作区；默认不写本地 cache、ProjectSettings 或 ExcelToSO。"
+                : "从目标分支派生当前分支未完成，请查看后续 seed/registry/postflight 失败原因。",
+            Details =
+            {
+                ["requestFingerprint"] = previewPlan.RequestFingerprint,
+                ["targetBranch"] = request.MergeInputs.TargetBranch,
+                ["targetProfile"] = request.MergeInputs.TargetFeishuProfile,
+                ["currentBranch"] = request.Git.Branch,
+                ["currentProfile"] = FirstNonEmpty(request.Git.Profile, request.Git.FeishuBranch),
+                ["writeLocalCache"] = confirmations.ConfirmWriteLocalCache.ToString().ToLowerInvariant(),
+                ["writeProjectSettings"] = confirmations.ConfirmWriteProjectConfig.ToString().ToLowerInvariant(),
+                ["writeExcelToSo"] = confirmations.ConfirmExcelToSoSettings.ToString().ToLowerInvariant()
+            }
+        });
+        return result;
+    }
+
+    private sealed class CurrentBranchSeedBuildResult
+    {
+        public LifecycleContractRequest Request { get; set; } = new LifecycleContractRequest();
+        public LifecycleContractResult FailureResult { get; set; } = new LifecycleContractResult();
+        public bool Success { get; set; }
+    }
+
+    private static async Task<CurrentBranchSeedBuildResult> BuildCurrentBranchSeedRequestFromTargetAsync(Workspace workspace, ParsedArgs args, LifecycleContractRequest request, LifecycleContractResult previewPlan)
+    {
+        var failure = new LifecycleContractResult
+        {
+            Operation = request.Operation,
+            DryRun = false,
+            RequestFingerprint = previewPlan.RequestFingerprint,
+            BranchWorkspace = previewPlan.BranchWorkspace,
+            BranchStatus = previewPlan.BranchStatus
+        };
+        var currentWorkspace = BranchWorkspaceResolver.Resolve(request);
+        var targetProfile = FirstNonEmpty(request.MergeInputs.TargetFeishuProfile, request.MergeInputs.TargetBranch, request.BranchWorkspace.MainFeishuBranch, "main");
+        var targetRows = FindSeedRowsForProfile(request, targetProfile, request.SyncCache != null ? request.SyncCache.TableId : "")
+            .Where(t => !string.IsNullOrWhiteSpace(FirstNonEmpty(t.SpreadsheetToken, t.SpreadsheetUrl)) && !string.IsNullOrWhiteSpace(t.SheetId))
+            .ToList();
+        if (targetRows.Count == 0)
+        {
+            failure.AddFailure("无法从目标分支派生当前分支：目标分支 “" + FirstNonEmpty(request.MergeInputs.TargetBranch, targetProfile) + "” 没有可复制的在线 Sheet 定位。");
+            return new CurrentBranchSeedBuildResult { FailureResult = failure };
+        }
+
+        var provider = new LarkCliWorkbookProvider();
+        var providerContext = CreateProviderContext(workspace, args);
+        var tempRoot = Path.Combine(Directory.GetCurrentDirectory(), "Temp", "ConfigSheetForge", "branch-bootstrap-from-target", Guid.NewGuid().ToString("N"));
+        var seedTables = new List<SeedTableContract>();
+        foreach (var target in targetRows)
+        {
+            var tableTemp = Path.Combine(tempRoot, MakeSafeFileName(target.TableId));
+            Directory.CreateDirectory(tableTemp);
+            Console.WriteLine("[stage] 正在从目标分支导出在线表: " + target.TableId);
+            var export = await provider.ExportAsync(providerContext, new ProviderExportRequest
+            {
+                RootTokenOrUrl = FirstNonEmpty(target.SpreadsheetToken, target.SpreadsheetUrl),
+                SpreadsheetTokenOrUrl = FirstNonEmpty(target.SpreadsheetToken, target.SpreadsheetUrl),
+                TableId = target.TableId,
+                SheetId = target.SheetId,
+                Range = "",
+                CacheDirectory = tableTemp,
+                FieldRow = target.FieldRow,
+                TypeRow = target.TypeRow,
+                DescriptionRow = target.DescriptionRow,
+                DataStartRow = target.DataStartRow,
+                TreatUnknownTypesAsEnum = target.TreatUnknownTypesAsEnum
+            }, CancellationToken.None);
+            foreach (var finding in export.Findings)
+            {
+                PrintFinding(finding, args.HasFlag("details"));
+            }
+
+            var xlsxPath = Path.GetExtension(export.CachePath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+                ? export.CachePath
+                : FindExportedXlsx(tableTemp, target.TableId);
+            if (export.Findings.Any(f => f.Severity == FindingSeverity.Error) || string.IsNullOrWhiteSpace(xlsxPath) || !File.Exists(xlsxPath))
+            {
+                failure.AddFailure("无法从目标分支导出配表 “" + target.TableId + "” 为 xlsx；已阻断当前分支初始化，避免创建不完整在线表。");
+                continue;
+            }
+
+            seedTables.Add(new SeedTableContract
+            {
+                TableId = target.TableId,
+                DisplayName = FirstNonEmpty(target.DisplayName, target.TableId),
+                SourceXlsxPath = xlsxPath,
+                SheetName = FirstNonEmpty(target.SheetName, target.DisplayName, target.TableId),
+                Branch = FirstNonEmpty(currentWorkspace.FeishuBranch, currentWorkspace.Profile, request.Git.Branch),
+                Profile = FirstNonEmpty(currentWorkspace.Profile, currentWorkspace.FeishuBranch, request.Git.Branch),
+                OwnerRole = target.OwnerRole,
+                CacheXlsxPath = target.CacheXlsxPath,
+                SemanticCachePath = target.SemanticCachePath,
+                HashCachePath = target.HashCachePath,
+                ProjectConfigPath = target.ProjectConfigPath,
+                SchemaReviewRequired = target.SchemaReviewRequired,
+                FieldRow = target.FieldRow,
+                TypeRow = target.TypeRow,
+                DescriptionRow = target.DescriptionRow,
+                DataStartRow = target.DataStartRow,
+                TreatUnknownTypesAsEnum = target.TreatUnknownTypesAsEnum
+            });
+        }
+
+        if (!failure.Success)
+        {
+            return new CurrentBranchSeedBuildResult { FailureResult = failure };
+        }
+
+        var confirmations = request.TargetBranchBootstrap ?? new TargetBranchBootstrapContract();
+        var sourceSeed = request.SeedFromLocalXlsx ?? new SeedFromLocalXlsxContract();
+        var seedRequest = new LifecycleContractRequest
+        {
+            Operation = "bootstrap-target-branch-from-local-xlsx",
+            DryRun = false,
+            Locale = request.Locale,
+            Git = new ContractGitSpec
+            {
+                Branch = currentWorkspace.GitBranch,
+                FeishuBranch = FirstNonEmpty(currentWorkspace.FeishuBranch, currentWorkspace.Profile),
+                Profile = FirstNonEmpty(currentWorkspace.Profile, currentWorkspace.FeishuBranch),
+                Head = request.Git.Head
+            },
+            Registry = request.Registry,
+            BranchWorkspace = request.BranchWorkspace,
+            UnityExcelToSo = request.UnityExcelToSo,
+            TargetBranchBootstrap = new TargetBranchBootstrapContract
+            {
+                TargetGitBranch = currentWorkspace.GitBranch,
+                TargetFeishuProfile = FirstNonEmpty(currentWorkspace.Profile, currentWorkspace.FeishuBranch),
+                TargetBranchWikiNodeTitle = currentWorkspace.NodeTitle,
+                SourceMode = "local-xlsx",
+                ConfirmCreateOnlineSheets = confirmations.ConfirmCreateOnlineSheets,
+                ConfirmRegistryUpsert = confirmations.ConfirmRegistryUpsert,
+                ConfirmSchemaReviews = confirmations.ConfirmSchemaReviews,
+                ConfirmWriteLocalCache = confirmations.ConfirmWriteLocalCache,
+                ConfirmWriteProjectConfig = confirmations.ConfirmWriteProjectConfig,
+                ConfirmExcelToSoSettings = confirmations.ConfirmExcelToSoSettings
+            },
+            SeedFromLocalXlsx = new SeedFromLocalXlsxContract
+            {
+                SourceMode = "local-xlsx",
+                CacheDirectory = sourceSeed.CacheDirectory,
+                ExcelCacheDirectory = sourceSeed.ExcelCacheDirectory,
+                ProjectConfigPath = sourceSeed.ProjectConfigPath,
+                BaselineStrategy = sourceSeed.BaselineStrategy,
+                PreferDriveImport = sourceSeed.PreferDriveImport,
+                ConfirmCreateOnlineSheets = confirmations.ConfirmCreateOnlineSheets,
+                ConfirmRegistryUpsert = confirmations.ConfirmRegistryUpsert,
+                ConfirmSchemaReviews = confirmations.ConfirmSchemaReviews,
+                ConfirmWriteLocalCache = confirmations.ConfirmWriteLocalCache,
+                ConfirmWriteProjectConfig = confirmations.ConfirmWriteProjectConfig,
+                ConfirmProjectConfigUpdate = confirmations.ConfirmWriteProjectConfig,
+                ConfirmExcelToSoSettings = confirmations.ConfirmExcelToSoSettings,
+                ConfirmExcelToSoSettingsUpdate = confirmations.ConfirmExcelToSoSettings
+            }
+        };
+        seedRequest.SeedFromLocalXlsx.Tables.AddRange(seedTables);
+        foreach (var tableId in seedTables.Select(t => t.TableId).Where(t => !string.IsNullOrWhiteSpace(t)))
+        {
+            seedRequest.TargetBranchBootstrap.TableIds.Add(tableId);
+            seedRequest.SeedFromLocalXlsx.TableIds.Add(tableId);
+        }
+
+        return new CurrentBranchSeedBuildResult { Success = true, Request = seedRequest };
+    }
+
+    private static async Task RequireMatchingCurrentBranchBootstrapPreviewAsync(LifecycleContractResult expected, ParsedArgs args)
+    {
+        var requiredFingerprint = args.Get("required-preview-fingerprint", "");
+        if (!string.IsNullOrWhiteSpace(requiredFingerprint) &&
+            !string.Equals(requiredFingerprint, expected.RequestFingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException("当前分支初始化 apply 的输入和指定 dry-run fingerprint 不一致，已阻断写入。请重新生成 dry-run，再用新的 result.json 执行 apply。", 2);
+        }
+
+        var previewPath = FirstNonEmpty(args.Get("preview-result", ""), args.Get("require-preview", ""));
+        if (string.IsNullOrWhiteSpace(previewPath))
+        {
+            throw new CliException("当前分支初始化 apply 必须带最近一次同输入 dry-run 结果。请先运行 bootstrap-current-branch-from-target --dry-run，并在 apply 时传 --preview-result <dry-run-result.json>。", 2);
+        }
+
+        var fullPreviewPath = Path.GetFullPath(previewPath);
+        if (!File.Exists(fullPreviewPath))
+        {
+            throw new CliException("找不到当前分支初始化 dry-run result 文件，apply 已阻断。请重新生成 dry-run，并确认 --preview-result 指向正确文件。", 2, fullPreviewPath);
+        }
+
+        var preview = await ReadJsonAsync<LifecycleContractResult>(fullPreviewPath);
+        if (!string.Equals(preview.Operation, "bootstrap-current-branch-from-target", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(preview.Operation, "branch-workspace-bootstrap-from-target", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException("dry-run result 不是当前分支初始化操作，已阻断 apply。请重新生成“从目标分支初始化当前分支”的 dry-run。", 2, fullPreviewPath);
+        }
+
+        if (!preview.DryRun || !preview.Success)
+        {
+            throw new CliException("最近一次当前分支初始化 dry-run 没有通过，不能 apply。请先处理 dry-run 中的失败原因。", 2, string.Join(Environment.NewLine, preview.HumanReadableFailures));
+        }
+
+        if (string.IsNullOrWhiteSpace(preview.RequestFingerprint))
+        {
+            throw new CliException("dry-run result 缺少 requestFingerprint，无法确认 apply 输入是否一致。请使用 v0.4.24 或更新版本重新生成 dry-run。", 2, fullPreviewPath);
+        }
+
+        if (!string.Equals(preview.RequestFingerprint, expected.RequestFingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException("当前分支初始化 apply 的输入和最近一次 dry-run 不一致，已阻断写入。请重新生成 dry-run，再执行 apply。", 2, "dryRunFingerprint=" + preview.RequestFingerprint + "\napplyFingerprint=" + expected.RequestFingerprint);
+        }
+    }
+
+    private static List<SeedTableContract> FindSeedRowsForProfile(LifecycleContractRequest request, string profile, string selectedTable)
+    {
+        return (request.SeedFromLocalXlsx != null ? request.SeedFromLocalXlsx.Tables : new List<SeedTableContract>())
+            .Where(t => !string.IsNullOrWhiteSpace(t.TableId))
+            .Where(t => string.IsNullOrWhiteSpace(selectedTable) || string.Equals(t.TableId, selectedTable, StringComparison.OrdinalIgnoreCase))
+            .Where(t =>
+            {
+                var tableProfile = FirstNonEmpty(t.Profile, t.Branch);
+                return !string.IsNullOrWhiteSpace(tableProfile) &&
+                       (string.IsNullOrWhiteSpace(profile) || string.Equals(tableProfile, profile, StringComparison.OrdinalIgnoreCase));
+            })
+            .OrderBy(t => t.TableId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static List<TableConfig> BuildSyncCacheTables(LifecycleContractRequest request, string selectedTable)
@@ -1987,6 +2375,44 @@ public static class Program
             request.DryRun = true;
         }
 
+        if (CurrentBranchBootstrapOperationRequested(request.Operation))
+        {
+            if (args.HasFlag("allow-user-fallback"))
+            {
+                throw new CliException(request.Operation + " 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+            }
+
+            if (args.HasFlag("apply"))
+            {
+                request.DryRun = false;
+            }
+
+            request.SyncCache ??= new SyncCacheContract();
+            request.MergeInputs ??= new MergeInputsContract();
+            request.TargetBranchBootstrap ??= new TargetBranchBootstrapContract();
+            request.MergeInputs.TargetBranch = FirstNonEmpty(args.Get("target-branch", ""), request.MergeInputs.TargetBranch, request.BranchWorkspace.MainGitBranch, "main");
+            request.MergeInputs.TargetFeishuProfile = FirstNonEmpty(args.Get("target-profile", ""), args.Get("target-feishu-profile", ""), request.MergeInputs.TargetFeishuProfile, request.BranchWorkspace.MainFeishuBranch, request.MergeInputs.TargetBranch);
+            request.TargetBranchBootstrap.ConfirmCreateOnlineSheets = request.TargetBranchBootstrap.ConfirmCreateOnlineSheets || args.HasFlag("confirm-create-online-sheets");
+            request.TargetBranchBootstrap.ConfirmRegistryUpsert = request.TargetBranchBootstrap.ConfirmRegistryUpsert || args.HasFlag("confirm-registry-upsert");
+            request.TargetBranchBootstrap.ConfirmSchemaReviews = request.TargetBranchBootstrap.ConfirmSchemaReviews || args.HasFlag("confirm-schema-reviews");
+            request.TargetBranchBootstrap.ConfirmWriteLocalCache = request.TargetBranchBootstrap.ConfirmWriteLocalCache || args.HasFlag("confirm-write-local-cache");
+            request.TargetBranchBootstrap.ConfirmWriteProjectConfig = request.TargetBranchBootstrap.ConfirmWriteProjectConfig || args.HasFlag("confirm-project-config") || args.HasFlag("confirm-write-project-config");
+            request.TargetBranchBootstrap.ConfirmExcelToSoSettings = request.TargetBranchBootstrap.ConfirmExcelToSoSettings || args.HasFlag("confirm-excel-to-so");
+            await HydrateCurrentBranchBootstrapRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
+            if (!request.DryRun)
+            {
+                var workspace = await LoadWorkspaceAsync(requireConfig: false);
+                var currentBranchResult = await ApplyCurrentBranchBootstrapFromTargetAsync(workspace, args, request, request.Operation);
+                await EmitLifecycleResultAsync(args, currentBranchResult);
+                foreach (var failure in currentBranchResult.HumanReadableFailures)
+                {
+                    Console.Error.WriteLine("[error] " + failure);
+                }
+
+                return currentBranchResult.Success ? 0 : 1;
+            }
+        }
+
         if (SeedOperationRequested(request.Operation))
         {
             if (args.HasFlag("allow-user-fallback"))
@@ -2070,6 +2496,11 @@ public static class Program
             ? new PreviewLifecyclePlatform()
             : new CliLifecyclePlatform(args, request);
         var result = await LifecycleExecutor.ExecuteAsync(request, platform, CancellationToken.None);
+        if (string.Equals(request.Operation, "sync-status", StringComparison.OrdinalIgnoreCase))
+        {
+            ApplyReadOnlySyncStatus(result, request);
+        }
+
         if (SyncCacheOperationRequested(request.Operation) && result.Success)
         {
             request.SyncCache ??= new SyncCacheContract();
@@ -3204,6 +3635,12 @@ public static class Program
         return string.Equals(operation, "bootstrap-target-branch-from-local-xlsx", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool CurrentBranchBootstrapOperationRequested(string operation)
+    {
+        return string.Equals(operation, "bootstrap-current-branch-from-target", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(operation, "branch-workspace-bootstrap-from-target", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool SyncCacheOperationRequested(string operation)
     {
         return string.Equals(operation, "sync-cache", StringComparison.OrdinalIgnoreCase) ||
@@ -3665,6 +4102,41 @@ public static class Program
         }
     }
 
+    private static IList<ProviderDoctorFinding> CollapseNoisyProviderFindings(string tableId, IEnumerable<ProviderDoctorFinding> findings)
+    {
+        var result = new List<ProviderDoctorFinding>();
+        foreach (var group in (findings ?? Enumerable.Empty<ProviderDoctorFinding>())
+            .GroupBy(f => f.Code == "cell.bool_invalid" ? "cell.bool_invalid:" + ExtractColumnFromLocation(GetDetail(f, "location")) : Guid.NewGuid().ToString("N"), StringComparer.OrdinalIgnoreCase))
+        {
+            var first = group.First();
+            if (!string.Equals(first.Code, "cell.bool_invalid", StringComparison.OrdinalIgnoreCase) || group.Count() == 1)
+            {
+                result.AddRange(group);
+                continue;
+            }
+
+            var column = FirstNonEmpty(ExtractColumnFromLocation(GetDetail(first, "location")), "布尔字段");
+            var examples = group.Select(f => ExtractRowFromLocation(GetDetail(f, "location")))
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(5)
+                .ToList();
+            var collapsed = new ProviderDoctorFinding
+            {
+                Severity = FindingSeverity.Warning,
+                Code = "cell.bool_invalid",
+                Message = tableId + ": " + column + " 列有 " + group.Count().ToString(CultureInfo.InvariantCulture) + " 个布尔值无法识别，示例行 " + (examples.Count > 0 ? string.Join(", ", examples) : "未知") + "，已保留原文。"
+            };
+            collapsed.Details["count"] = group.Count().ToString(CultureInfo.InvariantCulture);
+            collapsed.Details["column"] = column;
+            collapsed.Details["exampleRows"] = string.Join(", ", examples);
+            collapsed.Details["rawExamples"] = string.Join(", ", group.Select(f => GetDetail(f, "raw")).Where(v => !string.IsNullOrWhiteSpace(v)).Distinct().Take(5));
+            result.Add(collapsed);
+        }
+
+        return result;
+    }
+
     private static void PrintValidation(ValidationFinding finding, bool details)
     {
         Console.WriteLine("[" + finding.Severity.ToString().ToLowerInvariant() + "] " + finding.Message + " (" + finding.Code + ") " + finding.Location);
@@ -3675,6 +4147,82 @@ public static class Program
                 Console.WriteLine("  " + pair.Key + ": " + MaskIfSensitive(pair.Key, pair.Value));
             }
         }
+    }
+
+    private static IList<ValidationFinding> CollapseNoisyValidationFindings(string tableId, IEnumerable<ValidationFinding> findings)
+    {
+        var result = new List<ValidationFinding>();
+        foreach (var group in (findings ?? Enumerable.Empty<ValidationFinding>())
+            .GroupBy(f => f.Code == "cell.bool_invalid" ? "cell.bool_invalid:" + ExtractColumnFromLocation(f.Location) : Guid.NewGuid().ToString("N"), StringComparer.OrdinalIgnoreCase))
+        {
+            var first = group.First();
+            if (!string.Equals(first.Code, "cell.bool_invalid", StringComparison.OrdinalIgnoreCase) || group.Count() == 1)
+            {
+                result.AddRange(group);
+                continue;
+            }
+
+            var column = FirstNonEmpty(ExtractColumnFromLocation(first.Location), "布尔字段");
+            var examples = group.Select(f => ExtractRowFromLocation(f.Location))
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(5)
+                .ToList();
+            var collapsed = new ValidationFinding
+            {
+                Severity = FindingSeverity.Warning,
+                Code = "cell.bool_invalid",
+                Message = tableId + ": " + column + " 列有 " + group.Count().ToString(CultureInfo.InvariantCulture) + " 个布尔值无法识别，示例行 " + (examples.Count > 0 ? string.Join(", ", examples) : "未知") + "，已保留原文。",
+                Location = tableId
+            };
+            collapsed.Details["count"] = group.Count().ToString(CultureInfo.InvariantCulture);
+            collapsed.Details["column"] = column;
+            collapsed.Details["exampleRows"] = string.Join(", ", examples);
+            collapsed.Details["rawExamples"] = string.Join(", ", group.Select(f => GetDetail(f, "raw")).Where(v => !string.IsNullOrWhiteSpace(v)).Distinct().Take(5));
+            result.Add(collapsed);
+        }
+
+        return result;
+    }
+
+    private static string ExtractColumnFromLocation(string location)
+    {
+        var text = location ?? "";
+        var marker = ".cells[";
+        var start = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            return "";
+        }
+
+        start += marker.Length;
+        var end = text.IndexOf(']', start);
+        return end > start ? text.Substring(start, end - start) : "";
+    }
+
+    private static string ExtractRowFromLocation(string location)
+    {
+        var text = location ?? "";
+        var marker = ".rows[";
+        var start = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            return "";
+        }
+
+        start += marker.Length;
+        var end = text.IndexOf(']', start);
+        return end > start ? text.Substring(start, end - start) : "";
+    }
+
+    private static string GetDetail(ProviderDoctorFinding finding, string key)
+    {
+        return finding != null && finding.Details.TryGetValue(key, out var value) ? value : "";
+    }
+
+    private static string GetDetail(ValidationFinding finding, string key)
+    {
+        return finding != null && finding.Details.TryGetValue(key, out var value) ? value : "";
     }
 
     private static void PrintGitHubAnnotation(string file, ValidationFinding finding)

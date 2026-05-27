@@ -93,6 +93,8 @@ config-sheet-forge gate --details --annotations github
 
 新建 git 分支如果还没有在线工作区，应从 PR base/main 派生当前分支在线表。这个流程叫 `bootstrap-current-branch-from-target`。`本地 Excel Seed` 只用于历史迁移，不是日常功能分支入口。
 
+负责人执行当前分支派生 apply 前，需要先生成同输入 dry-run，然后分项确认：创建或复用在线 Sheet、写 BranchBindings / ConfigSheets、登记 SchemaReviews baseline。默认不写本地 cache、不改 `ProjectSettings`、不改 ExcelToSO，也不碰历史 OneDrive/Excel 源目录。
+
 ## 从旧本地 xlsx seed
 
 如果项目已经有 ExcelToSO xlsx，可以先做 dry-run：
@@ -112,6 +114,8 @@ config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.Conf
 
 策划后续只改飞书 branch 在线表时，先让项目 adapter 生成 `sync-cache` lifecycle contract，再 dry-run / apply。无变化时 semantic hash gate 不会重写 `.xlsx`、`.semantic.json` 或 `.sha256`，mtime 保持不变。
 
+从 0.4.24 开始，Lark provider 不再依赖 `sheets +read` 的无范围默认读取。`sync-cache` 会尽量使用导出的 xlsx 或 Sheet 元数据构造显式 A1 范围；如果遇到 Feishu `90202 wrong startRange`，会自动用显式范围重试，并在结果里写出表 ID、脱敏 token、sheetId、attemptedRange、retryRange 和错误码。这样 no-range 问题不会再被误判成 bot 权限不足。
+
 `sync-cache` 会从 Base 注册中心 live hydrate 当前 Git branch/profile 的 BranchBindings 与 ConfigSheets。若只是缺 MergeReviews / SchemaReviews / Waivers 的 `状态` 单选选项，先用 `config-sheet-forge registry-migrate --base <base-token> --only review-status-options --dry-run` 看窄迁移计划，确认只补状态选项后再由负责人执行 `--yes`。如果 Base 里同一 `GitBranch + Profile` 出现多条 BranchBindings，或需要清理空白默认行、字段歧义，再使用完整 `registry-migrate --dry-run` 做注册中心 schema 清理审计。
 
 ## Unity
@@ -119,7 +123,7 @@ config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.Conf
 通过 Unity Package Manager 安装：
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.22
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.24
 ```
 
 打开 `Tools > Config Sheet Forge`。普通使用者优先看首页的 `推荐下一步` 和 [Unity 配表窗口 5 分钟说明](unity-window.md)。

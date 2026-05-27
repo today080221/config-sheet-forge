@@ -1,12 +1,19 @@
+using System.Globalization;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
 using ConfigSheetForge.Core;
 
 namespace ConfigSheetForge.Providers.Lark;
 
 public sealed class LarkCliWorkbookProvider : IWorkbookProvider
 {
+    private static readonly XNamespace SpreadsheetNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    private static readonly XNamespace RelationshipNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    private static readonly XNamespace PackageRelationshipNs = "http://schemas.openxmlformats.org/package/2006/relationships";
+
     public string Id => "lark";
 
     public async Task<IList<ProviderDoctorFinding>> DoctorAsync(ProviderContext context, CancellationToken cancellationToken)
@@ -151,11 +158,15 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             result.Findings[^1].Details["stderr"] = Trim(exported.Stderr);
         }
 
-        var read = await TryReadValuesAsync(gateway, context, source, request, cancellationToken).ConfigureAwait(false);
+        var read = await TryReadValuesAsync(gateway, context, source, request, File.Exists(xlsxPath) ? xlsxPath : "", cancellationToken).ConfigureAwait(false);
+        foreach (var finding in read.Findings)
+        {
+            result.Findings.Add(finding);
+        }
+
         if (!read.Success)
         {
-            result.Findings.Add(Finding(FindingSeverity.Error, "lark.read_failed", StrictBotFailureMessage(context, read, "Could not read sheet values for semantic hashing. Check sheet id, range, and scopes.")));
-            result.Findings[^1].Details["stderr"] = Trim(read.Stderr);
+            result.Findings.Add(BuildReadFailureFinding(context, request, source, read));
             if (File.Exists(xlsxPath))
             {
                 result.SemanticHash = "file:" + ComputeFileHash(xlsxPath);
@@ -164,7 +175,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             return result;
         }
 
-        var import = BuildWorkbookFromReadJson(CombinedOutput(read), request, source);
+        var import = BuildWorkbookFromReadJson(CombinedOutput(read.Result), request, source);
         result.Workbook = import.Workbook;
         result.Workbook.ProviderId = Id;
         result.Workbook.SourceId = source;
@@ -180,7 +191,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         if (string.IsNullOrWhiteSpace(result.CachePath))
         {
             var semanticPath = Path.Combine(request.CacheDirectory, safeName + ".semantic.json");
-            await File.WriteAllTextAsync(semanticPath, CombinedOutput(read), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(semanticPath, CombinedOutput(read.Result), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
             result.CachePath = semanticPath;
         }
 
@@ -198,7 +209,57 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         return await RunWithIdentityFallbackAsync(gateway, context, args, cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<LarkCliResult> TryReadValuesAsync(LarkCliGateway gateway, ProviderContext context, string source, ProviderExportRequest request, CancellationToken cancellationToken)
+    private static async Task<LarkReadAttempt> TryReadValuesAsync(LarkCliGateway gateway, ProviderContext context, string source, ProviderExportRequest request, string exportedXlsxPath, CancellationToken cancellationToken)
+    {
+        var explicitRange = FirstNonEmpty(
+            request.Range,
+            TryBuildRangeFromXlsx(exportedXlsxPath, request),
+            await TryBuildRangeFromSheetInfoAsync(gateway, context, source, request, cancellationToken).ConfigureAwait(false));
+        var initial = await RunReadAsync(gateway, context, source, request, explicitRange, cancellationToken).ConfigureAwait(false);
+        var attempt = new LarkReadAttempt
+        {
+            Result = initial,
+            AttemptedRange = explicitRange
+        };
+
+        if (initial.Success)
+        {
+            return attempt;
+        }
+
+        if (!LooksLikeWrongStartRange(initial))
+        {
+            return attempt;
+        }
+
+        var retryRange = FirstNonEmpty(
+            explicitRange,
+            await TryBuildRangeFromSheetInfoAsync(gateway, context, source, request, cancellationToken).ConfigureAwait(false),
+            BuildDefaultReadRange(request));
+        if (string.IsNullOrWhiteSpace(retryRange))
+        {
+            return attempt;
+        }
+
+        if (string.Equals(retryRange, explicitRange, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(explicitRange))
+        {
+            return attempt;
+        }
+
+        attempt.RetryRange = retryRange;
+        var retry = await RunReadAsync(gateway, context, source, request, retryRange, cancellationToken).ConfigureAwait(false);
+        attempt.Result = retry;
+        if (retry.Success)
+        {
+            var finding = Finding(FindingSeverity.Info, "lark.read_retry_success", "首次读取在线 Sheet 返回 wrong startRange，已自动改用显式 A1 范围重试成功。");
+            AddReadAttemptDetails(finding, request, source, attempt, initial);
+            attempt.Findings.Add(finding);
+        }
+
+        return attempt;
+    }
+
+    private static async Task<LarkCliResult> RunReadAsync(LarkCliGateway gateway, ProviderContext context, string source, ProviderExportRequest request, string range, CancellationToken cancellationToken)
     {
         var args = new List<string> { "sheets", "+read" };
         AddSourceArgument(args, source);
@@ -209,13 +270,423 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             args.Add(request.SheetId);
         }
 
-        if (!string.IsNullOrWhiteSpace(request.Range))
+        if (!string.IsNullOrWhiteSpace(range))
         {
             args.Add("--range");
-            args.Add(request.Range);
+            args.Add(range);
         }
 
         return await RunWithIdentityFallbackAsync(gateway, context, args, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<string> TryBuildRangeFromSheetInfoAsync(LarkCliGateway gateway, ProviderContext context, string source, ProviderExportRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.SheetId))
+        {
+            return "";
+        }
+
+        var args = new List<string> { "sheets", "+info" };
+        AddSourceArgument(args, source);
+        var info = await RunWithIdentityFallbackAsync(gateway, context, args, cancellationToken).ConfigureAwait(false);
+        if (!info.Success || !TryParseJsonDocument(CombinedOutput(info), out var document))
+        {
+            return "";
+        }
+
+        using (document)
+        {
+            if (TryFindGridDimensions(document.RootElement, request.SheetId, out var rows, out var columns))
+            {
+                return BuildA1Range(request.SheetId, rows, columns);
+            }
+        }
+
+        return "";
+    }
+
+    private static string TryBuildRangeFromXlsx(string exportedXlsxPath, ProviderExportRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(exportedXlsxPath) ||
+            !File.Exists(exportedXlsxPath) ||
+            string.IsNullOrWhiteSpace(request.SheetId))
+        {
+            return "";
+        }
+
+        if (!TryReadXlsxDimensions(exportedXlsxPath, out var rows, out var columns))
+        {
+            return "";
+        }
+
+        return BuildA1Range(request.SheetId, rows, columns);
+    }
+
+    private static bool TryReadXlsxDimensions(string path, out int rows, out int columns)
+    {
+        rows = 0;
+        columns = 0;
+        try
+        {
+            using var archive = ZipFile.OpenRead(path);
+            var sheetPath = ResolveFirstWorksheetPath(archive);
+            var entry = archive.GetEntry(sheetPath);
+            if (entry == null)
+            {
+                return false;
+            }
+
+            var document = ReadXml(entry);
+            var root = document.Root;
+            if (root == null)
+            {
+                return false;
+            }
+
+            var dimension = root.Element(SpreadsheetNs + "dimension");
+            var reference = (string?)dimension?.Attribute("ref") ?? "";
+            if (TryParseDimension(reference, out rows, out columns))
+            {
+                return true;
+            }
+
+            foreach (var cell in root.Descendants(SpreadsheetNs + "c"))
+            {
+                var position = ParseA1((string?)cell.Attribute("r") ?? "");
+                if (position.Row > rows)
+                {
+                    rows = position.Row;
+                }
+
+                if (position.Column > columns)
+                {
+                    columns = position.Column;
+                }
+            }
+
+            return rows > 0 && columns > 0;
+        }
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is InvalidDataException)
+        {
+            return false;
+        }
+    }
+
+    private static string ResolveFirstWorksheetPath(ZipArchive archive)
+    {
+        var workbookEntry = archive.GetEntry("xl/workbook.xml");
+        if (workbookEntry == null)
+        {
+            return "xl/worksheets/sheet1.xml";
+        }
+
+        var relationships = ReadRelationships(archive, "xl/_rels/workbook.xml.rels");
+        var workbook = ReadXml(workbookEntry);
+        var sheet = workbook.Descendants(SpreadsheetNs + "sheet").FirstOrDefault();
+        if (sheet == null)
+        {
+            return "xl/worksheets/sheet1.xml";
+        }
+
+        var relationId = (string?)sheet.Attribute(RelationshipNs + "id") ?? "";
+        return relationships.TryGetValue(relationId, out var target)
+            ? NormalizeWorkbookTarget(target)
+            : "xl/worksheets/sheet1.xml";
+    }
+
+    private static Dictionary<string, string> ReadRelationships(ZipArchive archive, string path)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var entry = archive.GetEntry(path);
+        if (entry == null)
+        {
+            return result;
+        }
+
+        var document = ReadXml(entry);
+        foreach (var relationship in document.Descendants(PackageRelationshipNs + "Relationship"))
+        {
+            var id = (string?)relationship.Attribute("Id") ?? "";
+            var target = (string?)relationship.Attribute("Target") ?? "";
+            if (!string.IsNullOrWhiteSpace(id))
+            {
+                result[id] = target;
+            }
+        }
+
+        return result;
+    }
+
+    private static XDocument ReadXml(ZipArchiveEntry entry)
+    {
+        using var stream = entry.Open();
+        return XDocument.Load(stream, LoadOptions.None);
+    }
+
+    private static string NormalizeWorkbookTarget(string target)
+    {
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            return "xl/worksheets/sheet1.xml";
+        }
+
+        target = target.Replace('\\', '/');
+        if (target.StartsWith("/", StringComparison.Ordinal))
+        {
+            return target.TrimStart('/');
+        }
+
+        return target.StartsWith("xl/", StringComparison.Ordinal) ? target : "xl/" + target.TrimStart('/');
+    }
+
+    private static bool TryParseDimension(string reference, out int rows, out int columns)
+    {
+        rows = 0;
+        columns = 0;
+        if (string.IsNullOrWhiteSpace(reference))
+        {
+            return false;
+        }
+
+        var end = reference.Contains(':') ? reference.Split(':').Last() : reference;
+        var position = ParseA1(end);
+        rows = position.Row;
+        columns = position.Column;
+        return rows > 0 && columns > 0;
+    }
+
+    private static CellPosition ParseA1(string reference)
+    {
+        if (string.IsNullOrWhiteSpace(reference))
+        {
+            return new CellPosition(0, 0);
+        }
+
+        var column = 0;
+        var index = 0;
+        while (index < reference.Length && char.IsLetter(reference[index]))
+        {
+            column = column * 26 + (char.ToUpperInvariant(reference[index]) - 'A' + 1);
+            index++;
+        }
+
+        var rowText = reference.Substring(index);
+        if (column == 0 || !int.TryParse(rowText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var row) || row <= 0)
+        {
+            return new CellPosition(0, 0);
+        }
+
+        return new CellPosition(row, column);
+    }
+
+    private static bool TryFindGridDimensions(JsonElement root, string sheetId, out int rows, out int columns)
+    {
+        var candidates = new List<(bool Match, int Rows, int Columns)>();
+        CollectGridDimensionCandidates(root, sheetId, candidates);
+        var match = candidates.FirstOrDefault(c => c.Match && c.Rows > 0 && c.Columns > 0);
+        if (match.Rows <= 0 || match.Columns <= 0)
+        {
+            match = candidates.FirstOrDefault(c => c.Rows > 0 && c.Columns > 0);
+        }
+
+        rows = match.Rows;
+        columns = match.Columns;
+        return rows > 0 && columns > 0;
+    }
+
+    private static void CollectGridDimensionCandidates(JsonElement element, string sheetId, IList<(bool Match, int Rows, int Columns)> candidates)
+    {
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                CollectGridDimensionCandidates(child, sheetId, candidates);
+            }
+
+            return;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var id = GetString(element, "sheet_id", "sheetId", "id");
+        var rows = GetInt(element, "row_count", "rowCount", "rows", "row");
+        var columns = GetInt(element, "column_count", "columnCount", "col_count", "colCount", "columns", "cols", "column");
+        if (rows <= 0 || columns <= 0)
+        {
+            if (TryGetPropertyIgnoreCase(element, "grid_properties", out var grid) ||
+                TryGetPropertyIgnoreCase(element, "gridProperties", out grid))
+            {
+                rows = rows <= 0 ? GetInt(grid, "row_count", "rowCount", "rows", "row") : rows;
+                columns = columns <= 0 ? GetInt(grid, "column_count", "columnCount", "col_count", "colCount", "columns", "cols", "column") : columns;
+            }
+        }
+
+        if (rows > 0 && columns > 0)
+        {
+            candidates.Add((string.IsNullOrWhiteSpace(sheetId) || string.Equals(id, sheetId, StringComparison.OrdinalIgnoreCase), rows, columns));
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            CollectGridDimensionCandidates(property.Value, sheetId, candidates);
+        }
+    }
+
+    private static int GetInt(JsonElement element, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (!TryGetPropertyIgnoreCase(element, name, out var property))
+            {
+                continue;
+            }
+
+            if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var number))
+            {
+                return number;
+            }
+
+            if (property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out number))
+            {
+                return number;
+            }
+        }
+
+        return 0;
+    }
+
+    private static string BuildDefaultReadRange(ProviderExportRequest request)
+    {
+        return string.IsNullOrWhiteSpace(request.SheetId)
+            ? ""
+            : BuildA1Range(request.SheetId, 200, 20);
+    }
+
+    private static string BuildA1Range(string sheetId, int rows, int columns)
+    {
+        rows = Math.Max(1, rows);
+        columns = Math.Max(1, columns);
+        return sheetId + "!A1:" + ColumnName(columns) + rows.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static string ColumnName(int oneBasedColumn)
+    {
+        var value = Math.Max(1, oneBasedColumn);
+        var builder = new StringBuilder();
+        while (value > 0)
+        {
+            value--;
+            builder.Insert(0, (char)('A' + (value % 26)));
+            value /= 26;
+        }
+
+        return builder.ToString();
+    }
+
+    private static bool LooksLikeWrongStartRange(LarkCliResult result)
+    {
+        var text = (result.Stdout + "\n" + result.Stderr).ToLowerInvariant();
+        return text.Contains("90202") ||
+               text.Contains("wrong startrange") ||
+               text.Contains("start_range") ||
+               text.Contains("startrange");
+    }
+
+    private static ProviderDoctorFinding BuildReadFailureFinding(ProviderContext context, ProviderExportRequest request, string source, LarkReadAttempt read)
+    {
+        var finding = Finding(FindingSeverity.Error, "lark.read_failed", StrictBotFailureMessage(context, read.Result, "无法读取在线 Sheet 的单元格数据。工具已避免把 no-range 问题误判成权限问题；请先查看 attemptedRange、retryRange 和 larkError。"));
+        AddReadAttemptDetails(finding, request, source, read, read.Result);
+        finding.Details["stderr"] = Trim(read.Result.Stderr);
+        return finding;
+    }
+
+    private static void AddReadAttemptDetails(ProviderDoctorFinding finding, ProviderExportRequest request, string source, LarkReadAttempt read, LarkCliResult larkResult)
+    {
+        finding.Details["tableId"] = request.TableId;
+        finding.Details["spreadsheetTokenMasked"] = Mask(source);
+        finding.Details["sheetId"] = request.SheetId;
+        finding.Details["attemptedRange"] = FirstNonEmpty(read.AttemptedRange, "(none)");
+        finding.Details["retryRange"] = FirstNonEmpty(read.RetryRange, "(none)");
+        finding.Details["retrySucceeded"] = (!string.IsNullOrWhiteSpace(read.RetryRange) && read.Result.Success).ToString().ToLowerInvariant();
+        finding.Details["larkErrorCode"] = ExtractLarkErrorCode(larkResult);
+        finding.Details["larkErrorMessage"] = ExtractLarkErrorMessage(larkResult);
+    }
+
+    private static string ExtractLarkErrorCode(LarkCliResult result)
+    {
+        var text = CombinedOutput(result);
+        if (TryParseJsonDocument(text, out var document))
+        {
+            using (document)
+            {
+                var code = FindStringDeep(document.RootElement, "code", "error_code", "errCode");
+                if (!string.IsNullOrWhiteSpace(code))
+                {
+                    return code;
+                }
+            }
+        }
+
+        var raw = result.Stdout + "\n" + result.Stderr;
+        var match = System.Text.RegularExpressions.Regex.Match(raw, @"\b\d{4,}\b");
+        return match.Success ? match.Value : "";
+    }
+
+    private static string ExtractLarkErrorMessage(LarkCliResult result)
+    {
+        var text = CombinedOutput(result);
+        if (TryParseJsonDocument(text, out var document))
+        {
+            using (document)
+            {
+                var message = FindStringDeep(document.RootElement, "msg", "message", "error", "errorMessage");
+                if (!string.IsNullOrWhiteSpace(message))
+                {
+                    return message;
+                }
+            }
+        }
+
+        return Trim(result.Stderr + "\n" + result.Stdout);
+    }
+
+    private static string FindStringDeep(JsonElement element, params string[] names)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var name in names)
+            {
+                if (TryGetPropertyIgnoreCase(element, name, out var property))
+                {
+                    return property.ValueKind == JsonValueKind.String ? property.GetString() ?? "" : property.ToString();
+                }
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                var value = FindStringDeep(property.Value, names);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                var value = FindStringDeep(child, names);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+        }
+
+        return "";
     }
 
     private static void AddSourceArgument(ICollection<string> args, string source)
@@ -727,6 +1198,19 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         return Convert.ToHexString(sha.ComputeHash(stream)).ToLowerInvariant();
     }
 
+    private static string Mask(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "(none)";
+        }
+
+        var trimmed = value.Trim();
+        return trimmed.Length <= 10
+            ? "********"
+            : trimmed.Substring(0, 5) + "..." + trimmed.Substring(trimmed.Length - 5);
+    }
+
     private static string Trim(string value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -736,5 +1220,26 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
 
         value = value.Trim();
         return value.Length <= 4000 ? value : value.Substring(0, 4000);
+    }
+
+    private sealed class LarkReadAttempt
+    {
+        public LarkCliResult Result { get; set; } = new LarkCliResult(-1, "", "", "", new LarkCliResolvedCommand("", Array.Empty<string>(), "", ""));
+        public string AttemptedRange { get; set; } = "";
+        public string RetryRange { get; set; } = "";
+        public List<ProviderDoctorFinding> Findings { get; } = new List<ProviderDoctorFinding>();
+        public bool Success => Result.Success;
+    }
+
+    private readonly struct CellPosition
+    {
+        public CellPosition(int row, int column)
+        {
+            Row = row;
+            Column = column;
+        }
+
+        public int Row { get; }
+        public int Column { get; }
     }
 }
