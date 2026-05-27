@@ -995,9 +995,9 @@ public static class Program
             return;
         }
 
-        var passed = matches.FirstOrDefault(r => PrGateReportEvaluator.ReviewPassed(GetRegistryRecordValue(r, "Status", request.Locale, request.Registry)));
+        var passed = matches.FirstOrDefault(r => PrGateReportEvaluator.ReviewPassed(GetRegistryStatusValue(r, "Status", request.Locale, request.Registry)));
         var selected = passed ?? matches[0];
-        report.MergeReview.Status = GetRegistryRecordValue(selected, "Status", request.Locale, request.Registry);
+        report.MergeReview.Status = GetRegistryStatusValue(selected, "Status", request.Locale, request.Registry);
         report.MergeReview.RecordId = selected.RecordId;
         report.MergeReview.ReviewId = GetRegistryRecordValue(selected, "ReviewId", request.Locale, request.Registry);
         report.MergeReview.ApproverRole = FirstNonEmpty(
@@ -1054,7 +1054,7 @@ public static class Program
                 continue;
             }
 
-            var passed = matches.FirstOrDefault(r => PrGateReportEvaluator.ReviewPassed(GetRegistryRecordValue(r, "Status", request.Locale, request.Registry)));
+            var passed = matches.FirstOrDefault(r => PrGateReportEvaluator.ReviewPassed(GetRegistryStatusValue(r, "Status", request.Locale, request.Registry)));
             if (passed == null)
             {
                 pending.Add(tableId);
@@ -1063,7 +1063,7 @@ public static class Program
             {
                 approved.Add(tableId + ":" + FirstNonEmpty(passed.RecordId, "(无 record_id)"));
                 report.SchemaReview.RecordId = FirstNonEmpty(report.SchemaReview.RecordId, passed.RecordId);
-                report.SchemaReview.Status = FirstNonEmpty(report.SchemaReview.Status, GetRegistryRecordValue(passed, "Status", request.Locale, request.Registry));
+                report.SchemaReview.Status = FirstNonEmpty(report.SchemaReview.Status, GetRegistryStatusValue(passed, "Status", request.Locale, request.Registry));
             }
         }
 
@@ -1108,7 +1108,7 @@ public static class Program
             .OrderByDescending(r => GetRegistryRecordValue(r, "ExpiresAt", request.Locale, request.Registry), StringComparer.OrdinalIgnoreCase)
             .First();
         report.Waiver.RecordId = selected.RecordId;
-        report.Waiver.Status = GetRegistryRecordValue(selected, "Status", request.Locale, request.Registry);
+        report.Waiver.Status = GetRegistryStatusValue(selected, "Status", request.Locale, request.Registry);
         report.Waiver.ApprovedByRole = FirstNonEmpty(
             GetRegistryRecordValue(selected, "ApprovedByRole", request.Locale, request.Registry),
             GetRegistryRecordValue(selected, "ApproverRole", request.Locale, request.Registry));
@@ -2341,6 +2341,86 @@ public static class Program
         return string.IsNullOrWhiteSpace(result.Stdout) ? result.Stderr : result.Stdout;
     }
 
+    public static string ParseLarkRecordId(string json)
+    {
+        foreach (var candidate in JsonCandidates(json))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(candidate);
+                var exact = FindJsonStringRecursive(document.RootElement, requireRecordIdPrefix: false, "record_id", "recordId");
+                if (!string.IsNullOrWhiteSpace(exact))
+                {
+                    return exact;
+                }
+
+                var id = FindJsonStringRecursive(document.RootElement, requireRecordIdPrefix: true, "id");
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    return id;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return "";
+    }
+
+    private static string FindJsonStringRecursive(JsonElement element, bool requireRecordIdPrefix, params string[] names)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Any(name => string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                var value = JsonScalarToText(property.Value).Trim();
+                if (!string.IsNullOrWhiteSpace(value) &&
+                    (!requireRecordIdPrefix || value.StartsWith("rec", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return value;
+                }
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                var nested = FindJsonStringRecursive(property.Value, requireRecordIdPrefix, names);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                var nested = FindJsonStringRecursive(child, requireRecordIdPrefix, names);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+
+        return "";
+    }
+
+    private static string JsonScalarToText(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            return element.GetString() ?? "";
+        }
+
+        return element.ValueKind == JsonValueKind.Number ? element.ToString() : "";
+    }
+
     public static RegistrySnapshot ParseLarkBaseRegistrySnapshotJson(string tableListJson, IDictionary<string, string> fieldListJsonByTableId, IDictionary<string, string> recordListJsonByTableId, string locale)
     {
         var snapshot = new RegistrySnapshot();
@@ -2774,6 +2854,11 @@ public static class Program
         }
 
         return fallback;
+    }
+
+    private static string GetRegistryStatusValue(RegistryRecordSnapshot record, string fieldName, string locale, RegistryContract? registry)
+    {
+        return PrGateReportEvaluator.NormalizeReviewStatus(GetRegistryRecordValue(record, fieldName, locale, registry));
     }
 
     private static IEnumerable<string> RegistryFieldAliases(string fieldName, string locale, RegistryContract? registry)
@@ -5623,16 +5708,7 @@ public static class Program
 
         private static string ParseRecordId(string json)
         {
-            foreach (var record in FindJsonObjects(json, "record_id"))
-            {
-                var id = GetJsonString(record, "record_id", "recordId");
-                if (!string.IsNullOrWhiteSpace(id))
-                {
-                    return id;
-                }
-            }
-
-            return "";
+            return Program.ParseLarkRecordId(json);
         }
 
         private static string JsonElementToText(JsonElement element)

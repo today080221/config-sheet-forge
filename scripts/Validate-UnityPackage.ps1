@@ -298,6 +298,12 @@ foreach ($requiredV421Marker in @("review-status-options", "OnlyReviewStatusOpti
   }
 }
 
+foreach ($requiredV422Marker in @("NormalizeReviewStatus", "GetRegistryStatusValue", "ParseLarkRecordId", "review status normalizes feishu single select values", "pr gate hydrates json array merge review status", "submit-merge-review apply returns nested record id")) {
+  if (($coreContracts + "`n" + $cliProgram + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV422Marker*") {
+    throw "Unity v0.4.22 single-select status marker is missing: $requiredV422Marker"
+  }
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

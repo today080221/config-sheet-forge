@@ -192,7 +192,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.21
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.22
 ```
 
 ## 测试

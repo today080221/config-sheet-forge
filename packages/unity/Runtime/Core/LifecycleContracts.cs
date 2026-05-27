@@ -2548,6 +2548,7 @@ namespace ConfigSheetForge.Core
             report.WaivedFailures.Clear();
             report.Waived = false;
             report.GateState = "";
+            NormalizeReportStatuses(report);
             AddMissingFieldFailures(report);
 
             if (!report.Permissions.CanReadRegistry)
@@ -2708,13 +2709,141 @@ namespace ConfigSheetForge.Core
 
         public static bool ReviewPassed(string status)
         {
-            return string.Equals(status, "approved", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(status, "passed", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(status, "通过", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(status, "已通过", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(status, "完成", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(status, "已完成", StringComparison.OrdinalIgnoreCase);
+            foreach (var candidate in NormalizeReviewStatusCandidates(status))
+            {
+                if (string.Equals(candidate, "approved", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(candidate, "completed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(candidate, "passed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(candidate, "通过", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(candidate, "已通过", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(candidate, "完成", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(candidate, "已完成", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public static string NormalizeReviewStatus(string status)
+        {
+            var candidates = NormalizeReviewStatusCandidates(status);
+            return candidates.Count > 0 ? candidates[0] : "";
+        }
+
+        public static IReadOnlyList<string> NormalizeReviewStatusCandidates(string status)
+        {
+            var candidates = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var trimmed = (status ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return candidates;
+            }
+
+            if (LooksLikeJson(trimmed))
+            {
+                try
+                {
+                    CollectReviewStatusCandidates(SimpleJsonParser.Parse(trimmed), candidates, seen);
+                }
+                catch (Exception)
+                {
+                    AddReviewStatusCandidate(candidates, seen, trimmed);
+                }
+            }
+            else
+            {
+                AddReviewStatusCandidate(candidates, seen, trimmed);
+            }
+
+            return candidates;
+        }
+
+        private static void NormalizeReportStatuses(PrGateReport report)
+        {
+            report.BranchBinding.Status = NormalizeReviewStatus(report.BranchBinding.Status);
+            report.MergeReview.Status = NormalizeReviewStatus(report.MergeReview.Status);
+            report.SchemaReview.Status = NormalizeReviewStatus(report.SchemaReview.Status);
+            report.Waiver.Status = NormalizeReviewStatus(report.Waiver.Status);
+        }
+
+        private static bool LooksLikeJson(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var first = value[0];
+            return first == '[' || first == '{' || first == '"';
+        }
+
+        private static void CollectReviewStatusCandidates(SimpleJsonValue value, IList<string> candidates, ISet<string> seen)
+        {
+            if (value == null)
+            {
+                return;
+            }
+
+            if (value.Kind == SimpleJsonKind.String || value.Kind == SimpleJsonKind.Number)
+            {
+                AddReviewStatusCandidate(candidates, seen, value.StringValue);
+                return;
+            }
+
+            if (value.Kind == SimpleJsonKind.Boolean)
+            {
+                AddReviewStatusCandidate(candidates, seen, value.BooleanValue ? "true" : "false");
+                return;
+            }
+
+            if (value.Kind == SimpleJsonKind.Array)
+            {
+                foreach (var item in value.ArrayValue)
+                {
+                    CollectReviewStatusCandidates(item, candidates, seen);
+                }
+
+                return;
+            }
+
+            if (value.Kind != SimpleJsonKind.Object)
+            {
+                return;
+            }
+
+            var countBeforeObject = candidates.Count;
+            foreach (var name in new[] { "text", "name", "value", "label", "option_name", "optionName", "status", "Status" })
+            {
+                if (value.ObjectValue.TryGetValue(name, out var property))
+                {
+                    CollectReviewStatusCandidates(property, candidates, seen);
+                }
+            }
+
+            if (candidates.Count > countBeforeObject)
+            {
+                return;
+            }
+
+            foreach (var property in value.ObjectValue.Values)
+            {
+                CollectReviewStatusCandidates(property, candidates, seen);
+            }
+        }
+
+        private static void AddReviewStatusCandidate(IList<string> candidates, ISet<string> seen, string value)
+        {
+            var trimmed = (value ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(trimmed) || seen.Contains(trimmed))
+            {
+                return;
+            }
+
+            seen.Add(trimmed);
+            candidates.Add(trimmed);
         }
 
         private static void Add(PrGateReport report, string message)

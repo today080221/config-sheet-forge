@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.22
+
+- PR gate hydrate 现在会统一归一化 Feishu Base 单选字段返回值：`"approved"`、`["approved"]`、`[{ "text": "approved" }]`、`{ "name": "approved" }` 都会按 `approved` 判断。
+- `MergeReviews`、`SchemaReviews`、`Waivers` 的状态判断共用同一套归一化逻辑，避免 Base 读回 JSON array string 后误报“状态不是 approved/completed/passed”。
+- `pr-gate-report` 输出会写回归一化后的 `mergeReview.status=approved`，有效 MergeReviews 会直接让 gate 进入 `gateState=passed`，不再依赖 waiver 放行。
+- `submit-merge-review` 写入后会递归解析 lark-cli upsert 返回中的嵌套 `record_id` / `recordId`，Unity 可以显示真实 `rec...` 记录号。
+- 测试覆盖 Feishu 单选状态归一化、live MergeReviews JSON array hydrate，以及 nested upsert record_id 解析。
+
 ## 0.4.21
 
 - `registry-migrate` 新增窄迁移模式：`--only review-status-options`。这个模式只检查/补齐 `MergeReviews`、`SchemaReviews`、`Waivers` 的 `状态` 字段选项，不执行字段 ensure、rename、ambiguous alias 或 cleanup。

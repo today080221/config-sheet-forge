@@ -37,8 +37,12 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("compare-merge dry-run hydrates workspaces and table scope", CompareMergeDryRunHydratesWorkspacesAndTableScope),
     ("compare-merge dry-run fails without target workspace", CompareMergeDryRunFailsWithoutTargetWorkspace),
     ("compare-merge dry-run fingerprints merge review input", CompareMergeDryRunFingerprintsMergeReviewInput),
+    ("review status normalizes feishu single select values", () => RunSync(ReviewStatusNormalizesFeishuSingleSelectValues)),
     ("pr gate hydrates live merge review records", PrGateHydratesLiveMergeReviewRecords),
+    ("pr gate hydrates json array merge review status", PrGateHydratesJsonArrayMergeReviewStatus),
+    ("lark record id parser accepts nested upsert result", () => RunSync(LarkRecordIdParserAcceptsNestedUpsertResult)),
     ("submit-merge-review apply blocks missing status options", SubmitMergeReviewApplyBlocksMissingStatusOptions),
+    ("submit-merge-review apply returns nested record id", SubmitMergeReviewApplyReturnsNestedRecordId),
     ("seed registry lookup reuses existing branch binding record", () => RunSync(SeedRegistryLookupReusesExistingBranchBindingRecord)),
     ("lifecycle new-table dry-run does not write local files", LifecycleNewTableDryRunDoesNotWriteFiles),
     ("lifecycle new-table apply mock completes steps", LifecycleNewTableApplyMockCompletesSteps),
@@ -954,6 +958,16 @@ static async Task CompareMergeDryRunFingerprintsMergeReviewInput()
     AssertTrue(review.Actions.Any(a => a.Action == "registry.merge_reviews.upsert"), "submit-merge-review should plan a MergeReviews upsert.");
 }
 
+static void ReviewStatusNormalizesFeishuSingleSelectValues()
+{
+    AssertEqual("approved", PrGateReportEvaluator.NormalizeReviewStatus("[\n  \"approved\"\n]"), "JSON array string should normalize to the selected option.");
+    AssertEqual("completed", PrGateReportEvaluator.NormalizeReviewStatus("[{\"text\":\"completed\"}]"), "Option object text should normalize.");
+    AssertEqual("passed", PrGateReportEvaluator.NormalizeReviewStatus("{\"name\":\"passed\"}"), "Option object name should normalize.");
+    AssertTrue(PrGateReportEvaluator.ReviewPassed("[{\"value\":\"通过\"}]"), "Option object value should be accepted for Chinese passed status.");
+    AssertTrue(PrGateReportEvaluator.ReviewPassed("[\"approved\"]"), "Feishu single-select arrays should pass gate review checks.");
+    AssertTrue(!PrGateReportEvaluator.ReviewPassed("[\"pending\"]"), "Pending single-select arrays should still block.");
+}
+
 static async Task PrGateHydratesLiveMergeReviewRecords()
 {
     var request = new LifecycleContractRequest
@@ -1004,6 +1018,67 @@ static async Task PrGateHydratesLiveMergeReviewRecords()
     AssertEqual("merge-feature-config-to-main-20260527-abc123", result.PrGateReport.MergeReview.ReviewId, "gate report should include review id.");
     AssertEqual("configOwner", result.PrGateReport.MergeReview.ApproverRole, "gate report should include approver role.");
     AssertEqual("__project_pr_gate__", result.PrGateReport.MergeReview.TableId, "gate report should include table id.");
+}
+
+static async Task PrGateHydratesJsonArrayMergeReviewStatus()
+{
+    var request = new LifecycleContractRequest
+    {
+        Operation = "pr-gate-report",
+        Locale = "zh-Hans",
+        Registry = new RegistryContract { BaseToken = "base_mock" },
+        Git = new ContractGitSpec { Branch = "feature/config", Head = "abc123" },
+        GateReport = new PrGateReport
+        {
+            GitHead = "abc123",
+            Branch = "feature/config",
+            Permissions = new GatePermissions { CanReadRegistry = true, CanReadSheets = true },
+            PortableSubset = new GateCheckState { Passed = true },
+            Triangulation = new GateCheckState { Passed = true },
+            ChangedTables = { "ItemsData" },
+            CacheHashes = { ["ItemsData"] = "hash" }
+        }
+    };
+    var snapshot = new RegistrySnapshot();
+    snapshot.Tables.Add(new RegistryTableSnapshot
+    {
+        MachineKey = "MergeReviews",
+        TableId = "tbl_merge",
+        DisplayName = "合并审查",
+        Records =
+        {
+            new RegistryRecordSnapshot
+            {
+                RecordId = "rec_merge_json_array",
+                Values =
+                {
+                    ["审查ID"] = "merge-feature-config-to-main-20260527-abc123",
+                    ["配表ID"] = "__project_pr_gate__",
+                    ["Git分支"] = "feature/config",
+                    ["状态"] = "[\n          \"approved\"\n        ]",
+                    ["ApproverRole"] = "configOwner",
+                    ["更新时间"] = "2026-05-27T12:00:00Z"
+                }
+            }
+        }
+    });
+
+    ConfigSheetForge.Cli.Program.HydratePrGateReportFromRegistrySnapshot(request, snapshot);
+    var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+    AssertTrue(result.Success, "PR gate should pass when Feishu single-select status is a JSON array string.");
+    AssertEqual("approved", result.PrGateReport.MergeReview.Status, "gate report should store normalized merge review status.");
+    AssertEqual("rec_merge_json_array", result.PrGateReport.MergeReview.RecordId, "gate report should include the MergeReviews record id.");
+    AssertEqual("passed", result.PrGateReport.GateState, "gateState should be passed instead of waived.");
+    AssertTrue(!result.PrGateReport.Waived, "valid MergeReviews should not rely on waiver.");
+    AssertTrue(result.PrGateReport.HumanReadableFailures.Count == 0, "valid MergeReviews should clear ordinary failures.");
+    AssertTrue(result.PrGateReport.WaivedFailures.Count == 0, "valid MergeReviews should not leave waived failures.");
+}
+
+static void LarkRecordIdParserAcceptsNestedUpsertResult()
+{
+    AssertEqual("rec_nested", ConfigSheetForge.Cli.Program.ParseLarkRecordId("{\"ok\":true,\"data\":{\"record\":{\"record_id\":\"rec_nested\"}}}"), "record_id inside data.record should be parsed.");
+    AssertEqual("rec_list", ConfigSheetForge.Cli.Program.ParseLarkRecordId("{\"data\":{\"records\":[{\"recordId\":\"rec_list\"}]}}"), "recordId inside data.records should be parsed.");
+    AssertEqual("rec_short", ConfigSheetForge.Cli.Program.ParseLarkRecordId("{\"data\":{\"id\":\"rec_short\"}}"), "record-like id should be accepted as a fallback.");
 }
 
 static async Task SubmitMergeReviewApplyBlocksMissingStatusOptions()
@@ -1111,6 +1186,119 @@ static async Task SubmitMergeReviewApplyBlocksMissingStatusOptions()
         AssertTrue(resultJson.Contains("MergeReviews.状态") && resultJson.Contains("registry-migrate"), "failure should tell users to run registry-migrate first.");
         var calls = File.Exists(log) ? File.ReadAllText(log) : "";
         AssertTrue(!calls.Contains("base +record-upsert"), "preflight should block before record-upsert.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(oldDir);
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static async Task SubmitMergeReviewApplyReturnsNestedRecordId()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-merge-review-record-id-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    var oldDir = Directory.GetCurrentDirectory();
+    var script = Path.Combine(temp, "lark-cli.cmd");
+    var requestPath = Path.Combine(temp, "submit.contract.json");
+    var previewPath = Path.Combine(temp, "compare.result.json");
+    var resultPath = Path.Combine(temp, "submit.result.json");
+    await File.WriteAllTextAsync(script,
+        "@echo off\r\n" +
+        "echo %* | find \"doctor\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +table-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"tables\":[{\"id\":\"tbl_merge\",\"name\":\"MergeReviews\"}],\"total\":1}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +field-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"fields\":[{\"id\":\"fld_review\",\"name\":\"ReviewId\",\"type\":\"text\"},{\"id\":\"fld_table\",\"name\":\"TableId\",\"type\":\"text\"},{\"id\":\"fld_branch\",\"name\":\"GitBranch\",\"type\":\"text\"},{\"id\":\"fld_status\",\"name\":\"Status\",\"type\":\"single_select\",\"options\":[{\"name\":\"approved\"},{\"name\":\"completed\"},{\"name\":\"passed\"}]},{\"id\":\"fld_role\",\"name\":\"ApproverRole\",\"type\":\"text\"},{\"id\":\"fld_update\",\"name\":\"UpdatedAt\",\"type\":\"datetime\"}]}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +record-list\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"fields\":[\"ReviewId\",\"TableId\",\"GitBranch\",\"Status\"],\"data\":[],\"record_id_list\":[]}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo %* | find \"base +record-upsert\" >nul\r\n" +
+        "if not errorlevel 1 (\r\n" +
+        "  echo {\"ok\":true,\"data\":{\"record\":{\"record_id\":\"rec_written\"}}}\r\n" +
+        "  exit /b 0\r\n" +
+        ")\r\n" +
+        "echo unexpected command %* 1>&2\r\n" +
+        "exit /b 2\r\n");
+
+    try
+    {
+        Directory.SetCurrentDirectory(temp);
+        var request = new LifecycleContractRequest
+        {
+            Operation = "submit-merge-review",
+            DryRun = false,
+            Locale = "zh-Hans",
+            Registry = new RegistryContract { BaseToken = "base_mock" },
+            Git = new ContractGitSpec { Branch = "feature/config", Head = "abc123" },
+            MergeInputs = new MergeInputsContract
+            {
+                SourceBranch = "feature/config",
+                TargetBranch = "main",
+                MergeReportPath = "Temp/merge-report.md",
+                MergedPath = "Temp/merged.semantic.json"
+            },
+            MergeReview = new MergeReviewContract
+            {
+                SourceBranch = "feature/config",
+                TargetBranch = "main",
+                TableId = "__project_pr_gate__",
+                TableIds = { "ItemsData" },
+                ConfirmSubmit = true
+            }
+        };
+        var summary = LifecycleExecutor.BuildMergeReviewInputSummary(request, request.MergeReview.TableIds);
+        request.MergeReview.RequestFingerprint = summary.Fingerprint;
+        var preview = new LifecycleContractResult
+        {
+            Operation = "compare-merge",
+            DryRun = true,
+            Success = true,
+            RequestFingerprint = summary.Fingerprint,
+            RequestSummary =
+            {
+                ["sourceBranch"] = summary.SourceBranch,
+                ["targetBranch"] = summary.TargetBranch,
+                ["tableIds"] = summary.TableIdsText,
+                ["mergeReportPath"] = request.MergeInputs.MergeReportPath,
+                ["mergedPath"] = request.MergeInputs.MergedPath
+            }
+        };
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request, CamelJsonOptions()));
+        await File.WriteAllTextAsync(previewPath, JsonSerializer.Serialize(preview, CamelJsonOptions()));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[]
+        {
+            "apply-contract",
+            "--request", requestPath,
+            "--preview-result", previewPath,
+            "--confirm",
+            "--lark-cli", script,
+            "--out", resultPath
+        });
+        AssertEqual("0", exitCode.ToString(), "submit-merge-review apply should succeed when status options are ready.");
+        var resultJson = await File.ReadAllTextAsync(resultPath);
+        AssertTrue(resultJson.Contains("\"recordId\": \"rec_written\"") || resultJson.Contains("\"recordId\":\"rec_written\""), "submit result should include nested upsert record_id.");
     }
     finally
     {
