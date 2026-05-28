@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.28";
+        private const string PackageVersion = "v0.4.29";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -187,43 +187,43 @@ namespace ConfigSheetForge.Unity.Editor
         private DateTime _lastRegistryStatusProbeUtc;
         private string _lastRegistryStatusProbeKey = "";
 
-        [MenuItem("Tools/Config Sheet Forge", false, 1000)]
+        [MenuItem("Tools/Config Sheet Forge/Legacy/完整 Unity 工作台", false, 1100)]
         public static void OpenStatusWindow()
         {
             OpenTab(StatusTab);
         }
 
-        [MenuItem("Tools/Config Sheet Forge/打开同步窗口")]
+        [MenuItem("Tools/Config Sheet Forge/Legacy/打开同步窗口")]
         public static void OpenStatusWindowMenu()
         {
             OpenStatusWindow();
         }
 
-        [MenuItem("Tools/Config Sheet Forge/新建配表向导")]
+        [MenuItem("Tools/Config Sheet Forge/Legacy/新建配表向导")]
         public static void OpenNewTableWizard()
         {
             OpenTab(TablesTab);
         }
 
-        [MenuItem("Tools/Config Sheet Forge/本地 Excel Seed")]
+        [MenuItem("Tools/Config Sheet Forge/Legacy/本地 Excel Seed")]
         public static void OpenSeedFromLocalXlsx()
         {
             OpenTab(TablesTab);
         }
 
-        [MenuItem("Tools/Config Sheet Forge/同步在线 Cache")]
+        [MenuItem("Tools/Config Sheet Forge/Legacy/同步在线 Cache")]
         public static void OpenSyncCache()
         {
             OpenTab(StatusTab);
         }
 
-        [MenuItem("Tools/Config Sheet Forge/三方比较与合并")]
+        [MenuItem("Tools/Config Sheet Forge/Legacy/三方比较与合并")]
         public static void OpenCompareMerge()
         {
             OpenTab(MergeTab);
         }
 
-        [MenuItem("Tools/Config Sheet Forge/PR 同步检查")]
+        [MenuItem("Tools/Config Sheet Forge/Legacy/PR 同步检查")]
         public static void OpenPrGate()
         {
             OpenTab(GateTab);
@@ -6972,7 +6972,7 @@ namespace ConfigSheetForge.Unity.Editor
     {
         public static void OpenStatusWindow()
         {
-            ConfigSheetForgeWindow.OpenStatusWindow();
+            ConfigSheetForgeBridgeWindow.OpenStatusWindow();
         }
 
         public static void OpenNewTableWizard()
@@ -6987,15 +6987,35 @@ namespace ConfigSheetForge.Unity.Editor
 
         public static void OpenSyncCache()
         {
-            ConfigSheetForgeWindow.OpenSyncCache();
+            ConfigSheetForgeBridgeWindow.OpenStatusWindow();
         }
 
         public static void OpenCompareMerge()
         {
-            ConfigSheetForgeWindow.OpenCompareMerge();
+            ConfigSheetForgeBridgeWindow.OpenStatusWindow();
         }
 
         public static void OpenPrGate()
+        {
+            ConfigSheetForgeBridgeWindow.OpenStatusWindow();
+        }
+
+        public static void OpenLegacyStatusWindow()
+        {
+            ConfigSheetForgeWindow.OpenStatusWindow();
+        }
+
+        public static void OpenLegacySyncCache()
+        {
+            ConfigSheetForgeWindow.OpenSyncCache();
+        }
+
+        public static void OpenLegacyCompareMerge()
+        {
+            ConfigSheetForgeWindow.OpenCompareMerge();
+        }
+
+        public static void OpenLegacyPrGate()
         {
             ConfigSheetForgeWindow.OpenPrGate();
         }

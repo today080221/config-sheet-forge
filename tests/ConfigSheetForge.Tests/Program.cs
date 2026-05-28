@@ -86,6 +86,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("excel to so cache dialect maps portable primitive aliases", () => RunSync(ExcelToSoCacheDialectMapsPortablePrimitiveAliases)),
     ("excel to so cache dialect restores json arrays from source xlsx", () => RunSync(ExcelToSoCacheDialectRestoresJsonArraysFromSourceXlsx)),
     ("excel to so cache dialect blocks unresolved json", () => RunSync(ExcelToSoCacheDialectBlocksUnresolvedJson)),
+    ("repair-cache-dialect rewrites xlsx type row offline", RepairCacheDialectRewritesXlsxTypeRowOffline),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
     ("seed lifecycle rejects user fallback", SeedLifecycleRejectsUserFallback),
@@ -2914,6 +2915,80 @@ static void ExcelToSoCacheDialectBlocksUnresolvedJson()
     var plan = BuildExcelToSoDialectPlanForTest(workbook, table, Directory.GetCurrentDirectory());
 
     AssertTrue(plan.Errors.Any(e => e.Contains("json") && e.Contains("excelToSoType")), "Unresolved json should block with a schema/originalType repair hint.");
+}
+
+static async Task RepairCacheDialectRewritesXlsxTypeRowOffline()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-repair-dialect-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var state = Path.Combine(temp, ".config-sheet-forge");
+        var cache = Path.Combine(state, "cache");
+        var excelCache = Path.Combine(state, "excel-cache");
+        Directory.CreateDirectory(cache);
+        Directory.CreateDirectory(excelCache);
+        await File.WriteAllTextAsync(Path.Combine(state, "config.json"), JsonSerializer.Serialize(new ForgeConfig(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var workbook = SampleWorkbookWithColumns(("id", "integer"), ("damage", "number"), ("name", "string"));
+        await File.WriteAllTextAsync(Path.Combine(cache, "ProjectileData.semantic.json"), JsonSerializer.Serialize(workbook, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        await File.WriteAllTextAsync(Path.Combine(cache, "ProjectileData.sha256"), SemanticHasher.ComputeHash(workbook) + Environment.NewLine);
+        var xlsx = Path.Combine(excelCache, "ProjectileData.xlsx");
+        CreateTypeHintXlsx(xlsx, new[] { "id", "damage", "name" }, new[] { "integer", "number", "string" });
+
+        var request = new LifecycleContractRequest
+        {
+            Operation = "repair-cache-dialect",
+            DryRun = true,
+            SeedFromLocalXlsx = new SeedFromLocalXlsxContract
+            {
+                CacheDirectory = ".config-sheet-forge/cache",
+                ExcelCacheDirectory = ".config-sheet-forge/excel-cache"
+            }
+        };
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract
+        {
+            TableId = "ProjectileData",
+            DisplayName = "ProjectileData",
+            CacheXlsxPath = ".config-sheet-forge/excel-cache/ProjectileData.xlsx",
+            SemanticCachePath = ".config-sheet-forge/cache/ProjectileData.semantic.json",
+            FieldRow = 0,
+            TypeRow = 1,
+            DescriptionRow = 2,
+            DataStartRow = 3,
+            UnityExcelToSo = new UnityExcelToSoContract { SettingsPath = "ProjectSettings/ExcelToScriptableObjectSettings.asset", ExcelPath = ".config-sheet-forge/excel-cache/ProjectileData.xlsx" }
+        });
+        var manifest = Path.Combine(temp, "contract.json");
+        var dryResultPath = Path.Combine(temp, "dry-result.json");
+        var applyResultPath = Path.Combine(temp, "apply-result.json");
+        await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var oldDir = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(temp);
+            var dry = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--dry-run", "--out", dryResultPath });
+            AssertEqual("0", dry.ToString(), "repair-cache-dialect dry-run should pass.");
+            AssertEqual("integer,number,string", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "dry-run must not rewrite xlsx.");
+
+            var apply = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--yes", "--out", applyResultPath });
+            AssertEqual("0", apply.ToString(), "repair-cache-dialect apply should pass.");
+            AssertEqual("int,float,string", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "apply should rewrite only the physical ExcelToSO type row.");
+            var result = JsonSerializer.Deserialize<LifecycleContractResult>(await File.ReadAllTextAsync(applyResultPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            AssertTrue(result != null && result.SyncCacheSummary.CacheStatus == "dialectOutdated", "Result should explain this was a cache dialect repair.");
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(oldDir);
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
 }
 
 static async Task StrictBotModeDoesNotFallbackToUser()

@@ -51,6 +51,7 @@ public static class Program
                 "new-table" => await NewTableAsync(parsed),
                 "sync" => await SyncAsync(parsed),
                 "sync-cache" => await SyncCacheLifecycleAsync(parsed),
+                "repair-cache-dialect" => await RepairCacheDialectAsync(parsed),
                 "registry-status" => await RegistryStatusAsync(parsed, "registry-status"),
                 "branch-status" => await RegistryStatusAsync(parsed, "branch-status"),
                 "sync-status" => await RegistryStatusAsync(parsed, "sync-status"),
@@ -817,7 +818,7 @@ public static class Program
         request.Operation = "sync-cache";
         request.SyncCache ??= new SyncCacheContract();
         request.DryRun = args.HasFlag("dry-run") || !args.HasFlag("yes");
-        request.SyncCache.TableId = args.Get("table", "");
+        request.SyncCache.TableId = args.Get("table", args.Get("tables", ""));
         request.SyncCache.CacheDirectory = args.Get("cache-dir", workspace.Paths.CacheDirectory);
         request.SyncCache.ExcelCacheDirectory = args.Get("excel-cache-dir", Path.Combine(workspace.Paths.StateDirectory, "excel-cache"));
         request.SyncCache.ConfirmApply = args.HasFlag("yes") || args.HasFlag("confirm");
@@ -826,7 +827,8 @@ public static class Program
             throw new CliException("sync-cache apply 会更新本地 cache，必须显式传 --yes。", 2);
         }
 
-        await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
+        var hydrateSelection = request.SyncCache.TableId.Contains(",") || request.SyncCache.TableId.Contains(";") ? "" : request.SyncCache.TableId;
+        await HydrateSyncCacheRequestFromRegistryAsync(request, args, hydrateSelection);
         var result = await LifecycleExecutor.ExecuteAsync(request, new CliLifecyclePlatform(args, request), CancellationToken.None);
         if (result.Success)
         {
@@ -855,6 +857,152 @@ public static class Program
         return result.Success ? 0 : 1;
     }
 
+    private static async Task<int> RepairCacheDialectAsync(ParsedArgs args)
+    {
+        var workspace = await LoadWorkspaceAsync(requireConfig: false);
+        var request = args.TryGet("manifest", out var manifestPath)
+            ? await ReadSeedManifestAsync(workspace, manifestPath, args)
+            : NewSeedRequestFromWorkspace(workspace, args);
+        request.Operation = "repair-cache-dialect";
+        request.DryRun = args.HasFlag("dry-run") || !args.HasFlag("yes");
+        request.SyncCache ??= new SyncCacheContract();
+        request.SyncCache.CacheDirectory = args.Get("cache-dir", workspace.Paths.CacheDirectory);
+        request.SyncCache.ExcelCacheDirectory = args.Get("excel-cache-dir", Path.Combine(workspace.Paths.StateDirectory, "excel-cache"));
+
+        if (!request.DryRun && !args.HasFlag("yes"))
+        {
+            throw new CliException("repair-cache-dialect apply 会重写 .config-sheet-forge/excel-cache/*.xlsx 的类型行，必须显式传 --yes。", 2);
+        }
+
+        var result = new LifecycleContractResult
+        {
+            Operation = "repair-cache-dialect",
+            DryRun = request.DryRun,
+            Success = true,
+            GitHead = FirstNonEmpty(await TryRunGitAsync("rev-parse", "HEAD"), "unknown"),
+            Branch = FirstNonEmpty(await TryRunGitAsync("branch", "--show-current"), "unknown"),
+            RequestFingerprint = ComputeRequestFingerprint(request)
+        };
+        result.RequestSummary["cacheDirectory"] = request.SyncCache.CacheDirectory;
+        result.RequestSummary["excelCacheDirectory"] = request.SyncCache.ExcelCacheDirectory;
+        result.RequestSummary["network"] = "none";
+
+        var tables = BuildCacheDialectTables(request, args.Get("table", ""), args.Get("tables", ""));
+        result.SyncCacheSummary.TableCount = tables.Count;
+        if (tables.Count == 0)
+        {
+            result.AddFailure("repair-cache-dialect 没有找到可处理的表。请检查 manifest 或 --table/--tables 参数。");
+            await EmitLifecycleResultAsync(args, result);
+            return 1;
+        }
+
+        for (var i = 0; i < tables.Count; i++)
+        {
+            var table = tables[i];
+            await EmitProgressEventAsync(args, "repair-cache-dialect", "cache dialect", table.Id, i + 1, tables.Count, "检查 cache 类型行：" + table.Id, "info");
+            var action = result.AddAction("cache_dialect.repair", request.DryRun ? "planned" : "done", table.Id + " cache dialect 已检查。");
+            action.Details["tableId"] = table.Id;
+            action.Details["network"] = "none";
+            action.Details["writesOldExcel"] = "false";
+            action.Details["writesFeishu"] = "false";
+            action.Details["writesProjectSettings"] = "false";
+
+            if (!table.UseExcelToSoCacheDialect)
+            {
+                action.Status = "skipped";
+                action.Message = table.Id + " 未启用 ExcelToSO cache dialect，不需要重写。";
+                result.SyncCacheSummary.UpToDateTables.Add(table.Id);
+                continue;
+            }
+
+            var semanticPath = Path.Combine(request.SyncCache.CacheDirectory, table.Id + ".semantic.json");
+            var excelCacheRoot = FirstNonEmpty(request.SyncCache.ExcelCacheDirectory, request.SyncCache.CacheDirectory);
+            var xlsxPath = Path.Combine(excelCacheRoot, MakeSafeFileName(table.Id) + ".xlsx");
+            action.Details["semanticPath"] = semanticPath;
+            action.Details["xlsxPath"] = xlsxPath;
+
+            if (!File.Exists(semanticPath) || !File.Exists(xlsxPath))
+            {
+                action.Status = "blocked";
+                action.Message = table.Id + " 缺少 semantic cache 或 xlsx cache，无法只做 dialect 快速修复。请先运行 sync-cache dry-run/apply。";
+                result.SyncCacheSummary.BlockedTables.Add(table.Id);
+                result.AddFailure(action.Message);
+                continue;
+            }
+
+            WorkbookDocument workbook;
+            try
+            {
+                workbook = await ReadJsonAsync<WorkbookDocument>(semanticPath);
+            }
+            catch (Exception ex) when (ex is IOException || ex is JsonException || ex is UnauthorizedAccessException)
+            {
+                action.Status = "blocked";
+                action.Message = table.Id + " 的 semantic cache 无法读取：" + ex.Message;
+                result.SyncCacheSummary.BlockedTables.Add(table.Id);
+                result.AddFailure(action.Message);
+                continue;
+            }
+
+            var semanticHash = SemanticHasher.ComputeHash(workbook);
+            action.Details["semanticHash"] = semanticHash;
+            if (!CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table))
+            {
+                action.Status = "skipped";
+                action.Message = table.Id + " cache 类型行已经是 ExcelToSO dialect，无需重写。";
+                result.SyncCacheSummary.UpToDateTables.Add(table.Id);
+                continue;
+            }
+
+            var plan = BuildExcelToSoCacheDialectPlan(workbook, table, workspace.Root);
+            action.Details["typeRow"] = string.Join(",", plan.TypeRow);
+            foreach (var warning in plan.Warnings)
+            {
+                result.SyncCacheSummary.PortableSubsetFindings.Add(table.Id + ": " + warning);
+            }
+
+            if (plan.Errors.Count > 0)
+            {
+                action.Status = "blocked";
+                action.Message = table.Id + " 无法安全重写 cache dialect：" + string.Join("；", plan.Errors);
+                result.SyncCacheSummary.BlockedTables.Add(table.Id);
+                result.AddFailure(action.Message);
+                continue;
+            }
+
+            result.SyncCacheSummary.ChangedTables.Add(table.Id);
+            result.SyncCacheSummary.WillWriteFilePaths.Add(xlsxPath);
+            action.Message = request.DryRun
+                ? table.Id + " 可以快速重写 cache 类型行；不会联网，不改 semantic/hash。"
+                : table.Id + " 已重写 cache 类型行；没有联网，没有改 semantic/hash。";
+            if (!request.DryRun)
+            {
+                WriteExcelToSoCacheXlsx(xlsxPath, workbook, table, plan.TypeRow);
+            }
+        }
+
+        result.SyncCacheSummary.ChangedTables = DistinctSorted(result.SyncCacheSummary.ChangedTables);
+        result.SyncCacheSummary.UpToDateTables = DistinctSorted(result.SyncCacheSummary.UpToDateTables);
+        result.SyncCacheSummary.BlockedTables = DistinctSorted(result.SyncCacheSummary.BlockedTables);
+        result.SyncCacheSummary.WillWriteFilePaths = DistinctSorted(result.SyncCacheSummary.WillWriteFilePaths);
+        result.SyncCacheSummary.PortableSubsetFindings = DistinctSorted(result.SyncCacheSummary.PortableSubsetFindings);
+        result.SyncCacheSummary.WillWriteFiles = !request.DryRun && result.SyncCacheSummary.ChangedTables.Count > 0;
+        result.SyncCacheSummary.NoChangeKeepsMtime = true;
+        result.SyncCacheSummary.CacheStatus = result.SyncCacheSummary.BlockedTables.Count > 0
+            ? "blocked"
+            : result.SyncCacheSummary.ChangedTables.Count > 0
+                ? "dialectOutdated"
+                : "upToDate";
+
+        await EmitLifecycleResultAsync(args, result);
+        foreach (var failure in result.HumanReadableFailures)
+        {
+            Console.Error.WriteLine("[error] " + failure);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
     private static async Task<int> RegistryStatusAsync(ParsedArgs args, string operation)
     {
         if (args.HasFlag("allow-user-fallback"))
@@ -869,8 +1017,8 @@ public static class Program
         request.Operation = operation;
         request.DryRun = true;
         request.SyncCache ??= new SyncCacheContract();
-        request.SyncCache.TableId = args.Get("table", request.SyncCache.TableId);
-        await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
+        request.SyncCache.TableId = args.Get("table", args.Get("tables", request.SyncCache.TableId));
+        await HydrateSyncCacheRequestFromRegistryAsync(request, args, SingleTableSelectionForHydrate(request.SyncCache.TableId));
         var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
         if (string.Equals(operation, "sync-status", StringComparison.OrdinalIgnoreCase))
         {
@@ -1233,10 +1381,11 @@ public static class Program
     private static List<TableConfig> BuildSyncCacheTables(LifecycleContractRequest request, string selectedTable)
     {
         var seed = request.SeedFromLocalXlsx ?? new SeedFromLocalXlsxContract();
+        var selectedSet = SplitTableSelection(selectedTable);
         var tables = new List<TableConfig>();
         foreach (var table in seed.Tables)
         {
-            if (!string.IsNullOrWhiteSpace(selectedTable) && !string.Equals(selectedTable, table.TableId, StringComparison.OrdinalIgnoreCase))
+            if (selectedSet.Count > 0 && !selectedSet.Contains(table.TableId))
             {
                 continue;
             }
@@ -1267,6 +1416,68 @@ public static class Program
         }
 
         return tables;
+    }
+
+    private static List<TableConfig> BuildCacheDialectTables(LifecycleContractRequest request, string selectedTable, string selectedTables)
+    {
+        var selectedSet = SplitTableSelection(selectedTable, selectedTables);
+        var seed = request.SeedFromLocalXlsx ?? new SeedFromLocalXlsxContract();
+        var tables = new List<TableConfig>();
+        foreach (var table in seed.Tables)
+        {
+            if (selectedSet.Count > 0 && !selectedSet.Contains(table.TableId))
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(table.TableId))
+            {
+                continue;
+            }
+
+            tables.Add(new TableConfig
+            {
+                Id = table.TableId,
+                Name = FirstNonEmpty(table.DisplayName, table.TableId),
+                Provider = "local",
+                Spreadsheet = FirstNonEmpty(table.SpreadsheetToken, table.SpreadsheetUrl),
+                SheetId = table.SheetId,
+                Range = "",
+                LocalSourcePath = table.SourceXlsxPath,
+                UseExcelToSoCacheDialect = UsesExcelToSoCacheDialect(table),
+                Fields = table.Fields.Select(CloneFieldSpec).ToList(),
+                FieldRow = table.FieldRow,
+                TypeRow = table.TypeRow,
+                DescriptionRow = table.DescriptionRow,
+                DataStartRow = table.DataStartRow,
+                TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
+            });
+        }
+
+        return tables.OrderBy(t => t.Id, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static HashSet<string> SplitTableSelection(params string[] values)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var value in values)
+        {
+            foreach (var part in (value ?? "").Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var tableId = part.Trim();
+                if (!string.IsNullOrWhiteSpace(tableId))
+                {
+                    set.Add(tableId);
+                }
+            }
+        }
+
+        return set;
+    }
+
+    private static string SingleTableSelectionForHydrate(string value)
+    {
+        return SplitTableSelection(value).Count == 1 ? SplitTableSelection(value).First() : "";
     }
 
     private static ContractFieldSpec CloneFieldSpec(ContractFieldSpec field)
@@ -2342,6 +2553,49 @@ public static class Program
         }
     }
 
+    private static async Task EmitProgressEventAsync(ParsedArgs args, string operation, string phase, string tableId, int current, int total, string message, string severity)
+    {
+        if (!args.HasFlag("progress-stdout") && !args.TryGet("progress", out var progressPath))
+        {
+            return;
+        }
+
+        var progress = new Dictionary<string, object?>
+        {
+            ["operation"] = operation,
+            ["phase"] = phase,
+            ["tableId"] = tableId,
+            ["current"] = current,
+            ["total"] = total,
+            ["elapsedMs"] = 0,
+            ["message"] = message,
+            ["severity"] = severity
+        };
+        var line = JsonSerializer.Serialize(progress, CompactJsonOptions);
+        if (args.HasFlag("progress-stdout"))
+        {
+            Console.WriteLine(line);
+        }
+
+        if (args.TryGet("progress", out progressPath) && !string.IsNullOrWhiteSpace(progressPath))
+        {
+            var directory = Path.GetDirectoryName(progressPath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            await File.AppendAllTextAsync(progressPath, line + Environment.NewLine, Encoding.UTF8);
+        }
+    }
+
+    private static string ComputeRequestFingerprint(object value)
+    {
+        var json = JsonSerializer.Serialize(value, CompactJsonOptions);
+        using var sha = SHA256.Create();
+        return Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(json))).ToLowerInvariant();
+    }
+
     private static async Task<int> MergeAsync(ParsedArgs args)
     {
         var basePath = args.Get("base", "");
@@ -2507,7 +2761,7 @@ public static class Program
                 throw new CliException("sync-cache apply 会更新本地 cache，必须显式传 --yes，或在 contract.syncCache.confirmApply=true。", 2);
             }
 
-            await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
+            await HydrateSyncCacheRequestFromRegistryAsync(request, args, SingleTableSelectionForHydrate(request.SyncCache.TableId));
         }
 
         if (BranchStatusOperationRequested(request.Operation))
@@ -2518,7 +2772,7 @@ public static class Program
                 throw new CliException(request.Operation + " 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
             }
 
-            await HydrateSyncCacheRequestFromRegistryAsync(request, args, request.SyncCache.TableId);
+            await HydrateSyncCacheRequestFromRegistryAsync(request, args, SingleTableSelectionForHydrate(request.SyncCache.TableId));
         }
 
         if (CompareMergeOperationRequested(request.Operation))
@@ -4124,7 +4378,8 @@ public static class Program
         Console.WriteLine("  config-sheet-forge new-table --id <id> --name <name> [--spreadsheet <url-or-token>] [--sheet-id <id>] [--range <A1>] [--field-row <0>] [--type-row <1>] [--description-row <2>] [--data-start-row <3>]");
         Console.WriteLine("  config-sheet-forge sync [--table <id>] [--input <semantic.json>]");
         Console.WriteLine("  config-sheet-forge registry-status [--manifest <project-config-or-contract>] [--details]");
-        Console.WriteLine("  config-sheet-forge sync-cache [--table <id>] [--manifest <project-config-or-contract>] [--dry-run] [--yes]");
+        Console.WriteLine("  config-sheet-forge sync-cache [--table <id>|--tables A,B] [--manifest <project-config-or-contract>] [--dry-run] [--yes]");
+        Console.WriteLine("  config-sheet-forge repair-cache-dialect [--manifest <project-config-or-contract>] [--tables A,B] [--dry-run] [--yes]");
         Console.WriteLine("  config-sheet-forge bootstrap-current-branch-from-target --manifest <project-config-or-contract> --target-branch main --dry-run");
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --table <id> --source-xlsx <path> --dry-run");
         Console.WriteLine("  config-sheet-forge seed-from-xlsx --all --manifest <project-config-or-contract> --dry-run");

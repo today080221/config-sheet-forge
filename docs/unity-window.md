@@ -12,6 +12,8 @@
 
 打开 `Tools > Config Sheet Forge` 后，先看首页顶部的 `推荐下一步`。
 
+从 0.4.29 开始，默认首页是 Unity thin bridge：最重要的按钮是 `打开 Config Sheet Forge Desktop`。同步、合并、审查、PR gate 这类长任务推荐在 Desktop 里跑；Unity 只保留安装/更新 `SourceOfTruthCache` profile、导入 Unity 配表资产、查看最近结果这些必须或适合在 Editor 内做的动作。旧完整 Unity 工作台还在 `Tools > Config Sheet Forge > Legacy > 完整 Unity 工作台`，只建议在没有 Desktop、CI 调试或救急 fallback 时使用。
+
 通常你只需要看三件事：
 
 1. 当前状态是不是正常。
@@ -53,6 +55,8 @@
 如果窗口提示“缺少 SourceOfTruthCache profile”，先点 `安装/更新 Source of Truth 导入 profile`。这一步只新增或更新给工具/CI 使用的 cache profile，不会把人工 ExcelToSO UI 的本地 Excel profile 改成 `.config-sheet-forge/excel-cache`。如果旧版本曾经把本地 profile 改到 cache，工具也会尽量恢复到 `oldExcelPath` 或 `Excel/<表ID>.xlsx`。
 
 如果窗口提示“cache 类型需要处理”，也不要手改 `.config-sheet-forge/excel-cache`。这个目录是生成物，下次同步会覆盖。先重新 `预览同步计划`，再由负责人确认 `写入本地 cache`。工具会尽量把 Source of Truth 的 `integer`、`number` 等通用类型写成 ExcelToSO 能导入的 `int`、`float`。如果提示某列还是 `json`，说明工具无法判断它到底应该是 `int[]`、`float[]`、`string[]` 还是 `string`，需要在项目 schema 或 adapter 里声明具体类型后再同步。
+
+如果 Desktop 显示“cache 内容未变，只需要修复 ExcelToSO 类型行”，可以走 `重写 cache dialect`。它不联网，不读飞书，只把 `.config-sheet-forge/excel-cache/*.xlsx` 的类型行修成 ExcelToSO 可导入格式；旧 `Excel/` 不会被写。
 
 ## 新建配表流程
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.29
+
+- 新增官方 Tauri Desktop 工作台骨架 `apps/desktop`，用于承载 Source of Truth 主流程：项目识别、环境检查、live registry 状态、sync-cache dry-run、cache dialect repair、compare/PR gate 等长任务入口。Desktop frontend 已纳入 CI build/lint。
+- Unity 默认窗口改为 thin bridge：首页只保留 `打开 Config Sheet Forge Desktop`、`安装/更新 SourceOfTruthCache profile`、`导入 Unity 配表资产`、`运行/读取 PR gate`、`查看最近结果`。网络长任务推荐跳转 Desktop，不再默认进入 IMGUI 大工作台。
+- 原完整 Unity IMGUI 工作流保留为 Legacy fallback，菜单移动到 `Tools > Config Sheet Forge > Legacy/*`，用于没有 Desktop、CI 调试或救急操作；既有 Editor API 仍可用，并新增 `OpenLegacy*` 明确入口。
+- CLI 新增 `repair-cache-dialect`。当 semantic/hash 没变但 cache xlsx 类型行仍是 portable dialect 时，可以不联网预览/修复 `.config-sheet-forge/excel-cache/*.xlsx`，不写飞书、不写旧 `Excel/`、不改 ProjectSettings。
+- 新增 structured progress event 基础能力：CLI 操作可通过 `--progress <path>` 或 `--progress-stdout` 输出 NDJSON 进度事件，Desktop 后续可直接订阅阶段、表名、current/total 和 severity。
+
 ## 0.4.28
 
 - ExcelToSO 集成改为显式使用 `SourceOfTruthCache` named profile；`导入 Unity 配表资产` 不再要求把本地/default profile 的 `Excel/` 路径改成 `.config-sheet-forge/excel-cache`。

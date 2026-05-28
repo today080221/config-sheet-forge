@@ -5,6 +5,7 @@ Config Sheet Forge 是一个面向 Unity 配表工作流的开源工具。它把
 它包含：
 
 - `packages/unity`：Unity UPM 包。
+- `apps/desktop`：官方 Tauri Desktop 工作台。
 - `src/cli`：跨平台 .NET CLI。
 - `src/core`：CLI 与 Unity 共用的语义工作簿 core。
 - `src/providers/lark`：基于 `lark-cli` 的飞书/Lark provider。
@@ -64,10 +65,20 @@ branch/profile 工作区由 contract 的 `branchWorkspace` 和 `branchBindings` 
 ## Unity UPM 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.13
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.29
 ```
 
-安装后打开 `Tools > Config Sheet Forge` 或 `Tools > Config Sheet Forge > 打开同步窗口`。下游 Unity 项目推荐只保留薄菜单 adapter 和 `ProjectSettings/*ConfigSheetForge*.json` 项目配置，通用窗口、向导、contract 执行、三方比较和 gate UI 都由本包维护。
+安装后打开 `Tools > Config Sheet Forge` 或 `Tools > Config Sheet Forge > 打开同步窗口`。从 0.4.29 开始，Unity 默认窗口是 thin bridge：推荐打开 Desktop 工作台，Unity 只保留安装/更新 `SourceOfTruthCache` profile、导入 Unity asset、运行/读取 PR gate 和查看最近结果。完整旧 IMGUI 工作流仍保留在 `Tools > Config Sheet Forge > Legacy`。
+
+从源码启动 Desktop：
+
+```bash
+cd apps/desktop
+npm install
+npm run tauri -- dev
+```
+
+下游 Unity 项目推荐只保留薄菜单 adapter 和 `ProjectSettings/*ConfigSheetForge*.json` 项目配置，通用窗口、向导、contract 执行、三方比较和 gate UI 都由本包维护。
 
 Unity 项目 adapter 模式会通过 `Temp/ConfigSheetForge/unity-lifecycle/<operation>.inputs.json` 传窗口输入，并生成标准 `Temp/ConfigSheetForge/pr-gate-report.json` 给项目 gate wrapper / CI 使用。
 
@@ -96,6 +107,7 @@ v0.2.0 支持显式类型行优先的导入方式，默认与 `excel_to_scriptab
 ## 文档
 
 - [入门指南](docs/getting-started.md)
+- [Desktop 工作台](docs/desktop-workbench.md)
 - [配置说明](docs/configuration.md)
 - [给非程序用户的说明](docs/human-guide.md)
 - [便携子集](docs/portable-subset.md)

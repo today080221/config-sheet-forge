@@ -179,16 +179,18 @@ if ($portableStructures -notmatch "#if !UNITY_5_3_OR_NEWER") {
 }
 
 $window = Get-Content -Raw packages/unity/Editor/ConfigSheetForgeWindow.cs
+$bridgeWindow = Get-Content -Raw packages/unity/Editor/ConfigSheetForgeBridgeWindow.cs
 $editorSources = (Get-ChildItem packages/unity/Editor -Recurse -Filter *.cs | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n"
 $requiredMenus = @(
   'MenuItem("Tools/Config Sheet Forge"',
   'MenuItem("Tools/Config Sheet Forge/打开同步窗口"',
-  'MenuItem("Tools/Config Sheet Forge/新建配表向导"',
-  'MenuItem("Tools/Config Sheet Forge/三方比较与合并"',
-  'MenuItem("Tools/Config Sheet Forge/PR 同步检查"'
+  'MenuItem("Tools/Config Sheet Forge/打开 Desktop 工作台"',
+  'MenuItem("Tools/Config Sheet Forge/Legacy/新建配表向导"',
+  'MenuItem("Tools/Config Sheet Forge/Legacy/三方比较与合并"',
+  'MenuItem("Tools/Config Sheet Forge/Legacy/PR 同步检查"'
 )
 foreach ($menu in $requiredMenus) {
-  if ($window -notlike "*$menu*") {
+  if ($editorSources -notlike "*$menu*") {
     throw "Missing stable Unity menu contract: $menu"
   }
 }
@@ -338,6 +340,12 @@ foreach ($requiredV427Marker in @("BuildExcelToSoCacheDialectPlan", "excelToSoTy
 foreach ($requiredV428Marker in @("SourceOfTruthCache", "ImportByProfile", "安装/更新 Source of Truth 导入 profile", "不改变本地 Excel profile", "ExcelToSoProfile", "source_of_truth_cache")) {
   if (($editorSources + "`n" + $window + "`n" + (Get-Content -Raw packages/unity/README.md) + "`n" + (Get-Content -Raw docs/unity-window.md) + "`n" + (Get-Content -Raw packages/unity/Tests/Editor/ConfigSheetForgeEditorUtilityTests.cs)) -notlike "*$requiredV428Marker*") {
     throw "Unity v0.4.28 ExcelToSO profile marker is missing: $requiredV428Marker"
+  }
+}
+
+foreach ($requiredV429Marker in @("ConfigSheetForgeBridgeWindow", "打开 Config Sheet Forge Desktop", "Legacy/完整 Unity 工作台", "CONFIG_SHEET_FORGE_DESKTOP", "CONFIG_SHEET_FORGE_ROOT", "Advanced / Legacy Unity Workflow")) {
+  if (($editorSources + "`n" + $bridgeWindow + "`n" + (Get-Content -Raw packages/unity/README.md) + "`n" + (Get-Content -Raw docs/unity-window.md)) -notlike "*$requiredV429Marker*") {
+    throw "Unity v0.4.29 Desktop bridge marker is missing: $requiredV429Marker"
   }
 }
 

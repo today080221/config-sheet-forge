@@ -10,6 +10,8 @@ Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本
 
 不要要求项目把每张表的 `SpreadsheetToken` / `SheetId` 写回 `ProjectSettings`。Unity 窗口会通过只读 `registry-status` 从 Base 注册中心读取 live locator。
 
+从 0.4.29 开始，推荐日常使用官方 Tauri Desktop 工作台，而不是在 Unity IMGUI 里跑完整流程。Unity 默认窗口只做 thin bridge：打开 Desktop、安装/更新 `SourceOfTruthCache` profile、导入 Unity asset、运行/读取 PR gate。旧完整 Unity 工作流保留在 `Tools > Config Sheet Forge > Legacy`，用于没有 Desktop 或救急 fallback。Desktop 使用说明见 [Desktop 工作台](desktop-workbench.md)。
+
 ## 安装要求
 
 - .NET 8 SDK 或更新版本，用于 CLI。
@@ -17,6 +19,7 @@ Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本
 - Unity 2021.3 或更新版本，用于 UPM 包。
 - git，用于识别当前分支和 merge-base。
 - GitHub CLI `gh` 可选但推荐。它只用于 Unity 合并页自动识别当前 PR；没装时仍可手动选择目标分支。
+- Node.js / npm 与 Rust toolchain 只在从源码构建 Desktop 时需要；普通项目可以直接使用发布好的 Desktop。
 
 如果普通终端能运行 `lark-cli`，但 Unity 窗口提示“本机没有找到 lark-cli”，通常是 Unity 启动时没有继承 npm 全局路径。优先尝试：
 
