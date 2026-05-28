@@ -14,7 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
 {
     public sealed class ConfigSheetForgeBridgeWindow : EditorWindow
     {
-        internal const string PackageVersion = "v0.4.31";
+        internal const string PackageVersion = "v0.4.32";
         private const string DesktopPathEnv = "CONFIG_SHEET_FORGE_DESKTOP";
         private const string SourceCheckoutEnv = "CONFIG_SHEET_FORGE_ROOT";
         private const string DesktopInstallPathPrefKey = "ConfigSheetForge.Desktop.InstallPath";
@@ -271,6 +271,14 @@ namespace ConfigSheetForge.Unity.Editor
                 if (_desktopDiscovery.HasRunnableDesktop)
                 {
                     var desktopPath = _desktopDiscovery.ExecutablePath;
+                    if (LooksLikeDevDesktopBuild(desktopPath))
+                    {
+                        var devBuildMessage = BuildDevDesktopBuildMessage(desktopPath);
+                        _recentSummary = devBuildMessage;
+                        EditorUtility.DisplayDialog("Desktop 需要升级", devBuildMessage, "知道了");
+                        return;
+                    }
+
                     StartProcess(desktopPath, new[] { _projectRoot }, Path.GetDirectoryName(desktopPath) ?? _projectRoot, visible: true);
                     _recentSummary = "已启动 Desktop：" + desktopPath;
                     return;
@@ -453,6 +461,36 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return message;
+        }
+
+        internal static bool LooksLikeDevDesktopBuild(string executablePath)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath))
+                {
+                    return false;
+                }
+
+                var bytes = File.ReadAllBytes(executablePath);
+                var text = Encoding.ASCII.GetString(bytes);
+                return text.IndexOf("http://127.0.0.1:1420", StringComparison.OrdinalIgnoreCase) >= 0
+                    || text.IndexOf("127.0.0.1:1420", StringComparison.OrdinalIgnoreCase) >= 0
+                    || text.IndexOf("http://localhost:1420", StringComparison.OrdinalIgnoreCase) >= 0
+                    || text.IndexOf("localhost:1420", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static string BuildDevDesktopBuildMessage(string executablePath)
+        {
+            return "Desktop release 包疑似开发构建，请升级 config-sheet-forge Desktop。\n\n"
+                + "检测到 Desktop 可执行文件仍指向 127.0.0.1:1420 / localhost:1420。生产版 Desktop 不需要 Node、Vite 或 CONFIG_SHEET_FORGE_ROOT。\n\n"
+                + "请点击“安装 Desktop " + PackageVersion + "”重新安装，或手动下载同版本 GitHub Release。\n\n"
+                + "当前文件：" + executablePath;
         }
 
         private static string FirstNonEmpty(params string[] values)
@@ -667,6 +705,11 @@ namespace ConfigSheetForge.Unity.Editor
                 if (string.IsNullOrWhiteSpace(executable) || !File.Exists(executable))
                 {
                     return DesktopInstallResult.Fail("安装包里没有找到 Desktop exe。请手动下载检查：" + downloadUrl);
+                }
+
+                if (ConfigSheetForgeBridgeWindow.LooksLikeDevDesktopBuild(executable))
+                {
+                    return DesktopInstallResult.Fail(ConfigSheetForgeBridgeWindow.BuildDevDesktopBuildMessage(executable));
                 }
 
                 File.WriteAllText(Path.Combine(Path.GetDirectoryName(executable) ?? resolvedInstallDir, "VERSION.txt"), version, Encoding.UTF8);

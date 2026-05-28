@@ -22,6 +22,22 @@ $tauriRoot = Join-Path $desktopRoot "src-tauri"
 $packageJsonPath = Join-Path $desktopRoot "package.json"
 $tauriConfigPath = Join-Path $tauriRoot "tauri.conf.json"
 $cargoTomlPath = Join-Path $tauriRoot "Cargo.toml"
+$releaseBuildRoot = Join-Path $repoRoot "obj/desktop-release"
+$releaseTauriConfigPath = Join-Path $releaseBuildRoot "tauri.conf.release.json"
+$releaseExe = Join-Path $tauriRoot "target/release/config-sheet-forge-desktop.exe"
+
+function Invoke-Native([string]$FileName, [string[]]$Arguments, [string]$WorkingDirectory) {
+  Push-Location $WorkingDirectory
+  try {
+    & $FileName @Arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "$FileName $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    }
+  }
+  finally {
+    Pop-Location
+  }
+}
 
 function Assert-ContainsVersion([string]$Path, [string]$Needle, [string]$Name) {
   $text = Get-Content -Raw $Path
@@ -34,6 +50,38 @@ Assert-ContainsVersion $packageJsonPath "`"version`": `"$semver`"" "Desktop pack
 Assert-ContainsVersion $tauriConfigPath "`"version`": `"$semver`"" "Tauri config"
 Assert-ContainsVersion $cargoTomlPath "version = `"$semver`"" "Desktop Cargo.toml"
 
+function New-ReleaseTauriConfig {
+  New-Item -ItemType Directory -Force -Path $releaseBuildRoot | Out-Null
+  $config = Get-Content -Raw $tauriConfigPath | ConvertFrom-Json
+  $config.version = $semver
+  $config.build.devUrl = "http://config-sheet-forge-release.invalid"
+  $config.build.beforeBuildCommand = ""
+  $config | ConvertTo-Json -Depth 32 | Set-Content -Path $releaseTauriConfigPath -Encoding UTF8
+  return $releaseTauriConfigPath
+}
+
+function Read-BinaryText([string]$Path) {
+  $bytes = [System.IO.File]::ReadAllBytes($Path)
+  return [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($bytes)
+}
+
+function Assert-ReleaseDesktopDoesNotContainDevUrl([string]$Path) {
+  $text = Read-BinaryText $Path
+  foreach ($needle in @("http://127.0.0.1:1420", "127.0.0.1:1420", "http://localhost:1420", "localhost:1420")) {
+    if ($text.Contains($needle)) {
+      throw "Desktop release artifact contains development server URL '$needle'. Use tauri build production output, not cargo build/devUrl output: $Path"
+    }
+  }
+}
+
+function Invoke-DesktopReleaseSmoke([string]$ExecutablePath) {
+  Assert-ReleaseDesktopDoesNotContainDevUrl $ExecutablePath
+  & $ExecutablePath --smoke-release
+  if ($LASTEXITCODE -ne 0) {
+    throw "Desktop release smoke failed for $ExecutablePath"
+  }
+}
+
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
   $OutputDirectory = Join-Path $repoRoot "artifacts/desktop"
 }
@@ -44,23 +92,36 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 Push-Location $desktopRoot
 try {
   if (Test-Path "package-lock.json") {
-    npm ci
+    Invoke-Native "npm" @("ci") $desktopRoot
   }
   else {
-    npm install
+    Invoke-Native "npm" @("install") $desktopRoot
   }
 
-  npm run build
-  cargo build --release --manifest-path src-tauri/Cargo.toml
+  Invoke-Native "npm" @("run", "build") $desktopRoot
+  $releaseTauriConfig = New-ReleaseTauriConfig
+  $originalTauriConfig = Get-Content -Raw $tauriConfigPath
+  try {
+    Copy-Item -LiteralPath $releaseTauriConfig -Destination $tauriConfigPath -Force
+    if (Test-Path $releaseExe) {
+      Remove-Item -LiteralPath $releaseExe -Force
+    }
+    Invoke-Native "npm" @("run", "tauri", "--", "build", "--no-bundle") $desktopRoot
+  }
+  finally {
+    $restoredConfig = $originalTauriConfig.TrimEnd("`r", "`n") + "`n"
+    [System.IO.File]::WriteAllText($tauriConfigPath, $restoredConfig, [System.Text.UTF8Encoding]::new($false))
+  }
 }
 finally {
   Pop-Location
 }
 
-$releaseExe = Join-Path $tauriRoot "target/release/config-sheet-forge-desktop.exe"
 if (-not (Test-Path $releaseExe)) {
   throw "Tauri build did not produce expected executable: $releaseExe"
 }
+
+Invoke-DesktopReleaseSmoke $releaseExe
 
 $artifactName = "config-sheet-forge-desktop-windows-x64-$Version.zip"
 $staging = Join-Path $OutputDirectory "config-sheet-forge-desktop-windows-x64-$Version"
@@ -84,6 +145,21 @@ if (Test-Path $zipPath) {
 }
 
 Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $zipPath -Force
+
+$smokeExtract = Join-Path $OutputDirectory "smoke-extract-$Version"
+if (Test-Path $smokeExtract) {
+  Remove-Item -LiteralPath $smokeExtract -Recurse -Force
+}
+
+New-Item -ItemType Directory -Force -Path $smokeExtract | Out-Null
+Expand-Archive -LiteralPath $zipPath -DestinationPath $smokeExtract -Force
+$extractedExe = Get-ChildItem -Path $smokeExtract -Filter "ConfigSheetForgeDesktop.exe" -Recurse | Select-Object -First 1
+if ($null -eq $extractedExe) {
+  throw "Desktop zip smoke did not find ConfigSheetForgeDesktop.exe in $zipPath"
+}
+
+Invoke-DesktopReleaseSmoke $extractedExe.FullName
+
 $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $shaPath = "$zipPath.sha256"
 Set-Content -Path $shaPath -Value "$hash  $artifactName" -Encoding ASCII

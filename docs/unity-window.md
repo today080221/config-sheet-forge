@@ -16,6 +16,8 @@
 
 从 0.4.31 开始，如果没有安装 Desktop，Unity 窗口会显示 `安装 Desktop`。安装由用户点击触发，不会在 UPM 导入时自动联网；下载后会校验 sha256，并解压到本机用户目录 `%LOCALAPPDATA%/ConfigSheetForge/Desktop/v<version>/`。重启 Unity 后会从 EditorPrefs 找到已安装 Desktop。开发者的 `CONFIG_SHEET_FORGE_DESKTOP` / `CONFIG_SHEET_FORGE_ROOT` 源码模式仍在高级区保留。
 
+从 0.4.32 开始，Desktop 安装包必须是生产构建，普通机器不需要启动 Vite dev server。Unity 会在安装和启动前检查 exe 是否仍包含 `127.0.0.1:1420 / localhost:1420`；如果是旧的开发构建包，会提示升级 Desktop，避免只看到 WebView 的连接失败页面。
+
 通常你只需要看三件事：
 
 1. 当前状态是不是正常。

@@ -36,6 +36,15 @@ struct CliRunResult {
     stderr: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReleaseSmokeReport {
+    version: &'static str,
+    release_build: bool,
+    dev_server_url_embedded: bool,
+    frontend_markers_embedded: bool,
+}
+
 #[tauri::command]
 fn startup_project_root() -> String {
     env::args().nth(1).unwrap_or_default()
@@ -108,10 +117,56 @@ fn run_cli(project_root: String, args: Vec<String>) -> Result<CliRunResult, Stri
 }
 
 fn main() {
+    if env::args().any(|arg| arg == "--smoke-release") {
+        std::process::exit(run_release_smoke());
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![startup_project_root, discover_project, doctor_tools, run_cli])
         .run(tauri::generate_context!())
         .expect("error while running Config Sheet Forge desktop");
+}
+
+fn run_release_smoke() -> i32 {
+    let exe_text = env::current_exe()
+        .ok()
+        .and_then(|path| fs::read(path).ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let dev_server_url_embedded = contains_desktop_dev_url(&exe_text);
+    let frontend_markers_embedded = exe_text.contains("index.html")
+        || exe_text.contains("tauri://localhost")
+        || exe_text.contains("配表 Source of Truth 工作台");
+    let report = ReleaseSmokeReport {
+        version: env!("CARGO_PKG_VERSION"),
+        release_build: !cfg!(debug_assertions),
+        dev_server_url_embedded,
+        frontend_markers_embedded,
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
+    );
+
+    if report.release_build && report.frontend_markers_embedded && !report.dev_server_url_embedded {
+        0
+    } else {
+        2
+    }
+}
+
+fn contains_desktop_dev_url(text: &str) -> bool {
+    let loopback = "127.0.0.1";
+    let local_host = "localhost";
+    let dev_port = "1420";
+    let loopback_url = format!("http://{}:{}", loopback, dev_port);
+    let loopback_host = format!("{}:{}", loopback, dev_port);
+    let localhost_url = format!("http://{}:{}", local_host, dev_port);
+    let localhost_host = format!("{}:{}", local_host, dev_port);
+    text.contains(&loopback_url)
+        || text.contains(&loopback_host)
+        || text.contains(&localhost_url)
+        || text.contains(&localhost_host)
 }
 
 fn resolve_project_root(project_root: String) -> Result<PathBuf, String> {

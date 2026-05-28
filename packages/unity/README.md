@@ -28,6 +28,8 @@ Legacy 窗口仍采用任务型 Dashboard：第一次打开会提示“飞书在
 
 从 0.4.31 开始，Unity thin bridge 支持一键安装 Desktop。找不到 Desktop 时，窗口会显示 `安装 Desktop`，点击后下载当前 UPM tag 对应的 Windows x64 portable zip，校验 sha256，并安装到 `%LOCALAPPDATA%/ConfigSheetForge/Desktop/v<version>/`。这个动作只写用户本机目录和 EditorPrefs，不会改仓库、ProjectSettings、Packages 或旧 `Excel/`。开发者仍可在高级区使用 `CONFIG_SHEET_FORGE_DESKTOP` 或 `CONFIG_SHEET_FORGE_ROOT` 源码模式。
 
+从 0.4.32 开始，Desktop release 必须是 Tauri production build。Unity 安装和启动前会检查 exe 是否仍指向 `127.0.0.1:1420 / localhost:1420`；如果检测到开发构建，会提示升级 Desktop，而不是让用户看到 WebView 的 `ERR_CONNECTION_REFUSED`。
+
 Legacy 完整窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.32
+
+- 修复 Desktop Windows portable release 的 P0 打包问题：发布脚本现在先构建前端 dist，再执行 Tauri production build，不再发布仍指向 `127.0.0.1:1420` 的开发构建裸 exe。
+- `scripts/Package-DesktopRelease.ps1` 会生成 release 专用 Tauri config、运行 `--smoke-release` 自检、扫描 exe 中的 dev server URL，并在 zip 解压后再次验证，防止没有 Vite dev server 时白屏。
+- Unity thin bridge 在安装或启动 Desktop 前会识别疑似开发构建；如果 exe 仍包含 `127.0.0.1:1420 / localhost:1420`，会提示“Desktop release 包疑似开发构建，请升级 config-sheet-forge Desktop”。
+- Desktop / Tauri / Cargo / Unity package 版本对齐到 0.4.32。
+
 ## 0.4.31
 
 - Unity thin bridge 新增 Desktop 一键安装/更新入口：找不到 Desktop 时不再只提示环境变量，而是引导下载当前 UPM tag 对应的 Windows x64 portable zip。

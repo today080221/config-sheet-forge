@@ -14,6 +14,8 @@ Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本
 
 从 0.4.31 开始，Unity thin bridge 可以一键安装 Windows Desktop。未安装时点 `安装 Desktop`，工具会下载当前 UPM tag 对应的 GitHub Release zip、校验 sha256，并安装到本机用户目录；不会改项目文件。没有网络时，窗口会给出手动下载链接。
 
+从 0.4.32 开始，Desktop zip 是生产构建，不依赖本机 Node/Vite dev server。若 Unity 检测到旧包仍指向 `127.0.0.1:1420`，会提示重新安装同版本 Desktop。
+
 ## 安装要求
 
 - .NET 8 SDK 或更新版本，用于 CLI。

@@ -21,6 +21,9 @@ if (Test-Path apps/desktop/package.json) {
   finally {
     Pop-Location
   }
+
+  $desktopPackage = Get-Content -Raw apps/desktop/package.json | ConvertFrom-Json
+  pwsh scripts/Package-DesktopRelease.ps1 -Version "v$($desktopPackage.version)" -OutputDirectory artifacts/desktop-ci-smoke
 }
 pwsh scripts/Validate-UnityPackage.ps1
 pwsh scripts/Check-NoPrivateContent.ps1

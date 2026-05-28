@@ -361,6 +361,12 @@ foreach ($requiredV431Marker in @("DesktopInstallPathPrefKey", "config-sheet-for
   }
 }
 
+foreach ($requiredV432Marker in @("tauri", "--no-bundle", "config-sheet-forge-release.invalid", "Assert-ReleaseDesktopDoesNotContainDevUrl", "--smoke-release", "LooksLikeDevDesktopBuild", "Desktop release 包疑似开发构建")) {
+  if (($bridgeWindow + "`n" + (Get-Content -Raw packages/unity/Tests/Editor/ConfigSheetForgeEditorUtilityTests.cs) + "`n" + (Get-Content -Raw scripts/Package-DesktopRelease.ps1) + "`n" + (Get-Content -Raw apps/desktop/src-tauri/src/main.rs)) -notlike "*$requiredV432Marker*") {
+    throw "Unity v0.4.32 production Desktop release marker is missing: $requiredV432Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."

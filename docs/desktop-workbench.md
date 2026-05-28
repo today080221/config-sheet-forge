@@ -22,6 +22,8 @@ Desktop 是 Config Sheet Forge 的官方主工作台。它负责日常配表 Sou
 
 从 0.4.31 开始，GitHub Release 会附带 Windows x64 Desktop portable zip 和 `.sha256`。Unity thin bridge 找不到 Desktop 时，可以一键下载安装到 `%LOCALAPPDATA%/ConfigSheetForge/Desktop/v<version>/`，并通过 EditorPrefs 记住路径；这个安装不会改项目仓库、ProjectSettings、Packages 或旧 `Excel/`。
 
+从 0.4.32 开始，Windows portable zip 使用 Tauri production build。它不需要本机安装 Node、pnpm、Vite、Rust，也不依赖 `CONFIG_SHEET_FORGE_ROOT`。如果 Unity 检测到已安装 exe 仍指向 `127.0.0.1:1420 / localhost:1420`，会把它视为疑似开发构建并要求升级。
+
 Legacy 只用于没有 Desktop、CI 调试或救急 fallback。普通策划不需要从 Legacy 开始。
 
 ## Desktop v1 页面

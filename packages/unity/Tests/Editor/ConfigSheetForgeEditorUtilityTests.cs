@@ -172,6 +172,8 @@ namespace ConfigSheetForge.Unity.Editor.Tests
             Assert.That(bridgeSource, Does.Contain("EditorPrefs.SetString(DesktopInstallPathPrefKey"));
             Assert.That(bridgeSource, Does.Contain("CONFIG_SHEET_FORGE_DESKTOP"));
             Assert.That(bridgeSource, Does.Contain("CONFIG_SHEET_FORGE_ROOT"));
+            Assert.That(bridgeSource, Does.Contain("LooksLikeDevDesktopBuild"));
+            Assert.That(bridgeSource, Does.Contain("Desktop release 包疑似开发构建"));
         }
     }
 }
