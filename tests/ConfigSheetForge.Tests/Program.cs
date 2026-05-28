@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text;
 using System.IO.Compression;
+using System.Reflection;
 using ConfigSheetForge.Core;
 using ConfigSheetForge.Cli;
 using ConfigSheetForge.Providers.Lark;
@@ -82,6 +83,9 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("xlsx dimension a1 uses sheet data used range", () => RunSync(XlsxDimensionA1UsesSheetDataUsedRange)),
     ("lark read wrong startRange retries explicit range", LarkReadWrongStartRangeRetriesExplicitRange),
     ("lark read uses xlsx sheet data range when dimension is stale", LarkReadUsesXlsxSheetDataRangeWhenDimensionIsStale),
+    ("excel to so cache dialect maps portable primitive aliases", () => RunSync(ExcelToSoCacheDialectMapsPortablePrimitiveAliases)),
+    ("excel to so cache dialect restores json arrays from source xlsx", () => RunSync(ExcelToSoCacheDialectRestoresJsonArraysFromSourceXlsx)),
+    ("excel to so cache dialect blocks unresolved json", () => RunSync(ExcelToSoCacheDialectBlocksUnresolvedJson)),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
     ("seed lifecycle rejects user fallback", SeedLifecycleRejectsUserFallback),
@@ -2831,6 +2835,87 @@ static async Task SyncLocalInputDoesNotRewriteUnchangedCache()
     }
 }
 
+static void ExcelToSoCacheDialectMapsPortablePrimitiveAliases()
+{
+    var workbook = SampleWorkbookWithColumns(("id", "integer"), ("damage", "number"), ("name", "string"), ("enabled", "bool"));
+    var table = new TableConfig
+    {
+        Id = "ProjectileData",
+        Name = "ProjectileData",
+        UseExcelToSoCacheDialect = true,
+        FieldRow = 0,
+        TypeRow = 1,
+        DescriptionRow = 2,
+        DataStartRow = 3
+    };
+
+    var plan = BuildExcelToSoDialectPlanForTest(workbook, table, Directory.GetCurrentDirectory());
+
+    AssertTrue(!plan.Errors.Any(), "Primitive portable aliases should not block ExcelToSO dialect planning.");
+    AssertEqual("int,float,string,bool", string.Join(",", plan.TypeRow), "Primitive portable aliases should be written as ExcelToSO dialect.");
+}
+
+static void ExcelToSoCacheDialectRestoresJsonArraysFromSourceXlsx()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-excel-to-so-dialect-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var source = Path.Combine(temp, "SkillsData.xlsx");
+        CreateTypeHintXlsx(source,
+            new[] { "id", "tags", "weights", "ids" },
+            new[] { "Int", "string[]", "float[]", "int[]" });
+        var workbook = SampleWorkbookWithColumns(("id", "integer"), ("tags", "json"), ("weights", "json"), ("ids", "json"));
+        var table = new TableConfig
+        {
+            Id = "SkillsData",
+            Name = "SkillsData",
+            LocalSourcePath = source,
+            UseExcelToSoCacheDialect = true,
+            FieldRow = 0,
+            TypeRow = 1,
+            DescriptionRow = 2,
+            DataStartRow = 3
+        };
+
+        var plan = BuildExcelToSoDialectPlanForTest(workbook, table, temp);
+
+        AssertTrue(!plan.Errors.Any(), "Json array columns with old Excel type hints should not block.");
+        AssertEqual("int,string[],float[],int[]", string.Join(",", plan.TypeRow), "Json array columns should restore concrete ExcelToSO array types.");
+
+        var output = Path.Combine(temp, "SkillsData.cache.xlsx");
+        WriteExcelToSoCacheXlsxForTest(output, workbook, table, plan.TypeRow);
+        var writtenTypes = ReadTypeRowFromXlsx(output, typeRow: 1);
+        AssertEqual("int,string[],float[],int[]", string.Join(",", writtenTypes), "Formal cache xlsx should not contain canonical json/integer/number type tokens.");
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static void ExcelToSoCacheDialectBlocksUnresolvedJson()
+{
+    var workbook = SampleWorkbookWithColumns(("id", "integer"), ("skillset", "json"));
+    var table = new TableConfig
+    {
+        Id = "NpcUnitData",
+        Name = "NpcUnitData",
+        UseExcelToSoCacheDialect = true,
+        FieldRow = 0,
+        TypeRow = 1,
+        DescriptionRow = 2,
+        DataStartRow = 3
+    };
+
+    var plan = BuildExcelToSoDialectPlanForTest(workbook, table, Directory.GetCurrentDirectory());
+
+    AssertTrue(plan.Errors.Any(e => e.Contains("json") && e.Contains("excelToSoType")), "Unresolved json should block with a schema/originalType repair hint.");
+}
+
 static async Task StrictBotModeDoesNotFallbackToUser()
 {
     if (!OperatingSystem.IsWindows())
@@ -3206,6 +3291,144 @@ static void CreateMinimalXlsx(string path, bool withMergedCells, string dimensio
             </row>
           </sheetData>
         """ + merge + "</worksheet>");
+}
+
+static void CreateTypeHintXlsx(string path, IReadOnlyList<string> fieldRow, IReadOnlyList<string> typeRow)
+{
+    using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+    AddZipText(archive, "[Content_Types].xml",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+          <Default Extension="xml" ContentType="application/xml"/>
+          <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+          <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+        </Types>
+        """);
+    AddZipText(archive, "_rels/.rels",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+        </Relationships>
+        """);
+    AddZipText(archive, "xl/workbook.xml",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets>
+        </workbook>
+        """);
+    AddZipText(archive, "xl/_rels/workbook.xml.rels",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+        </Relationships>
+        """);
+
+    AddZipText(archive, "xl/worksheets/sheet1.xml",
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <sheetData>
+        """ +
+        BuildInlineStringRow(1, fieldRow) +
+        BuildInlineStringRow(2, typeRow) +
+        """
+          </sheetData>
+        </worksheet>
+        """);
+}
+
+static string BuildInlineStringRow(int rowIndex, IReadOnlyList<string> values)
+{
+    var builder = new StringBuilder();
+    builder.Append("<row r=\"").Append(rowIndex).Append("\">");
+    for (var i = 0; i < values.Count; i++)
+    {
+        builder.Append("<c r=\"").Append(ToTestA1(i, rowIndex - 1)).Append("\" t=\"inlineStr\"><is><t>")
+            .Append(System.Security.SecurityElement.Escape(values[i] ?? ""))
+            .Append("</t></is></c>");
+    }
+
+    builder.Append("</row>");
+    return builder.ToString();
+}
+
+static string ToTestA1(int columnIndex, int rowIndex)
+{
+    var columnNumber = columnIndex + 1;
+    var name = "";
+    while (columnNumber > 0)
+    {
+        var modulo = (columnNumber - 1) % 26;
+        name = Convert.ToChar('A' + modulo) + name;
+        columnNumber = (columnNumber - modulo) / 26;
+    }
+
+    return name + (rowIndex + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+}
+
+static WorkbookDocument SampleWorkbookWithColumns(params (string Key, string ValueKind)[] columns)
+{
+    var workbook = new WorkbookDocument { ProviderId = "test", SourceId = "test", SourceTitle = "Test" };
+    var sheet = new SheetDocument { Id = "sheet1", Name = "TestData" };
+    foreach (var column in columns)
+    {
+        sheet.Columns.Add(new ColumnDefinition
+        {
+            Key = column.Key,
+            DisplayName = column.Key,
+            SourceColumn = column.Key,
+            ValueKind = column.ValueKind,
+            Details = { ["description"] = column.Key + " desc" }
+        });
+    }
+
+    var row = new RowDocument { StableId = "row1", SourceIndex = 4 };
+    foreach (var column in sheet.Columns)
+    {
+        row.Cells[column.Key] = new CellValue { ValueKind = column.ValueKind, RawText = column.ValueKind == "json" ? "[1,2]" : "1", NormalizedText = column.ValueKind == "json" ? "[1,2]" : "1" };
+    }
+
+    sheet.Rows.Add(row);
+    workbook.Sheets.Add(sheet);
+    return workbook;
+}
+
+static (List<string> TypeRow, List<string> Errors) BuildExcelToSoDialectPlanForTest(WorkbookDocument workbook, TableConfig table, string workspaceRoot)
+{
+    var method = typeof(ConfigSheetForge.Cli.Program).GetMethod("BuildExcelToSoCacheDialectPlan", BindingFlags.NonPublic | BindingFlags.Static);
+    AssertTrue(method != null, "BuildExcelToSoCacheDialectPlan should exist.");
+    var plan = method!.Invoke(null, new object[] { workbook, table, workspaceRoot });
+    AssertTrue(plan != null, "Dialect plan should not be null.");
+    var typeRow = ((IEnumerable<string>)plan!.GetType().GetProperty("TypeRow")!.GetValue(plan)!).ToList();
+    var errors = ((IEnumerable<string>)plan.GetType().GetProperty("Errors")!.GetValue(plan)!).ToList();
+    return (typeRow, errors);
+}
+
+static void WriteExcelToSoCacheXlsxForTest(string path, WorkbookDocument workbook, TableConfig table, IList<string> typeRow)
+{
+    var method = typeof(ConfigSheetForge.Cli.Program).GetMethod("WriteExcelToSoCacheXlsx", BindingFlags.NonPublic | BindingFlags.Static);
+    AssertTrue(method != null, "WriteExcelToSoCacheXlsx should exist.");
+    method!.Invoke(null, new object[] { path, workbook, table, typeRow });
+}
+
+static List<string> ReadTypeRowFromXlsx(string path, int typeRow)
+{
+    using var archive = ZipFile.OpenRead(path);
+    var entry = archive.GetEntry("xl/worksheets/sheet1.xml");
+    AssertTrue(entry != null, "Generated xlsx should contain sheet1.xml.");
+    using var stream = entry!.Open();
+    var document = System.Xml.Linq.XDocument.Load(stream);
+    var ns = System.Xml.Linq.XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+    var row = document.Descendants(ns + "row").FirstOrDefault(r => (string?)r.Attribute("r") == (typeRow + 1).ToString());
+    AssertTrue(row != null, "Generated xlsx should contain requested type row.");
+    return row!.Elements(ns + "c")
+        .Select(c => string.Concat(c.Descendants(ns + "t").Select(t => t.Value)))
+        .ToList();
 }
 
 static void AddZipText(ZipArchive archive, string path, string text)

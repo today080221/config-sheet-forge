@@ -1,7 +1,12 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
 using System.Reflection;
+using System.Xml.Linq;
 
 namespace ConfigSheetForge.Unity.Editor
 {
@@ -42,9 +47,20 @@ namespace ConfigSheetForge.Unity.Editor
         public string Namespace = "";
     }
 
+    internal sealed class ExcelToSoCacheTypePreflight
+    {
+        public bool Ready;
+        public string ShortStatus = "";
+        public string Message = "";
+        public readonly List<string> BlockingCells = new List<string>();
+    }
+
     internal static class ConfigSheetForgeExcelToSoImporter
     {
         private const string ApiTypeFullName = "GreatClock.Common.ExcelToSO.ExcelToScriptableObjectApi";
+        private static readonly XNamespace SpreadsheetNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        private static readonly XNamespace RelationshipNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        private static readonly XNamespace PackageRelationshipNs = "http://schemas.openxmlformats.org/package/2006/relationships";
         private static Type _cachedApiType;
         private static MethodInfo _cachedImportExcelPaths;
 
@@ -98,6 +114,58 @@ namespace ConfigSheetForge.Unity.Editor
             return ConvertResult(tableId, excelPath, resultObject);
         }
 
+        public static ExcelToSoCacheTypePreflight InspectCacheTypes(IEnumerable<ExcelToSoImportItem> items, int typeRow)
+        {
+            var preflight = new ExcelToSoCacheTypePreflight { Ready = true, ShortStatus = "cache 类型可导入", Message = "cache xlsx 类型行可被 ExcelToSO 导入。" };
+            if (items == null)
+            {
+                return preflight;
+            }
+
+            foreach (var item in items)
+            {
+                if (item == null || string.IsNullOrWhiteSpace(item.CacheXlsxPath) || !File.Exists(item.CacheXlsxPath))
+                {
+                    continue;
+                }
+
+                List<string> row;
+                try
+                {
+                    row = ReadTypeRow(item.CacheXlsxPath, Math.Max(0, typeRow));
+                }
+                catch (Exception ex)
+                {
+                    preflight.Ready = false;
+                    preflight.BlockingCells.Add(FirstNonEmpty(item.TableId, Path.GetFileNameWithoutExtension(item.CacheXlsxPath)) + ": 无法读取类型行 - " + ex.Message);
+                    continue;
+                }
+
+                for (var i = 0; i < row.Count; i++)
+                {
+                    var token = (row[i] ?? "").Trim();
+                    if (string.IsNullOrWhiteSpace(token) || IsExcelToSoReadableType(token))
+                    {
+                        continue;
+                    }
+
+                    var cell = ToColumnName(i) + (Math.Max(0, typeRow) + 1).ToString(CultureInfo.InvariantCulture);
+                    preflight.Ready = false;
+                    preflight.BlockingCells.Add(FirstNonEmpty(item.TableId, Path.GetFileNameWithoutExtension(item.CacheXlsxPath)) + "!" + cell + "=" + token);
+                }
+            }
+
+            if (!preflight.Ready)
+            {
+                preflight.ShortStatus = "cache 类型需要处理";
+                preflight.Message = "当前 cache xlsx 中还有 ExcelToSO 不能直接导入的字段类型：" + string.Join(", ", preflight.BlockingCells.Take(12)) +
+                                    (preflight.BlockingCells.Count > 12 ? " ..." : "") +
+                                    "\n请先重新运行 sync-cache apply 生成新版 cache；如果字段类型是 json，请在 project config 或 adapter schema 中明确声明 excelToSoType/originalType，例如 int[]、float[]、string[] 或 string。";
+            }
+
+            return preflight;
+        }
+
         private static Type FindApiType()
         {
             if (_cachedApiType != null)
@@ -125,6 +193,285 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return null;
+        }
+
+        private static bool IsExcelToSoReadableType(string token)
+        {
+            var normalized = (token ?? "").Trim().ToLowerInvariant();
+            switch (normalized)
+            {
+                case "json":
+                case "date":
+                case "datetime":
+                case "date_time":
+                case "timestamp":
+                case "enum":
+                    return false;
+                case "bool":
+                case "boolean":
+                case "int":
+                case "int32":
+                case "integer":
+                case "ints":
+                case "int[]":
+                case "[int]":
+                case "int32s":
+                case "int32[]":
+                case "[int32]":
+                case "integers":
+                case "integer[]":
+                case "[integer]":
+                case "float":
+                case "double":
+                case "decimal":
+                case "number":
+                case "floats":
+                case "float[]":
+                case "[float]":
+                case "numbers":
+                case "number[]":
+                case "[number]":
+                case "long":
+                case "int64":
+                case "longs":
+                case "long[]":
+                case "[long]":
+                case "int64s":
+                case "int64[]":
+                case "[int64]":
+                case "vector2":
+                case "vector3":
+                case "vector4":
+                case "rect":
+                case "rectangle":
+                case "color":
+                case "colour":
+                case "string":
+                case "str":
+                case "text":
+                case "strings":
+                case "string[]":
+                case "[string]":
+                case "texts":
+                case "text[]":
+                case "[text]":
+                case "lang":
+                case "language":
+                case "langs":
+                case "lang[]":
+                case "[lang]":
+                case "rich":
+                case "richs":
+                case "riches":
+                case "rich[]":
+                case "[rich]":
+                    return true;
+                default:
+                    return true;
+            }
+        }
+
+        private static List<string> ReadTypeRow(string xlsxPath, int typeRow)
+        {
+            using (var archive = ZipFile.OpenRead(xlsxPath))
+            {
+                var sharedStrings = ReadSharedStrings(archive);
+                var sheetPath = ReadWorkbookSheetPath(archive);
+                var matrix = ReadWorksheetMatrix(archive, sheetPath, sharedStrings);
+                return typeRow >= 0 && typeRow < matrix.Count ? matrix[typeRow] : new List<string>();
+            }
+        }
+
+        private static List<string> ReadSharedStrings(ZipArchive archive)
+        {
+            var values = new List<string>();
+            var entry = archive.GetEntry("xl/sharedStrings.xml");
+            if (entry == null)
+            {
+                return values;
+            }
+
+            var document = ReadXml(entry);
+            foreach (var item in document.Descendants(SpreadsheetNs + "si"))
+            {
+                values.Add(string.Concat(item.Descendants(SpreadsheetNs + "t").Select(t => t.Value)));
+            }
+
+            return values;
+        }
+
+        private static string ReadWorkbookSheetPath(ZipArchive archive)
+        {
+            var workbookEntry = archive.GetEntry("xl/workbook.xml");
+            if (workbookEntry == null)
+            {
+                return "xl/worksheets/sheet1.xml";
+            }
+
+            var rels = ReadRelationships(archive, "xl/_rels/workbook.xml.rels");
+            var workbook = ReadXml(workbookEntry);
+            var sheet = workbook.Descendants(SpreadsheetNs + "sheet").FirstOrDefault();
+            if (sheet == null)
+            {
+                return "xl/worksheets/sheet1.xml";
+            }
+
+            var relationId = (string)sheet.Attribute(RelationshipNs + "id") ?? "";
+            return rels.TryGetValue(relationId, out var target) ? NormalizeWorkbookTarget(target) : "xl/worksheets/sheet1.xml";
+        }
+
+        private static Dictionary<string, string> ReadRelationships(ZipArchive archive, string path)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var entry = archive.GetEntry(path);
+            if (entry == null)
+            {
+                return result;
+            }
+
+            var document = ReadXml(entry);
+            foreach (var relationship in document.Descendants(PackageRelationshipNs + "Relationship"))
+            {
+                var id = (string)relationship.Attribute("Id") ?? "";
+                var target = (string)relationship.Attribute("Target") ?? "";
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    result[id] = target;
+                }
+            }
+
+            return result;
+        }
+
+        private static List<List<string>> ReadWorksheetMatrix(ZipArchive archive, string sheetPath, IList<string> sharedStrings)
+        {
+            var entry = archive.GetEntry(sheetPath);
+            if (entry == null)
+            {
+                return new List<List<string>>();
+            }
+
+            var rows = new SortedDictionary<int, SortedDictionary<int, string>>();
+            foreach (var cell in ReadXml(entry).Descendants(SpreadsheetNs + "c"))
+            {
+                var reference = (string)cell.Attribute("r") ?? "";
+                if (!TryParseA1(reference, out var rowIndex, out var columnIndex))
+                {
+                    continue;
+                }
+
+                if (!rows.TryGetValue(rowIndex, out var row))
+                {
+                    row = new SortedDictionary<int, string>();
+                    rows[rowIndex] = row;
+                }
+
+                row[columnIndex] = ReadCellValue(cell, sharedStrings);
+            }
+
+            var matrix = new List<List<string>>();
+            if (rows.Count == 0)
+            {
+                return matrix;
+            }
+
+            var maxRow = rows.Keys.Max();
+            var maxColumn = rows.Values.SelectMany(row => row.Keys).DefaultIfEmpty(0).Max();
+            for (var rowIndex = 0; rowIndex <= maxRow; rowIndex++)
+            {
+                var row = new List<string>();
+                rows.TryGetValue(rowIndex, out var values);
+                for (var columnIndex = 0; columnIndex <= maxColumn; columnIndex++)
+                {
+                    row.Add(values != null && values.TryGetValue(columnIndex, out var value) ? value : "");
+                }
+
+                matrix.Add(row);
+            }
+
+            return matrix;
+        }
+
+        private static string ReadCellValue(XElement cell, IList<string> sharedStrings)
+        {
+            var type = (string)cell.Attribute("t") ?? "";
+            if (type == "inlineStr")
+            {
+                return string.Concat(cell.Descendants(SpreadsheetNs + "t").Select(t => t.Value));
+            }
+
+            var raw = (string)cell.Element(SpreadsheetNs + "v") ?? "";
+            if (type == "s" && int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var index) && index >= 0 && index < sharedStrings.Count)
+            {
+                return sharedStrings[index];
+            }
+
+            return type == "b" ? raw == "1" ? "true" : "false" : raw;
+        }
+
+        private static XDocument ReadXml(ZipArchiveEntry entry)
+        {
+            using (var stream = entry.Open())
+            {
+                return XDocument.Load(stream, LoadOptions.None);
+            }
+        }
+
+        private static bool TryParseA1(string reference, out int row, out int column)
+        {
+            row = -1;
+            column = -1;
+            if (string.IsNullOrWhiteSpace(reference))
+            {
+                return false;
+            }
+
+            var columnNumber = 0;
+            var index = 0;
+            while (index < reference.Length && char.IsLetter(reference[index]))
+            {
+                columnNumber = columnNumber * 26 + (char.ToUpperInvariant(reference[index]) - 'A' + 1);
+                index++;
+            }
+
+            if (columnNumber <= 0 || !int.TryParse(reference.Substring(index), NumberStyles.Integer, CultureInfo.InvariantCulture, out var rowNumber) || rowNumber <= 0)
+            {
+                return false;
+            }
+
+            row = rowNumber - 1;
+            column = columnNumber - 1;
+            return true;
+        }
+
+        private static string NormalizeWorkbookTarget(string target)
+        {
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                return "xl/worksheets/sheet1.xml";
+            }
+
+            target = target.Replace('\\', '/');
+            if (target.StartsWith("/", StringComparison.Ordinal))
+            {
+                return target.TrimStart('/');
+            }
+
+            return target.StartsWith("xl/", StringComparison.Ordinal) ? target : "xl/" + target.TrimStart('/');
+        }
+
+        private static string ToColumnName(int index)
+        {
+            var columnNumber = index + 1;
+            var name = "";
+            while (columnNumber > 0)
+            {
+                var modulo = (columnNumber - 1) % 26;
+                name = Convert.ToChar('A' + modulo) + name;
+                columnNumber = (columnNumber - modulo) / 26;
+            }
+
+            return name;
         }
 
         private static MethodInfo FindImportMethod(Type apiType)

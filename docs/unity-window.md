@@ -52,6 +52,8 @@
 
 如果窗口提示“当前 ExcelToSO 还指向旧 Excel 路径”，不要继续导入旧表。先用窗口里的确认按钮把 ExcelToSO settings 更新到 Source of Truth cache。这个更新只改 `ProjectSettings/ExcelToScriptableObjectSettings.asset` 里的对应路径，不会写旧 `Excel/`。
 
+如果窗口提示“cache 类型需要处理”，也不要手改 `.config-sheet-forge/excel-cache`。这个目录是生成物，下次同步会覆盖。先重新 `预览同步计划`，再由负责人确认 `写入本地 cache`。工具会尽量把 Source of Truth 的 `integer`、`number` 等通用类型写成 ExcelToSO 能导入的 `int`、`float`。如果提示某列还是 `json`，说明工具无法判断它到底应该是 `int[]`、`float[]`、`string[]` 还是 `string`，需要在项目 schema 或 adapter 里声明具体类型后再同步。
+
 ## 新建配表流程
 
 需要新增一张表时：

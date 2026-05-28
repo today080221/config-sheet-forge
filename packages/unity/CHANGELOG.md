@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.27
+
+- `sync-cache` / seed 写正式 `.config-sheet-forge/excel-cache/*.xlsx` 时，ExcelToSO backend 会把物理 xlsx 的类型行写成 ExcelToSO dialect：`integer -> int`、`number -> float`、`bool/string` 保持可导入；semantic JSON 与 hash 仍继续使用 canonical portable 类型。
+- 对旧 Excel 中的数组列，会从 `oldExcelPath/sourceXlsxPath` 或字段 `originalType/excelToSoType` 还原 `int[]`、`float[]`、`string[]`。无法还原的 `json` 会在同步/写 cache 前中文阻断，不再生成会让 ExcelToSO 弹英文错误的 cache。
+- Unity `导入 Unity 配表资产` 增加 cache 类型预检：发现 `json/date/datetime/enum` 等 ExcelToSO 不能直接导入的类型时，先显示中文修复建议，阻止直接调用 ExcelToSO。
+- 文档更新推荐 ExcelToSO `v1.0.5`，并说明 Source of Truth cache 是生成物，不能手改；需要通过 schema/adapter 声明具体 ExcelToSO 类型。
+- 测试覆盖 primitive alias、旧表数组列 json 还原、无法还原 json 阻断，以及正式 cache xlsx 不写出 canonical `json/integer/number` 类型行。
+
 ## 0.4.26
 
 - Unity 窗口新增 `导入 Unity 配表资产`：在最近一次 `sync-cache` 成功、`cacheStatus=upToDate`、无 blocked/triangulation failed 后，调用 ExcelToSO v1.0.4 public API，把 `.config-sheet-forge/excel-cache/*.xlsx` 导入 ScriptableObject asset。

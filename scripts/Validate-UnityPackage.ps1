@@ -329,6 +329,12 @@ foreach ($requiredV426Marker in @("ConfigSheetForgeExcelToSoImporter", "ExcelToS
   }
 }
 
+foreach ($requiredV427Marker in @("BuildExcelToSoCacheDialectPlan", "excelToSoType", "originalType", "InspectCacheTypes", "cache 类型需要处理", "无法写入 ExcelToSO cache xlsx", "excel to so cache dialect restores json arrays from source xlsx", "excel to so cache dialect blocks unresolved json")) {
+  if (($coreContracts + "`n" + $cliProgram + "`n" + $editorSources + "`n" + $window + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs) + "`n" + (Get-Content -Raw docs/unity-window.md)) -notlike "*$requiredV427Marker*") {
+    throw "Unity v0.4.27 ExcelToSO cache dialect marker is missing: $requiredV427Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."

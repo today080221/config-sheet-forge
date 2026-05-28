@@ -12,7 +12,9 @@
 
 从 0.4.25 开始，`sync-cache` 读取在线 Sheet 时不再依赖 `sheets +read` 的无范围默认读取，也不会盲信飞书导出 xlsx 里的错误 `dimension ref=A1`。Lark provider 会扫描实际 `sheetData` 构造显式 A1 范围，遇到 `90202 wrong startRange` 会自动 retry，并把 attemptedRange、retryRange、finalRange、sheetId、脱敏 token、online rows/cols 和 xlsx rows/cols 写进诊断，避免把范围/形状问题误报成权限问题。
 
-从 0.4.26 开始，Unity 窗口可以继续完成 `本地 cache xlsx -> Unity ScriptableObject asset` 这一步。项目显式安装 ExcelToSO v1.0.4 或更新版本后，`配表` 页会出现 `导入 Unity 配表资产`。它只写 Unity asset，不写飞书、不改在线表、不改 registry、不写 main；如果 ExcelToSO settings 还指向旧 `Excel/` 路径，窗口会先阻断，并提供单独确认的“更新 settings 到 Source of Truth cache”步骤。
+从 0.4.26 开始，Unity 窗口可以继续完成 `本地 cache xlsx -> Unity ScriptableObject asset` 这一步。项目显式安装 ExcelToSO v1.0.5 或更新版本后，`配表` 页会出现 `导入 Unity 配表资产`。它只写 Unity asset，不写飞书、不改在线表、不改 registry、不写 main；如果 ExcelToSO settings 还指向旧 `Excel/` 路径，窗口会先阻断，并提供单独确认的“更新 settings 到 Source of Truth cache”步骤。
+
+从 0.4.27 开始，Source of Truth 的 semantic JSON 仍使用 `integer/number/json` 等 canonical 类型做 hash，但正式 `.config-sheet-forge/excel-cache/*.xlsx` 会写成 ExcelToSO 可导入的类型行，例如 `int/float/string[]`。如果某列是 `json`，工具会尝试从旧 Excel 类型或字段 `originalType/excelToSoType` 还原为 `int[]`、`float[]`、`string[]` 或 `string`；无法还原时会阻断并给中文修复建议，不会生成会让 ExcelToSO 弹错的 cache。
 
 窗口包含：
 
@@ -211,7 +213,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.26
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.27
 ```
 
 ## 测试

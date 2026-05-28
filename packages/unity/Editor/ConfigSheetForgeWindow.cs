@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.26";
+        private const string PackageVersion = "v0.4.27";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -986,14 +986,15 @@ namespace ConfigSheetForge.Unity.Editor
             var backend = ConfigSheetForgeExcelToSoImporter.Probe();
             var importItems = BuildExcelToSoImportItems(projectRoot);
             var settingsPreflight = InspectExcelToSoSettings(projectRoot, importItems);
+            var cacheTypePreflight = ConfigSheetForgeExcelToSoImporter.InspectCacheTypes(importItems, settingsPreflight.TypeRow);
             var syncReady = IsSyncCacheReadyForUnityImport(projectRoot, out var syncReason);
             var cacheReady = importItems.Count > 0 && importItems.All(item => File.Exists(item.CacheXlsxPath));
-            var ready = backend.Available && syncReady && cacheReady && settingsPreflight.Ready;
+            var ready = backend.Available && syncReady && cacheReady && settingsPreflight.Ready && cacheTypePreflight.Ready;
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("导入 Unity 配表资产", EditorStyles.boldLabel);
             EditorGUILayout.LabelField("把 Source of Truth cache xlsx 导入到 Unity ScriptableObject asset。只写 Unity asset，不写飞书、不改在线表、不改 registry、不写 main。", EditorStyles.wordWrappedLabel);
-            DrawReadonlyRow("前置条件", BuildUnityAssetImportPreflightText(backend, syncReady, syncReason, cacheReady, settingsPreflight), "必须最近一次 sync-cache 成功且 cache 已是最新。");
+            DrawReadonlyRow("前置条件", BuildUnityAssetImportPreflightText(backend, syncReady, syncReason, cacheReady, settingsPreflight, cacheTypePreflight), "必须最近一次 sync-cache 成功且 cache 已是最新。");
 
             if (!backend.Available)
             {
@@ -1022,6 +1023,10 @@ namespace ConfigSheetForge.Unity.Editor
                     }
                 }
             }
+            else if (!cacheTypePreflight.Ready)
+            {
+                EditorGUILayout.HelpBox(cacheTypePreflight.Message, MessageType.Error);
+            }
 
             if (_programView || _riskModeUnlocked)
             {
@@ -1044,7 +1049,7 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndVertical();
         }
 
-        private string BuildUnityAssetImportPreflightText(ExcelToSoImportBackendStatus backend, bool syncReady, string syncReason, bool cacheReady, ExcelToSoSettingsPreflight settingsPreflight)
+        private string BuildUnityAssetImportPreflightText(ExcelToSoImportBackendStatus backend, bool syncReady, string syncReason, bool cacheReady, ExcelToSoSettingsPreflight settingsPreflight, ExcelToSoCacheTypePreflight cacheTypePreflight)
         {
             if (!backend.Available)
             {
@@ -1064,6 +1069,11 @@ namespace ConfigSheetForge.Unity.Editor
             if (!settingsPreflight.Ready)
             {
                 return settingsPreflight.ShortStatus;
+            }
+
+            if (!cacheTypePreflight.Ready)
+            {
+                return cacheTypePreflight.ShortStatus;
             }
 
             return "已就绪：cache 最新，ExcelToSO settings 指向 Source of Truth cache";
@@ -1164,6 +1174,7 @@ namespace ConfigSheetForge.Unity.Editor
             try
             {
                 document = JsonUtility.FromJson<ExcelToSoSettingsDocument>(File.ReadAllText(settingsPath));
+                preflight.TypeRow = document != null && document.configs != null ? document.configs.type_row : 1;
             }
             catch (Exception ex)
             {
@@ -8451,6 +8462,7 @@ namespace ConfigSheetForge.Unity.Editor
         public bool Ready { get; set; }
         public bool HasOldExcelReferences { get; set; }
         public bool CanUpdateToCache { get; set; }
+        public int TypeRow { get; set; } = 1;
         public string ShortStatus { get; set; } = "";
         public string Message { get; set; } = "";
         public string SettingsPath { get; set; } = "";

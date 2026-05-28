@@ -85,6 +85,8 @@ namespace ConfigSheetForge.Core
         public string Key { get; set; } = "";
         public string DisplayName { get; set; } = "";
         public string ValueKind { get; set; } = "string";
+        public string OriginalType { get; set; } = "";
+        public string ExcelToSoType { get; set; } = "";
         public string Description { get; set; } = "";
     }
 
