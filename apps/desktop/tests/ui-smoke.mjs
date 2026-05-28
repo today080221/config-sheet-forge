@@ -29,7 +29,14 @@ assert(app.includes("start_task"), "Lifecycle actions must start backend tasks i
 assert(app.includes("start_setup_task"), "Setup/auth actions must start backend tasks instead of blocking run_setup_action");
 assert(app.includes("start_tool_check_task"), "Tool doctor checks must run as background tasks");
 assert(app.includes("cancel_task"), "Running tasks must expose cancellation");
-assert(app.includes("取消"), "Running task card must include a cancel button");
+assert(app.includes("取消本次预览（不写 cache/飞书）"), "Running task card must explain cancellation safety");
+assert(app.includes("version-strip"), "Desktop must show Desktop/UPM/CLI version strip");
+assert(app.includes("Desktop v{desktopVersion}"), "Desktop version must be visible in ordinary view");
+assert(app.includes("UPM {unityVersion}"), "Unity package version must be visible in ordinary view");
+assert(app.includes("CLI {cliVersion}"), "CLI sidecar version/source must be visible in ordinary view");
+assert(app.includes("快速状态检查（不导出 xlsx）"), "Home refresh must be a quick status check, not a full xlsx export");
+assert(app.includes("完整同步预览会读取在线表并临时导出 xlsx"), "Full sync preview must explain why it can take minutes");
+assert(!app.includes("<p>Task："), "Ordinary running card must not show internal task ids");
 assert(!app.includes("invoke<CliRunResult>(\"run_cli\""), "UI must not invoke blocking run_cli");
 assert(!app.includes("invoke<CliRunResult>(\"run_setup_action\""), "UI must not invoke blocking run_setup_action");
 assert(app.includes("shouldShowBotSecretForm(larkCheck, showBotConfigure)"), "Bot secret form must be hidden when bot is already configured");

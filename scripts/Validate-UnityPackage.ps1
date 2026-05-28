@@ -382,7 +382,8 @@ $desktopWorkflowSources = $bridgeWindow + "`n" +
   (Get-Content -Raw apps/desktop/tests/workflow.test.ts) + "`n" +
   (Get-Content -Raw apps/desktop/tests/ui-smoke.mjs) + "`n" +
   (Get-Content -Raw apps/desktop/package.json) + "`n" +
-  (Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs)
+  (Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs) + "`n" +
+  (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)
 foreach ($requiredV434Marker in @("智能场景", "策划视图", "程序视图", "debug-toggle", "scenario-grid", "stepper", "sync-cache --yes --preview-result", "RequireMatchingSyncCachePreviewAsync", "write_bridge_command", "--bridge-session", "icons/icon.ico", "config-sheet-forge.svg", "overflow-x: hidden", "min-width: 0", "vitest run")) {
   if ($desktopWorkflowSources -notlike "*$requiredV434Marker*") {
     throw "Unity v0.4.34 Desktop workflow marker is missing: $requiredV434Marker"
@@ -404,6 +405,12 @@ foreach ($requiredV436Marker in @("start_task", "start_setup_task", "start_tool_
 foreach ($forbiddenV436Marker in @('invoke<CliRunResult>("run_cli"', 'invoke<CliRunResult>("run_setup_action"', 'doctor_tools,')) {
   if ($desktopWorkflowSources -like "*$forbiddenV436Marker*") {
     throw "Unity v0.4.36 Desktop async task regression marker found: $forbiddenV436Marker"
+  }
+}
+
+foreach ($requiredV437Marker in @("normalize_cli_path_args", "strip_windows_verbatim_prefix", "write_task_progress_event", "tableId?: string", "Desktop v{desktopVersion}", "快速状态检查（不导出 xlsx）", "取消本次预览（不写 cache/飞书）", "NormalizeFilePathArgument", "写入进度文件失败：路径格式不合法", "cli normalizes verbatim out and request paths")) {
+  if ($desktopWorkflowSources -notlike "*$requiredV437Marker*") {
+    throw "Unity v0.4.37 Desktop path/progress UX marker is missing: $requiredV437Marker"
   }
 }
 

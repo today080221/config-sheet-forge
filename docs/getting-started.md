@@ -20,6 +20,8 @@ Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本
 
 从 0.4.34 开始，Desktop 首页是场景向导。第一次不知道点什么时，先看推荐场景和唯一主按钮：通常是“环境检查”或“预览同步”。`cacheStatus=upToDate` 时不会再让你写 cache，而是直接进入“导入 Unity”；`blocked` 时写入按钮会禁用并列出阻断表。
 
+从 0.4.37 开始，Desktop 顶部会显示 Desktop / UPM / CLI 版本；普通视图不会再出现内部 taskId、PID 或 .NET 堆栈。首页刷新默认走“快速状态检查（不导出 xlsx）”；“完整同步预览”才会读取在线表并临时导出 xlsx，可能需要几分钟，但仍然不写 cache、飞书或 ProjectSettings。
+
 ## 安装要求
 
 - .NET 8 SDK 或更新版本，用于 CLI。

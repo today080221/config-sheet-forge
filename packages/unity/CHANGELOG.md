@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.37
+
+- 修复 Desktop 在 Windows 下把 `\\?\` 长路径和 `/` 混用后传给 CLI 的 P0 问题。Desktop 现在会把 `--manifest`、`--out`、`--progress`、`--preview-result` 等路径统一规范成普通绝对路径，例如 `N:\UnityProject\Temp\ConfigSheetForge\desktop\sync-cache.result.json`。
+- CLI 对输入/输出路径增加 defensive normalize：收到 `\\?\` 前缀或混合分隔符时会先转成普通路径并创建目录；如果仍无效，普通视图显示“生成结果文件失败：路径格式不合法”，完整 .NET stack trace 只留在 Debug。
+- Desktop 后台任务启动后会立即写入第一条 progress event，即使 CLI 还在 doctor / 启动阶段，UI 也能显示“正在检查飞书 CLI”或“正在预览同步，不会写入文件”。
+- sync-cache dry-run 增加表级 progress event：显示当前第几张、TableId、读取在线表、导出 xlsx、三方一致性检查和 hash gate 阶段。
+- 普通视图不再显示内部 `Task: task-xxx` 或 PID；Debug 打开后才显示 taskId、PID、完整命令、stdout/stderr 和 result JSON。
+- Desktop 顶部常驻显示 Desktop、UPM 和 CLI sidecar 版本；更多操作里的首页刷新改为“快速状态检查（不导出 xlsx）”，完整同步预览会明确说明可能导出 16 张临时 xlsx、不会写 cache/飞书/ProjectSettings。
+
 ## 0.4.36
 
 - Desktop lifecycle / setup / doctor 全部改为后台任务模型：按钮点击后 `start_task` 立即返回 taskId，子进程在线程中运行，前端通过 `get_task` 轮询阶段、耗时、stdout/stderr 和 result JSON，不再在 Tauri invoke 中等待长任务结束。

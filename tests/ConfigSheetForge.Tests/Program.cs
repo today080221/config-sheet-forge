@@ -64,6 +64,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("project config probe reads unity excel to so defaults", () => RunSync(ProjectConfigProbeReadsUnityExcelToSoDefaults)),
     ("project config probe ignores local state registry", () => RunSync(ProjectConfigProbeIgnoresLocalStateRegistry)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
+    ("cli normalizes verbatim out and request paths", CliNormalizesVerbatimOutAndRequestPaths),
     ("apply-contract sync-cache apply requires confirmation", ApplyContractSyncCacheApplyRequiresConfirmation),
     ("sync-cache apply requires preview result", SyncCacheApplyRequiresPreviewResult),
     ("seed dry-run plans xlsx migration without writes", SeedDryRunPlansXlsxMigrationWithoutWrites),
@@ -2214,6 +2215,59 @@ static async Task ApplyContractPrGateReportWritesStandardReport()
     }
 }
 
+static async Task CliNormalizesVerbatimOutAndRequestPaths()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var root = Path.Combine(Path.GetTempPath(), "csforge-verbatim-path-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        Directory.SetCurrentDirectory(root);
+        var requestPath = Path.Combine(root, "request.json");
+        var resultPath = Path.Combine(root, "Temp", "ConfigSheetForge", "desktop", "sync-cache.result.json");
+        var request = new LifecycleContractRequest
+        {
+            Operation = "pr-gate-report",
+            GateReportPath = Path.Combine("Temp", "ConfigSheetForge", "pr-gate-report.json"),
+            GateReport = new PrGateReport
+            {
+                Branch = "feature/config",
+                GitHead = "abc123",
+                MergeReview = new GateReviewState { Status = "approved" },
+                PortableSubset = new GateCheckState { Passed = true },
+                Triangulation = new GateCheckState { Passed = true },
+                SchemaReview = new GateReviewState { Status = "approved" }
+            }
+        };
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[]
+        {
+            "apply-contract",
+            "--request",
+            ToVerbatimMixedPath(requestPath),
+            "--out",
+            ToVerbatimMixedPath(resultPath)
+        });
+
+        AssertEqual("0", exitCode.ToString(), "CLI should normalize Windows verbatim paths with mixed separators.");
+        AssertTrue(File.Exists(resultPath), "normalized --out path should be written.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, true);
+        }
+    }
+}
+
 static async Task ApplyContractSyncCacheApplyRequiresConfirmation()
 {
     var root = Path.Combine(Path.GetTempPath(), "csforge-sync-cache-confirm-" + Guid.NewGuid().ToString("N"));
@@ -3597,6 +3651,17 @@ static void AddZipText(ZipArchive archive, string path, string text)
     var entry = archive.CreateEntry(path);
     using var writer = new StreamWriter(entry.Open());
     writer.Write(text.Trim());
+}
+
+static string ToVerbatimMixedPath(string path)
+{
+    var full = Path.GetFullPath(path);
+    if (!OperatingSystem.IsWindows())
+    {
+        return full;
+    }
+
+    return @"\\?\" + full.Replace('\\', '/');
 }
 
 static void AssertTrue(bool condition, string message)

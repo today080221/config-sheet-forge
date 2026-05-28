@@ -123,6 +123,21 @@ button.large {
   line-height: 1.45;
 }
 
+.brand-block .version-strip {
+  display: inline-flex;
+  max-width: 100%;
+  margin-top: 7px;
+  padding: 4px 9px;
+  border: 1px solid #cbd8e4;
+  border-radius: 999px;
+  background: #eef4f9;
+  color: #26475f;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .eyebrow {
   margin: 0 0 4px;
   color: #4e6d80;
@@ -251,10 +266,24 @@ button.large {
   color: #496478;
 }
 
+.running-card .debug-meta {
+  color: #6a7785;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .running-card span {
   white-space: nowrap;
   color: #1c5d99;
   font-weight: 700;
+}
+
+.running-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
 }
 
 .error-card {

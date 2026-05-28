@@ -24,6 +24,7 @@ type ProjectSnapshot = {
   projectRoot: string;
   unityProject: boolean;
   projectConfigPath: string;
+  unityPackageVersion: string;
   projectId: string;
   gitBranch: string;
   feishuProfile: string;
@@ -63,11 +64,16 @@ type TaskSnapshot = CliRunResult & {
   elapsedMs: number;
   progressPath?: string;
   pid?: number;
+  tableId?: string;
+  current?: number;
+  total?: number;
 };
 
 type StartupContext = {
   projectRoot: string;
   bridgeSessionDir: string;
+  desktopVersion: string;
+  sidecarCliVersion: string;
 };
 
 type IdentityMode = "strict-bot" | "user-fallback";
@@ -80,7 +86,8 @@ const debugPrefKey = "ConfigSheetForge.Desktop.Debug";
 const operationLabels: Record<string, string> = {
   doctor: "环境检查",
   "registry-status": "读取在线注册中心",
-  "sync-cache-dry-run": "预览同步",
+  "sync-status": "快速状态检查",
+  "sync-cache-dry-run": "完整同步预览",
   "sync-cache-apply": "写入本地 cache",
   "repair-cache-dialect": "修复 cache 类型行",
   "compare-merge": "生成合并预览",
@@ -153,8 +160,21 @@ function parseResultJson(text: string | undefined): LifecycleResultLike | null {
 }
 
 function projectPath(root: string | undefined, ...parts: string[]) {
-  const base = (root || "").replace(/[\\/]$/, "");
-  return [base, ...parts].filter(Boolean).join("/");
+  const base = stripVerbatimPathPrefix(root || "").replace(/[\\/]$/, "");
+  const separator = base.includes("\\") || /^[A-Za-z]:/.test(base) ? "\\" : "/";
+  return [base, ...parts].filter(Boolean).join(separator);
+}
+
+function stripVerbatimPathPrefix(path: string) {
+  if (path.startsWith("\\\\?\\UNC\\")) {
+    return `\\\\${path.slice("\\\\?\\UNC\\".length)}`;
+  }
+
+  if (path.startsWith("\\\\?\\")) {
+    return path.slice("\\\\?\\".length);
+  }
+
+  return path;
 }
 
 function desktopResultPath(snapshot: ProjectSnapshot | null, projectRoot: string, name: string) {
@@ -181,6 +201,8 @@ function buildCommandArgs(
   switch (operation) {
     case "registry-status":
       return ["registry-status", ...manifestArgs, "--details", ...out("registry-status"), ...fallbackArgs];
+    case "sync-status":
+      return ["sync-status", ...manifestArgs, "--details", ...out("sync-status"), ...fallbackArgs];
     case "sync-cache-dry-run":
       return ["sync-cache", ...manifestArgs, "--dry-run", "--details", ...out("sync-cache"), ...fallbackArgs];
     case "sync-cache-apply":
@@ -203,6 +225,10 @@ function buildCommandArgs(
 }
 
 function operationStage(operation: string) {
+  if (operation === "sync-status" || operation === "registry-status") {
+    return "快速读取 registry / 检查本地 cache，不导出 xlsx";
+  }
+
   if (operation.includes("sync-cache")) {
     return "读取注册中心 / 读取在线表 / 导出 xlsx / 三方一致性检查";
   }
@@ -240,9 +266,84 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function taskHumanTitle(operation: string) {
+  if (operation === "sync-cache-dry-run") {
+    return "正在预览同步，不会写入文件";
+  }
+
+  if (operation === "sync-status" || operation === "registry-status") {
+    return "正在快速检查状态，不导出 xlsx";
+  }
+
+  return `正在运行：${operationLabels[operation] || operation}`;
+}
+
+function taskHumanProgress(task: TaskSnapshot | null, operation: string) {
+  if (task?.tableId && task.current && task.total) {
+    return `当前：第 ${task.current}/${task.total} 张 ${task.tableId}，${task.phase || operationStage(operation)}`;
+  }
+
+  if (task?.message) {
+    return task.message;
+  }
+
+  return `当前：${task?.phase || operationStage(operation)}`;
+}
+
+function taskEtaText(task: TaskSnapshot | null) {
+  if (!task?.current || !task.total || !task.elapsedMs || task.current <= 0 || task.total <= task.current) {
+    return "";
+  }
+
+  const average = task.elapsedMs / task.current;
+  const remainingMs = Math.max(0, Math.round(average * (task.total - task.current)));
+  return `预计还需约 ${Math.max(1, Math.round(remainingMs / 1000))} 秒`;
+}
+
+function taskSafetyText(operation: string, fallback: string) {
+  if (operation === "sync-cache-dry-run") {
+    return "完整同步预览会读取在线表并临时导出 xlsx，可能需要几分钟；不会写本地 cache、飞书或 ProjectSettings。";
+  }
+
+  if (operation === "sync-status" || operation === "registry-status") {
+    return "快速状态检查只读取 registry 和本地 cache/hash/mtime，不导出 16 张 xlsx。";
+  }
+
+  if (operation.includes("dry-run") || operation.includes("preview")) {
+    return "只读预览，不写文件。";
+  }
+
+  return fallback;
+}
+
+function cancelHintText(operation: string) {
+  if (operation === "sync-cache-dry-run" || operation.includes("dry-run") || operation.includes("preview") || operation === "sync-status" || operation === "registry-status") {
+    return "取消只终止本次预览，不会写 cache，也不会改飞书。";
+  }
+
+  return "可以取消后台任务；已经完成的本地写入不会自动回滚。";
+}
+
+function cancelButtonLabel(operation: string) {
+  if (operation === "sync-cache-dry-run" || operation.includes("dry-run") || operation.includes("preview") || operation === "sync-status" || operation === "registry-status") {
+    return "取消本次预览（不写 cache/飞书）";
+  }
+
+  return "取消后台任务";
+}
+
+function ordinaryErrorText(value: unknown) {
+  const text = value instanceof Error ? value.message : String(value ?? "");
+  if (text.includes("System.IO.IOException") || text.includes("at ConfigSheetForge") || text.includes("SafeFileHandle")) {
+    return "生成结果文件失败：路径格式不合法。请升级 Desktop/CLI 或重试。Debug 里可以查看完整堆栈。";
+  }
+
+  return text;
+}
+
 export function App() {
   const [projectRoot, setProjectRoot] = useState("");
-  const [startup, setStartup] = useState<StartupContext>({ projectRoot: "", bridgeSessionDir: "" });
+  const [startup, setStartup] = useState<StartupContext>({ projectRoot: "", bridgeSessionDir: "", desktopVersion: "", sidecarCliVersion: "" });
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [checks, setChecks] = useState<ToolCheck[]>([]);
   const [activeOperation, setActiveOperation] = useState("");
@@ -251,6 +352,7 @@ export function App() {
   const [lastResult, setLastResult] = useState<CliRunResult | null>(null);
   const [lastResultParsed, setLastResultParsed] = useState<LifecycleResultLike | null>(null);
   const [lastSyncPreview, setLastSyncPreview] = useState<LifecycleResultLike | null>(null);
+  const [lastQuickStatus, setLastQuickStatus] = useState<LifecycleResultLike | null>(null);
   const [lastSyncPreviewPath, setLastSyncPreviewPath] = useState("");
   const [lastComparePreview, setLastComparePreview] = useState<LifecycleResultLike | null>(null);
   const [lastComparePreviewPath, setLastComparePreviewPath] = useState("");
@@ -388,7 +490,7 @@ export function App() {
     } else if (finalTask.status === "canceled") {
       setLastResult(taskToCliResult(finalTask));
     } else {
-      setError(finalTask.message || "工具检查失败。");
+      setError(ordinaryErrorText(finalTask.message || "工具检查失败。"));
       setLastResult(taskToCliResult(finalTask));
     }
   }, [runtimeAvailable, waitForTask]);
@@ -402,7 +504,7 @@ export function App() {
       const canceled = await invoke<TaskSnapshot>("cancel_task", { taskId: activeTask.taskId });
       setActiveTask(canceled);
     } catch (ex) {
-      setError(ex instanceof Error ? ex.message : String(ex));
+      setError(ordinaryErrorText(ex));
     }
   }, [activeTask?.taskId, runtimeAvailable]);
 
@@ -417,6 +519,7 @@ export function App() {
           projectRoot: targetRoot || "K:/Unity/Project",
           unityProject: true,
           projectConfigPath: "ProjectSettings/Project.ConfigSheetForge.json",
+          unityPackageVersion: "web-preview",
           projectId: "demo",
           gitBranch: "当前分支",
           feishuProfile: "当前分支",
@@ -434,7 +537,7 @@ export function App() {
       setSnapshot(result);
       void startToolCheckTask(result.projectRoot);
     } catch (ex) {
-      setError(ex instanceof Error ? ex.message : String(ex));
+      setError(ordinaryErrorText(ex));
     } finally {
       setActiveOperation("");
       setOperationStartedAt(null);
@@ -492,7 +595,7 @@ export function App() {
       }
       void startToolCheckTask(snapshot?.projectRoot || projectRoot);
     } catch (ex) {
-      setError(ex instanceof Error ? ex.message : String(ex));
+      setError(ordinaryErrorText(ex));
     }
   }, [activeTask, botAppId, botSecret, projectRoot, runtimeAvailable, snapshot?.projectRoot, startToolCheckTask, waitForTask]);
 
@@ -504,7 +607,9 @@ export function App() {
       return;
     }
 
-    if (operation === "sync-cache-dry-run") {
+    if (operation === "sync-status" || operation === "registry-status") {
+      setLastQuickStatus(parsed);
+    } else if (operation === "sync-cache-dry-run") {
       setLastSyncPreview(parsed);
       setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "sync-cache"));
     } else if (operation === "sync-cache-apply") {
@@ -641,7 +746,7 @@ export function App() {
       const result = taskToCliResult(task);
       applyResult(operation, result);
     } catch (ex) {
-      setError(ex instanceof Error ? ex.message : String(ex));
+      setError(ordinaryErrorText(ex));
     }
   }, [
     applyResult,
@@ -661,6 +766,10 @@ export function App() {
   const primaryDisabled = decision.primaryDisabled
     || (selectedScenario === "new-table" && decision.primaryOperation === "new-table-dry-run" && newTableErrors.length > 0)
     || Boolean(activeOperation);
+  const statusSource = lastSyncPreview || lastQuickStatus;
+  const desktopVersion = startup.desktopVersion || "开发预览";
+  const unityVersion = snapshot?.unityPackageVersion || "未识别";
+  const cliVersion = startup.sidecarCliVersion || (cliCheck?.source?.includes("sidecar") ? desktopVersion : cliCheck?.source || "未识别");
 
   return (
     <main className="app-shell">
@@ -668,6 +777,7 @@ export function App() {
         <div className="brand-block">
           <p className="eyebrow">Config Sheet Forge Desktop</p>
           <h1>配表 Source of Truth 工作台</h1>
+          <p className="version-strip">Desktop v{desktopVersion} · UPM {unityVersion} · CLI {cliVersion}</p>
           <p>{snapshot?.projectId || "未识别项目"} · {snapshot?.gitBranch || "等待分支"} · {getScenario(selectedScenario).shortTitle}</p>
         </div>
         <div className="top-actions">
@@ -699,16 +809,16 @@ export function App() {
       {activeOperation ? (
         <section className="running-card">
           <div>
-            <strong>正在运行：{operationLabels[activeOperation] || activeOperation}</strong>
-            <p>Task：{activeTask?.taskId || "准备中"}</p>
-            <p>当前阶段：{activeTask?.phase || operationStage(activeOperation)}</p>
-            {activeTask?.message ? <p>{activeTask.message}</p> : null}
-            <p>安全性：{activeOperation.includes("dry-run") || activeOperation.includes("preview") ? "只读预览，不写文件。" : decision.safety}</p>
-            {(activeTask?.elapsedMs || 0) > 10000 ? <p>仍在运行，可以取消；取消会终止进程树，不会继续写入本地 cache/飞书。</p> : null}
+            <strong>{taskHumanTitle(activeOperation)}</strong>
+            <p>{taskHumanProgress(activeTask, activeOperation)}</p>
+            {taskEtaText(activeTask) ? <p>{taskEtaText(activeTask)}</p> : null}
+            <p>安全性：{taskSafetyText(activeOperation, decision.safety)}</p>
+            {debugEnabled && activeTask?.taskId ? <p className="debug-meta">taskId：{activeTask.taskId}{activeTask.pid ? ` · PID ${activeTask.pid}` : ""}</p> : null}
+            {(activeTask?.elapsedMs || 0) > 10000 ? <p>仍在运行，可以取消；{cancelHintText(activeOperation)}</p> : null}
           </div>
           <div className="running-actions">
-            <span>{elapsed}</span>
-            {activeTask?.taskId ? <button className="danger-button" onClick={() => void cancelActiveTask()}>取消</button> : null}
+            <span>已用时 {elapsed || "0 秒"}</span>
+            {activeTask?.taskId ? <button className="danger-button" onClick={() => void cancelActiveTask()}>{cancelButtonLabel(activeOperation)}</button> : null}
           </div>
         </section>
       ) : null}
@@ -737,8 +847,8 @@ export function App() {
       </section>
 
       <section className="status-strip">
-        <StatusCard title="在线表" value={lastSyncPreview?.branchStatus ? `${lastSyncPreview.branchStatus.tableCountRegistered || 0}/${lastSyncPreview.branchStatus.tableCountExpected || 0} 已登记` : "等待读取"} detail="以 live registry 为准。" />
-        <StatusCard title="本地 cache" value={lastSyncPreview?.syncCacheSummary?.cacheStatus || "等待预览"} detail={summarizeLifecycleResult(lastSyncPreview)} />
+        <StatusCard title="在线表" value={statusSource?.branchStatus ? `${statusSource.branchStatus.tableCountRegistered || 0}/${statusSource.branchStatus.tableCountExpected || 0} 已登记` : "等待读取"} detail="以 live registry 为准。" />
+        <StatusCard title="本地 cache" value={statusSource?.syncCacheSummary?.cacheStatus || "等待预览"} detail={summarizeLifecycleResult(statusSource)} />
         <StatusCard title="PR gate" value={lastGateReport?.prGateReport?.gateState || "等待检查"} detail={summarizeLifecycleResult(lastGateReport)} url={snapshot?.prUrl} onOpen={openExternal} />
         <StatusCard title="飞书注册中心" value={snapshot?.registryBaseToken ? "已配置" : "等待识别"} detail={`Base: ${redact(snapshot?.registryBaseToken || "")}`} url={snapshot?.registryBaseUrl} onOpen={openExternal} />
       </section>
@@ -794,7 +904,7 @@ export function App() {
           <details className="more-actions" open={moreExpanded} onToggle={(event) => setMoreExpanded(event.currentTarget.open)}>
             <summary>更多操作</summary>
             <div className="secondary-actions">
-              <button onClick={() => void runOperation("registry-status")}>刷新在线状态</button>
+              <button onClick={() => void runOperation("sync-status")}>快速状态检查（不导出 xlsx）</button>
               <button onClick={() => void runOperation("repair-cache-dialect")}>预览修复 cache 类型行</button>
               <button onClick={() => void runOperation("pr-gate-report")}>运行 PR 检查</button>
               <button onClick={() => void runOperation("doctor")}>环境检查</button>

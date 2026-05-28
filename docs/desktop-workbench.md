@@ -32,6 +32,8 @@ Desktop 是 Config Sheet Forge 的官方主工作台。它负责日常配表 Sou
 
 从 0.4.36 开始，Desktop 不再在窗口主线程里等待 `sync-cache`、`doctor`、`gh auth` 或 `lark-cli` 结束。点击按钮会立即创建后台 task，页面可以继续切换视图、展开 Debug、查看进度或取消；取消会终止 Windows 进程树，不只是杀父进程。
 
+从 0.4.37 开始，Desktop 顶部会常驻显示 Desktop / UPM / CLI 版本，方便确认团队是否都升级到了同一版。普通视图不再显示内部 taskId、PID 或 .NET 堆栈；这些只在 Debug 展示。同步预览会明确写着“会读取在线表并临时导出 xlsx，可能需要几分钟；不会写 cache、飞书或 ProjectSettings”。如果只是刷新首页状态，请用“快速状态检查（不导出 xlsx）”。
+
 Legacy 只用于没有 Desktop、CI 调试或救急 fallback。普通策划不需要从 Legacy 开始。
 
 ## Desktop v1 页面
@@ -98,6 +100,10 @@ Desktop 会检查：
 - 做 hash gate。
 
 它不写飞书、不写正式 cache、不改 ProjectSettings、不碰旧 `Excel/`。
+
+同步预览是“完整预检”，会真实读取在线表并临时导出 xlsx，所以 16 张表可能跑几分钟。运行时页面会显示当前第几张表、TableId、当前动作和已用时间。点击取消只会终止本次预览，不会写 cache，也不会改飞书。
+
+如果只是想确认当前分支在线表是否登记、cache 文件是否存在或 hash 是否匹配，用“快速状态检查（不导出 xlsx）”。它不会导出 16 张 xlsx，也不能替代 apply/PR gate 前的完整预检。
 
 ### 写入本地 cache
 

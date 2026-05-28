@@ -129,6 +129,7 @@ public static class Program
 
     private static async Task<int> DoctorAsync(ParsedArgs args)
     {
+        await EmitProgressEventAsync(args, "doctor", "doctor", "", 0, 0, "正在检查飞书 CLI 和本机环境。", "info");
         var workspace = await LoadWorkspaceAsync(requireConfig: false);
         var hasError = false;
 
@@ -362,12 +363,17 @@ public static class Program
         }
 
         var hasError = false;
+        await EmitProgressEventAsync(args, "sync-cache", "sync-plan", "", 0, tables.Count, writeFormalCache ? "正在准备写入本地 cache。会先完成在线读取、临时导出和三方一致性检查。" : "正在准备完整同步预览。会读取在线表并临时导出 xlsx，不写本地 cache。", "info");
+        var tableIndex = 0;
         foreach (var table in tables)
         {
+            tableIndex++;
             var tableProvider = CreateProvider(FirstNonEmpty(table.Provider, workspace.Config.Provider));
             var tableTemp = Path.Combine(Directory.GetCurrentDirectory(), "Temp", "ConfigSheetForge", "sync-cache-temp", Guid.NewGuid().ToString("N"), table.Id);
             Directory.CreateDirectory(tableTemp);
+            await EmitProgressEventAsync(args, "sync-cache", "online_read", table.Id, tableIndex, tables.Count, "正在读取在线表：" + table.Id, "info");
             Console.WriteLine("[stage] 正在读取在线 Sheet: " + table.Id);
+            await EmitProgressEventAsync(args, "sync-cache", "export_xlsx", table.Id, tableIndex, tables.Count, "正在导出 xlsx：" + table.Id, "info");
             Console.WriteLine("[stage] 正在导出 xlsx: " + table.Id);
             var result = await tableProvider.ExportAsync(CreateProviderContext(workspace, args), new ProviderExportRequest
             {
@@ -403,6 +409,7 @@ public static class Program
             }
 
             Console.WriteLine("[stage] 正在三方一致性检查: " + table.Id);
+            await EmitProgressEventAsync(args, "sync-cache", "triangulation_compare", table.Id, tableIndex, tables.Count, "正在三方一致性检查：" + table.Id, "info");
             var xlsxPath = FindExportedXlsx(tableTemp, table.Id);
             if (string.IsNullOrWhiteSpace(xlsxPath))
             {
@@ -492,6 +499,7 @@ public static class Program
             if (!tableHasError)
             {
                 Console.WriteLine("[stage] 正在 hash gate: " + table.Id);
+                await EmitProgressEventAsync(args, "sync-cache", "cache_hash_gate", table.Id, tableIndex, tables.Count, "正在比较 cache hash：" + table.Id, "info");
                 var hash = SemanticHasher.ComputeHash(result.Workbook);
                 var cacheState = await InspectCacheStateAsync(workspace, cacheDirectory, excelCacheDirectory, table, hash, xlsxPath);
                 if (cacheState.Missing)
@@ -806,11 +814,14 @@ public static class Program
 
     private static async Task<int> SyncCacheLifecycleAsync(ParsedArgs args)
     {
+        var syncDryRun = args.HasFlag("dry-run") || !args.HasFlag("yes");
+        await EmitProgressEventAsync(args, "sync-cache", "sync-start", "", 0, 0, syncDryRun ? "正在预览同步，不会写入文件。" : "正在写入本地 cache；不会写飞书、ProjectSettings 或旧 Excel/。", "info");
         if (args.HasFlag("allow-user-fallback") && !(args.HasFlag("interactive-desktop") && args.HasFlag("dry-run")))
         {
             throw new CliException("sync-cache 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
         }
 
+        await EmitProgressEventAsync(args, "sync-cache", "registry", "", 0, 0, "正在读取注册中心和当前分支在线表定位。", "info");
         var workspace = await LoadWorkspaceAsync(requireConfig: false);
         var request = args.TryGet("manifest", out var manifestPath)
             ? await ReadSeedManifestAsync(workspace, manifestPath, args)
@@ -1091,12 +1102,14 @@ public static class Program
 
     private static async Task<int> RegistryStatusAsync(ParsedArgs args, string operation)
     {
+        await EmitProgressEventAsync(args, operation, operation, "", 0, 0, string.Equals(operation, "sync-status", StringComparison.OrdinalIgnoreCase) ? "正在快速检查 registry 和本地 cache，不导出 xlsx。" : "正在读取在线注册中心。", "info");
         if (args.HasFlag("allow-user-fallback") && !args.HasFlag("interactive-desktop"))
         {
             throw new CliException(operation + " 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
         }
 
         var workspace = await LoadWorkspaceAsync(requireConfig: false);
+        await EmitProgressEventAsync(args, operation, "registry", "", 0, 0, "正在读取当前 branch/profile 的 BranchBindings 和 ConfigSheets。", "info");
         var request = args.TryGet("manifest", out var manifestPath)
             ? await ReadSeedManifestAsync(workspace, manifestPath, args)
             : NewSeedRequestFromWorkspace(workspace, args);
@@ -2665,13 +2678,21 @@ public static class Program
 
         if (args.TryGet("progress", out progressPath) && !string.IsNullOrWhiteSpace(progressPath))
         {
-            var directory = Path.GetDirectoryName(progressPath);
-            if (!string.IsNullOrWhiteSpace(directory))
+            try
             {
-                Directory.CreateDirectory(directory);
-            }
+                var normalizedProgressPath = NormalizeFilePathArgument(progressPath);
+                var directory = Path.GetDirectoryName(normalizedProgressPath);
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
 
-            await File.AppendAllTextAsync(progressPath, line + Environment.NewLine, Encoding.UTF8);
+                await File.AppendAllTextAsync(normalizedProgressPath, line + Environment.NewLine, Encoding.UTF8);
+            }
+            catch (Exception ex) when (IsPathFailure(ex))
+            {
+                throw new CliException("写入进度文件失败：路径格式不合法。请升级 Desktop/CLI 或重试。", 1, progressPath + Environment.NewLine + ex.Message);
+            }
         }
     }
 
@@ -4727,26 +4748,82 @@ public static class Program
 
     private static async Task<T> ReadJsonAsync<T>(string path)
     {
-        var json = await File.ReadAllTextAsync(path, Encoding.UTF8);
-        var value = JsonSerializer.Deserialize<T>(json, JsonOptions);
-        if (value == null)
+        try
         {
-            throw new CliException("Could not read JSON from " + path, 2);
-        }
+            var normalizedPath = NormalizeFilePathArgument(path);
+            var json = await File.ReadAllTextAsync(normalizedPath, Encoding.UTF8);
+            var value = JsonSerializer.Deserialize<T>(json, JsonOptions);
+            if (value == null)
+            {
+                throw new CliException("Could not read JSON from " + normalizedPath, 2);
+            }
 
-        return value;
+            return value;
+        }
+        catch (CliException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (IsPathFailure(ex))
+        {
+            throw new CliException("读取 JSON 文件失败：路径格式不合法。请升级 Desktop/CLI 或重试。", 2, path + Environment.NewLine + ex.Message);
+        }
     }
 
     private static async Task WriteJsonAsync<T>(string path, T value)
     {
-        var directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrWhiteSpace(directory))
+        try
         {
-            Directory.CreateDirectory(directory);
+            var normalizedPath = NormalizeFilePathArgument(path);
+            var directory = Path.GetDirectoryName(normalizedPath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var json = JsonSerializer.Serialize(value, JsonOptions) + Environment.NewLine;
+            await File.WriteAllTextAsync(normalizedPath, json, Encoding.UTF8);
+        }
+        catch (Exception ex) when (IsPathFailure(ex))
+        {
+            throw new CliException("生成结果文件失败：路径格式不合法。请升级 Desktop/CLI 或重试。", 1, path + Environment.NewLine + ex.Message);
+        }
+    }
+
+    private static string NormalizeFilePathArgument(string path)
+    {
+        var normalized = (path ?? "").Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return normalized;
         }
 
-        var json = JsonSerializer.Serialize(value, JsonOptions) + Environment.NewLine;
-        await File.WriteAllTextAsync(path, json, Encoding.UTF8);
+        if (OperatingSystem.IsWindows())
+        {
+            const string VerbatimUncPrefix = @"\\?\UNC\";
+            const string VerbatimPrefix = @"\\?\";
+            if (normalized.StartsWith(VerbatimUncPrefix, StringComparison.Ordinal))
+            {
+                normalized = @"\\" + normalized.Substring(VerbatimUncPrefix.Length);
+            }
+            else if (normalized.StartsWith(VerbatimPrefix, StringComparison.Ordinal))
+            {
+                normalized = normalized.Substring(VerbatimPrefix.Length);
+            }
+
+            normalized = normalized.Replace('/', Path.DirectorySeparatorChar);
+        }
+
+        return Path.GetFullPath(normalized);
+    }
+
+    private static bool IsPathFailure(Exception ex)
+    {
+        return ex is IOException ||
+               ex is UnauthorizedAccessException ||
+               ex is NotSupportedException ||
+               ex is ArgumentException ||
+               ex is System.Security.SecurityException;
     }
 
     private static async Task<bool> WriteCacheIfChangedAsync(string cacheDirectory, string tableId, WorkbookDocument workbook, string hash, string? tempXlsxPath, string? xlsxDirectory = null)

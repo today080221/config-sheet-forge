@@ -20,6 +20,7 @@ struct ProjectSnapshot {
     project_root: String,
     unity_project: bool,
     project_config_path: String,
+    unity_package_version: String,
     project_id: String,
     git_branch: String,
     feishu_profile: String,
@@ -36,6 +37,8 @@ struct ProjectSnapshot {
 struct StartupContext {
     project_root: String,
     bridge_session_dir: String,
+    desktop_version: String,
+    sidecar_cli_version: String,
 }
 
 #[derive(Serialize)]
@@ -105,6 +108,9 @@ struct TaskSnapshot {
     attempted_paths: Vec<String>,
     progress_path: String,
     pid: u32,
+    table_id: String,
+    current: i64,
+    total: i64,
 }
 
 struct TaskState {
@@ -174,8 +180,12 @@ fn startup_context() -> StartupContext {
         .map(|pair| pair[1].clone())
         .unwrap_or_default();
     StartupContext {
-        project_root,
-        bridge_session_dir,
+        project_root: normalize_path_string_for_cli(&project_root),
+        bridge_session_dir: normalize_path_string_for_cli(&bridge_session_dir),
+        desktop_version: env!("CARGO_PKG_VERSION").to_string(),
+        sidecar_cli_version: resolve_sidecar_cli()
+            .map(|_| env!("CARGO_PKG_VERSION").to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -204,6 +214,7 @@ fn discover_project(project_root: String) -> Result<ProjectSnapshot, String> {
         project_root: root.to_string_lossy().to_string(),
         unity_project,
         project_config_path: config_path.to_string_lossy().to_string(),
+        unity_package_version: read_unity_package_version(&root),
         project_id: find_string_deep(&config, &["projectId", "id", "name"]).unwrap_or_default(),
         git_branch_url: if github_repository.is_empty() || git_branch == "unknown" {
             String::new()
@@ -1485,6 +1496,7 @@ fn build_cli_task_spec(
     let tool = resolve_config_sheet_forge_cli(&root, &config)
         .ok_or_else(|| missing_cli_message(&root, &config))?;
     let lark_cli = resolve_lark_cli(&root, &config);
+    let args = normalize_cli_path_args(&root, &args);
     let result_path = find_result_path(
         &root,
         &tool.command_args(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
@@ -1643,6 +1655,16 @@ fn run_process_task_thread(task_state: Arc<Mutex<TaskState>>, spec: TaskSpec) {
     });
 
     if !spec.progress_path.is_empty() {
+        write_task_progress_event(
+            &spec.progress_path,
+            &spec.operation,
+            &infer_machine_phase_from_args(&spec.args),
+            "",
+            0,
+            0,
+            &initial_progress_message(&spec.operation, &spec.args),
+            "info",
+        );
         let progress_state = task_state.clone();
         let progress_path = spec.progress_path.clone();
         thread::spawn(move || tail_progress_file(progress_state, progress_path));
@@ -1677,7 +1699,7 @@ fn run_process_task_thread(task_state: Arc<Mutex<TaskState>>, spec: TaskSpec) {
     update_task(&task_state, |state| {
         state.snapshot.pid = pid;
         state.snapshot.phase = infer_phase_from_args(&spec.args);
-        state.snapshot.message = format!("进程已启动，可以切换页面或随时取消。PID {}", pid);
+        state.snapshot.message = "进程已启动，可以切换页面或随时取消。".to_string();
     });
 
     if let Some(input) = spec.stdin.as_deref() {
@@ -1808,6 +1830,9 @@ fn apply_progress_line(task_state: &Arc<Mutex<TaskState>>, line: &str) {
         let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
         let current = parsed.get("current").and_then(|v| v.as_i64()).unwrap_or(0);
         let total = parsed.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+        state.snapshot.table_id = table.to_string();
+        state.snapshot.current = current;
+        state.snapshot.total = total;
         state.snapshot.message = if !table.is_empty() && current > 0 && total > 0 {
             format!("{}（{} / {}）：{}", table, current, total, message)
         } else if !table.is_empty() {
@@ -1836,6 +1861,36 @@ fn human_progress_phase(phase: &str) -> String {
         "生成报告".to_string()
     } else {
         phase.to_string()
+    }
+}
+
+fn infer_machine_phase_from_args(args: &[String]) -> String {
+    let joined = args.join(" ").to_lowercase();
+    if joined.contains("sync-cache") {
+        "sync-cache-start".to_string()
+    } else if joined.contains("sync-status") {
+        "sync-status-start".to_string()
+    } else if joined.contains("pr-gate") {
+        "pr-gate-report".to_string()
+    } else if joined.contains("compare") || joined.contains("merge") {
+        "compare-merge".to_string()
+    } else if joined.contains("doctor") {
+        "doctor".to_string()
+    } else {
+        "start".to_string()
+    }
+}
+
+fn initial_progress_message(operation: &str, args: &[String]) -> String {
+    let joined = args.join(" ").to_lowercase();
+    if joined.contains("sync-cache") && joined.contains("--dry-run") {
+        "正在预览同步，不会写入文件；会读取在线表并临时导出 xlsx。".to_string()
+    } else if joined.contains("sync-status") {
+        "正在快速检查 registry 和本地 cache，不导出 xlsx。".to_string()
+    } else if joined.contains("doctor") || operation.contains("doctor") {
+        "正在检查飞书 CLI 和本机工具授权。".to_string()
+    } else {
+        "后台任务已开始。".to_string()
     }
 }
 
@@ -1883,6 +1938,9 @@ fn create_task_state(
         attempted_paths,
         progress_path,
         pid: 0,
+        table_id: String::new(),
+        current: 0,
+        total: 0,
     };
     let state = TaskState {
         snapshot: snapshot.clone(),
@@ -1951,13 +2009,7 @@ fn append_limited(buffer: &mut String, text: &str) {
 fn find_named_arg_path(root: &Path, args: &[String], name: &str) -> Option<String> {
     for window in args.windows(2) {
         if window[0] == name {
-            let path = PathBuf::from(&window[1]);
-            let full = if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            };
-            return Some(full.to_string_lossy().to_string());
+            return Some(normalize_cli_path_arg(root, &window[1]));
         }
     }
     None
@@ -2034,17 +2086,48 @@ fn run_capture_resolved(
 fn find_result_path(root: &Path, args: &[String]) -> Option<String> {
     for window in args.windows(2) {
         if window[0] == "--out" {
-            let path = PathBuf::from(&window[1]);
-            let full = if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            };
-            return Some(full.to_string_lossy().to_string());
+            return Some(normalize_cli_path_arg(root, &window[1]));
         }
     }
 
     None
+}
+
+fn write_task_progress_event(
+    progress_path: &str,
+    operation: &str,
+    phase: &str,
+    table_id: &str,
+    current: i64,
+    total: i64,
+    message: &str,
+    severity: &str,
+) {
+    let normalized = normalize_path_string_for_cli(progress_path);
+    if normalized.trim().is_empty() {
+        return;
+    }
+
+    let line = serde_json::json!({
+        "operation": operation,
+        "phase": phase,
+        "tableId": table_id,
+        "current": current,
+        "total": total,
+        "elapsedMs": 0,
+        "message": message,
+        "severity": severity
+    })
+    .to_string();
+
+    let path = PathBuf::from(&normalized);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{}", line);
+    }
 }
 
 fn configure_process_environment(command: &mut Command, lark_cli: Option<&ResolvedTool>) {
@@ -2119,9 +2202,98 @@ fn resolve_project_root(project_root: String) -> Result<PathBuf, String> {
     let root = if project_root.trim().is_empty() {
         env::current_dir().map_err(|e| e.to_string())?
     } else {
-        PathBuf::from(project_root.trim())
+        PathBuf::from(strip_windows_verbatim_prefix(project_root.trim()))
     };
-    Ok(root.canonicalize().unwrap_or(root))
+    let resolved = root.canonicalize().unwrap_or(root);
+    Ok(PathBuf::from(normalize_path_string_for_cli(
+        &resolved.to_string_lossy(),
+    )))
+}
+
+fn normalize_cli_path_args(root: &Path, args: &[String]) -> Vec<String> {
+    let mut normalized = args.to_vec();
+    let path_args = [
+        "--manifest",
+        "--out",
+        "--progress",
+        "--preview-result",
+        "--require-preview",
+        "--request",
+        "--base",
+        "--ours",
+        "--theirs",
+        "--merged",
+        "--cache-dir",
+        "--excel-cache-dir",
+    ];
+
+    let mut index = 0usize;
+    while index + 1 < normalized.len() {
+        if path_args.iter().any(|name| *name == normalized[index]) {
+            normalized[index + 1] = normalize_cli_path_arg(root, &normalized[index + 1]);
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+
+    normalized
+}
+
+fn normalize_cli_path_arg(root: &Path, value: &str) -> String {
+    let stripped = strip_windows_verbatim_prefix(value.trim().trim_matches('"'));
+    if stripped.trim().is_empty() {
+        return String::new();
+    }
+
+    let path = PathBuf::from(stripped);
+    let full = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+
+    normalize_path_string_for_cli(&full.to_string_lossy())
+}
+
+fn normalize_path_string_for_cli(value: &str) -> String {
+    let stripped = strip_windows_verbatim_prefix(value);
+    if cfg!(windows) {
+        stripped.replace('/', "\\")
+    } else {
+        stripped
+    }
+}
+
+fn strip_windows_verbatim_prefix(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{}", rest);
+    }
+
+    value.strip_prefix(r"\\?\").unwrap_or(value).to_string()
+}
+
+fn read_unity_package_version(root: &Path) -> String {
+    let manifest = read_json(&root.join("Packages").join("manifest.json")).unwrap_or(Value::Null);
+    let dependency = manifest
+        .get("dependencies")
+        .and_then(|value| value.get("dev.config-sheet-forge.unity"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    extract_upm_version(dependency)
+}
+
+fn extract_upm_version(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Some((_, tag)) = trimmed.rsplit_once('#') {
+        return tag.trim().to_string();
+    }
+
+    trimmed.to_string()
 }
 
 fn find_project_config(root: &Path) -> Option<PathBuf> {
@@ -2372,5 +2544,69 @@ mod tests {
 
     fn is_task_terminal(status: &str) -> bool {
         matches!(status, "succeeded" | "failed" | "canceled")
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn desktop_cli_paths_drop_verbatim_prefix_and_slashes() {
+        let root = PathBuf::from(r"N:\UnityProject");
+        let args = vec![
+            "sync-cache".to_string(),
+            "--manifest".to_string(),
+            r"\\?\N:\UnityProject/ProjectSettings/Project.ConfigSheetForge.json".to_string(),
+            "--dry-run".to_string(),
+            "--out".to_string(),
+            r"\\?\N:\UnityProject/Temp/ConfigSheetForge/desktop/sync-cache.result.json".to_string(),
+            "--progress".to_string(),
+            r"\\?\N:\UnityProject/Temp/ConfigSheetForge/desktop/sync-cache.progress.ndjson"
+                .to_string(),
+        ];
+
+        let normalized = normalize_cli_path_args(&root, &args);
+        let joined = normalized.join(" ");
+        assert!(
+            !joined.contains(r"\\?\"),
+            "Desktop must not pass verbatim paths to the CLI: {}",
+            joined
+        );
+        assert!(
+            !normalized[2].contains('/'),
+            "manifest path should use Windows separators: {}",
+            normalized[2]
+        );
+        assert_eq!(
+            normalized[5],
+            r"N:\UnityProject\Temp\ConfigSheetForge\desktop\sync-cache.result.json"
+        );
+        assert_eq!(
+            normalized[7],
+            r"N:\UnityProject\Temp\ConfigSheetForge\desktop\sync-cache.progress.ndjson"
+        );
+    }
+
+    #[test]
+    fn progress_event_is_created_before_child_reports() {
+        let progress_path = env::temp_dir().join(format!(
+            "csforge-progress-{}.ndjson",
+            chrono_like_timestamp()
+        ));
+        let _ = fs::remove_file(&progress_path);
+        write_task_progress_event(
+            &progress_path.to_string_lossy(),
+            "sync-cache",
+            "sync-cache-start",
+            "",
+            0,
+            0,
+            "正在预览同步，不会写入文件。",
+            "info",
+        );
+
+        let text = fs::read_to_string(&progress_path).expect("progress file should exist");
+        assert!(
+            text.contains("正在预览同步"),
+            "progress message should be written"
+        );
+        let _ = fs::remove_file(progress_path);
     }
 }
