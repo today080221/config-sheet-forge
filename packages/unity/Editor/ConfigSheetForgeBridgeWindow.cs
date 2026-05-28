@@ -14,7 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
 {
     public sealed class ConfigSheetForgeBridgeWindow : EditorWindow
     {
-        internal const string PackageVersion = "v0.4.33";
+        internal const string PackageVersion = "v0.4.34";
         private const string DesktopPathEnv = "CONFIG_SHEET_FORGE_DESKTOP";
         private const string SourceCheckoutEnv = "CONFIG_SHEET_FORGE_ROOT";
         private const string DesktopInstallPathPrefKey = "ConfigSheetForge.Desktop.InstallPath";
@@ -30,6 +30,7 @@ namespace ConfigSheetForge.Unity.Editor
         private DesktopDiscovery _desktopDiscovery = DesktopDiscovery.Empty;
         private DesktopInstallJob _desktopInstallJob;
         private bool _showDeveloperDesktopOptions;
+        private string _bridgeSessionDirectory = "";
 
         [MenuItem("Tools/Config Sheet Forge", false, 1000)]
         public static void OpenStatusWindow()
@@ -88,6 +89,8 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void OnEditorUpdate()
         {
+            ProcessBridgeSessionCommands();
+
             if (_desktopInstallJob == null)
             {
                 return;
@@ -279,7 +282,8 @@ namespace ConfigSheetForge.Unity.Editor
                         return;
                     }
 
-                    StartProcess(desktopPath, new[] { _projectRoot }, Path.GetDirectoryName(desktopPath) ?? _projectRoot, visible: true);
+                    EnsureBridgeSessionDirectory();
+                    StartProcess(desktopPath, new[] { _projectRoot, "--bridge-session", _bridgeSessionDirectory }, Path.GetDirectoryName(desktopPath) ?? _projectRoot, visible: true);
                     _recentSummary = "已启动 Desktop：" + desktopPath;
                     return;
                 }
@@ -288,9 +292,10 @@ namespace ConfigSheetForge.Unity.Editor
                 {
                     var desktopPackage = Path.Combine(_desktopDiscovery.SourceRoot, "apps", "desktop", "package.json");
                     var npm = Application.platform == RuntimePlatform.WindowsEditor ? "cmd.exe" : "npm";
+                    EnsureBridgeSessionDirectory();
                     var args = Application.platform == RuntimePlatform.WindowsEditor
-                        ? new[] { "/C", "npm", "run", "tauri", "--", "dev" }
-                        : new[] { "run", "tauri", "--", "dev" };
+                        ? new[] { "/C", "npm", "run", "tauri", "--", "dev", "--", _projectRoot, "--bridge-session", _bridgeSessionDirectory }
+                        : new[] { "run", "tauri", "--", "dev", "--", _projectRoot, "--bridge-session", _bridgeSessionDirectory };
                     StartProcess(npm, args, Path.GetDirectoryName(desktopPackage) ?? _desktopDiscovery.SourceRoot, visible: false);
                     _recentSummary = "已用源码模式启动 Desktop。首次启动可能需要编译 Tauri。";
                     return;
@@ -361,6 +366,118 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             _recentSummary = "还没有找到 Temp/ConfigSheetForge。请先在 Desktop 或 Legacy 中运行一次流程。";
+        }
+
+        private void EnsureBridgeSessionDirectory()
+        {
+            if (!string.IsNullOrWhiteSpace(_bridgeSessionDirectory) && Directory.Exists(_bridgeSessionDirectory))
+            {
+                return;
+            }
+
+            var root = Directory.GetParent(Application.dataPath)?.FullName ?? Directory.GetCurrentDirectory();
+            _bridgeSessionDirectory = Path.Combine(root, "Library", "ConfigSheetForge", "DesktopBridge", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(_bridgeSessionDirectory, "commands"));
+            File.WriteAllText(Path.Combine(_bridgeSessionDirectory, "session.json"), "{\"projectRoot\":\"" + EscapeJson(root) + "\",\"version\":\"" + PackageVersion + "\"}", Encoding.UTF8);
+        }
+
+        private void ProcessBridgeSessionCommands()
+        {
+            if (string.IsNullOrWhiteSpace(_bridgeSessionDirectory))
+            {
+                return;
+            }
+
+            var commands = Path.Combine(_bridgeSessionDirectory, "commands");
+            if (!Directory.Exists(commands))
+            {
+                return;
+            }
+
+            foreach (var file in Directory.GetFiles(commands, "*.json").OrderBy(path => path))
+            {
+                try
+                {
+                    var text = File.ReadAllText(file);
+                    var operation = ExtractJsonString(text, "operation");
+                    var processed = Path.ChangeExtension(file, ".processed.json");
+                    if (string.Equals(operation, "import-assets", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ConfigSheetForgeWindow.OpenSyncCache();
+                        _recentSummary = "Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板，请确认 SourceOfTruthCache profile 和 cache 状态后执行。";
+                    }
+                    else if (string.Equals(operation, "install-profile", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ConfigSheetForgeWindow.OpenSyncCache();
+                        _recentSummary = "Desktop 请求安装/更新 SourceOfTruthCache profile。已打开 Unity profile 面板。";
+                    }
+                    else if (string.Equals(operation, "read-pr-gate", StringComparison.OrdinalIgnoreCase))
+                    {
+                        OpenPrGateTool();
+                        _recentSummary = "Desktop 请求读取 PR gate report。";
+                    }
+                    else
+                    {
+                        _recentSummary = "Desktop 发来了未知 Unity bridge 命令：" + operation;
+                    }
+
+                    if (File.Exists(processed))
+                    {
+                        File.Delete(processed);
+                    }
+
+                    File.Move(file, processed);
+                }
+                catch (Exception ex)
+                {
+                    _recentSummary = "处理 Desktop bridge 命令失败：" + ex.Message;
+                }
+            }
+        }
+
+        private static string ExtractJsonString(string json, string key)
+        {
+            if (string.IsNullOrWhiteSpace(json) || string.IsNullOrWhiteSpace(key))
+            {
+                return "";
+            }
+
+            var marker = "\"" + key + "\"";
+            var index = json.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                return "";
+            }
+
+            var colon = json.IndexOf(':', index + marker.Length);
+            if (colon < 0)
+            {
+                return "";
+            }
+
+            var quote = json.IndexOf('"', colon + 1);
+            if (quote < 0)
+            {
+                return "";
+            }
+
+            var end = quote + 1;
+            while (end < json.Length)
+            {
+                if (json[end] == '"' && json[end - 1] != '\\')
+                {
+                    break;
+                }
+
+                end++;
+            }
+
+            return end < json.Length ? json.Substring(quote + 1, end - quote - 1).Replace("\\\"", "\"") : "";
+        }
+
+        private static string EscapeJson(string value)
+        {
+            return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
 
         private void RefreshLocalState()

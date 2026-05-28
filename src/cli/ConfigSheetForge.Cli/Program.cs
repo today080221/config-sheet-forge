@@ -829,6 +829,7 @@ public static class Program
 
         var hydrateSelection = request.SyncCache.TableId.Contains(",") || request.SyncCache.TableId.Contains(";") ? "" : request.SyncCache.TableId;
         await HydrateSyncCacheRequestFromRegistryAsync(request, args, hydrateSelection);
+        await RequireMatchingSyncCachePreviewAsync(request, args);
         var result = await LifecycleExecutor.ExecuteAsync(request, new CliLifecyclePlatform(args, request), CancellationToken.None);
         if (result.Success)
         {
@@ -855,6 +856,91 @@ public static class Program
         }
 
         return result.Success ? 0 : 1;
+    }
+
+    private static async Task RequireMatchingSyncCachePreviewAsync(LifecycleContractRequest request, ParsedArgs args)
+    {
+        if (request == null || request.DryRun)
+        {
+            return;
+        }
+
+        var previewPath = FirstNonEmpty(args.Get("preview-result", ""), args.Get("require-preview", ""));
+        if (string.IsNullOrWhiteSpace(previewPath))
+        {
+            throw new CliException("sync-cache apply 必须带最近一次同输入 dry-run 结果。请先预览同步，再执行 sync-cache --yes --preview-result <result.json>。", 2);
+        }
+
+        var fullPreviewPath = Path.GetFullPath(previewPath);
+        if (!File.Exists(fullPreviewPath))
+        {
+            throw new CliException("找不到 sync-cache dry-run result 文件，apply 已阻断。请重新预览同步。", 2, fullPreviewPath);
+        }
+
+        var preview = await ReadJsonAsync<LifecycleContractResult>(fullPreviewPath);
+        if (!string.Equals(preview.Operation, "sync-cache", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException("preview-result 不是 sync-cache dry-run 结果，不能作为写 cache 前置证明。", 2, fullPreviewPath);
+        }
+
+        if (!preview.DryRun)
+        {
+            throw new CliException("preview-result 不是 dry-run 结果，不能作为写 cache 前置证明。请重新生成同步预览。", 2, fullPreviewPath);
+        }
+
+        if (!preview.Success)
+        {
+            throw new CliException("最近一次 sync-cache dry-run 未通过，已阻断写入本地 cache。请先修复预检失败。", 2, string.Join(Environment.NewLine, preview.HumanReadableFailures));
+        }
+
+        var cacheStatus = preview.SyncCacheSummary == null ? "" : preview.SyncCacheSummary.CacheStatus;
+        if (string.Equals(cacheStatus, "blocked", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException("最近一次同步预检仍是 blocked，不能写本地 cache。", 2, "blockedTables=" + string.Join(",", preview.SyncCacheSummary?.BlockedTables ?? new List<string>()));
+        }
+
+        if (string.Equals(cacheStatus, "upToDate", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException("最近一次同步预览显示本地 cache 已最新，不需要写入。下一步请导入 Unity 配表资产。", 2, fullPreviewPath);
+        }
+
+        var expectedFingerprint = ComputeSyncCachePreviewFingerprint(request);
+        if (string.IsNullOrWhiteSpace(preview.RequestFingerprint))
+        {
+            throw new CliException("dry-run result 缺少 requestFingerprint，无法确认 apply 输入是否一致。请重新生成同步预览。", 2, fullPreviewPath);
+        }
+
+        if (!string.Equals(preview.RequestFingerprint, expectedFingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CliException(
+                "sync-cache apply 的输入和最近一次 dry-run 不一致，已阻断写入。请重新生成同步预览。",
+                2,
+                "dryRunFingerprint=" + preview.RequestFingerprint + "\napplyPreviewFingerprint=" + expectedFingerprint);
+        }
+    }
+
+    private static string ComputeSyncCachePreviewFingerprint(LifecycleContractRequest request)
+    {
+        var originalDryRun = request.DryRun;
+        var originalConfirmApply = request.SyncCache?.ConfirmApply ?? false;
+        request.DryRun = true;
+        if (request.SyncCache != null)
+        {
+            request.SyncCache.ConfirmApply = false;
+        }
+
+        try
+        {
+            return ComputeRequestFingerprint(request);
+        }
+        finally
+        {
+            request.DryRun = originalDryRun;
+            if (request.SyncCache != null)
+            {
+                request.SyncCache.ConfirmApply = originalConfirmApply;
+            }
+        }
     }
 
     private static async Task<int> RepairCacheDialectAsync(ParsedArgs args)

@@ -32,6 +32,8 @@ Legacy 窗口仍采用任务型 Dashboard：第一次打开会提示“飞书在
 
 从 0.4.33 开始，Desktop release zip 内置 `cli/config-sheet-forge.exe` sidecar，普通成员不需要全局安装 `config-sheet-forge`。Desktop 也会在 Windows 上识别 `%APPDATA%/npm/lark-cli.ps1` / `.cmd`，并提供 Git、GitHub CLI、lark-cli、飞书 bot/user 授权的按钮。交互式 Desktop 可以切到“允许用户身份预览”，但 PR hard gate 仍默认 strict bot，不会用本机 user 身份伪装 CI。
 
+从 0.4.34 开始，Desktop 默认首页是“智能场景”向导，不再是命令按钮面板。五个场景分别是环境/授权、同步并导入 Unity、准备 PR 合并、新建配表、从 main/PR base 派生当前分支；每个场景只展示一个主按钮。普通用户使用 `策划视图`，主程可切到 `程序视图` 看生命周期和读写范围，完整命令/stdout/result JSON 只在 `Debug` 抽屉显示。`sync-cache apply` 现在必须带最近一次同输入 `--preview-result`，cache 已最新时直接推荐导入 Unity，不再循环推荐写 cache。
+
 Legacy 完整窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。

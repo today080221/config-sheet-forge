@@ -28,6 +28,8 @@ $releaseTauriConfigPath = Join-Path $releaseBuildRoot "tauri.conf.release.json"
 $releaseExe = Join-Path $tauriRoot "target/release/config-sheet-forge-desktop.exe"
 $cliPublishDir = Join-Path $releaseBuildRoot "cli-win-x64"
 $sidecarCliExe = Join-Path $cliPublishDir "config-sheet-forge.exe"
+$desktopIcon = Join-Path $tauriRoot "icons/icon.ico"
+$desktopIconSvg = Join-Path $tauriRoot "icons/config-sheet-forge.svg"
 
 function Invoke-Native([string]$FileName, [string[]]$Arguments, [string]$WorkingDirectory) {
   Push-Location $WorkingDirectory
@@ -52,6 +54,13 @@ function Assert-ContainsVersion([string]$Path, [string]$Needle, [string]$Name) {
 Assert-ContainsVersion $packageJsonPath "`"version`": `"$semver`"" "Desktop package.json"
 Assert-ContainsVersion $tauriConfigPath "`"version`": `"$semver`"" "Tauri config"
 Assert-ContainsVersion $cargoTomlPath "version = `"$semver`"" "Desktop Cargo.toml"
+if (-not (Test-Path $desktopIcon)) {
+  throw "Desktop Windows icon resource is missing: $desktopIcon"
+}
+if (-not (Test-Path $desktopIconSvg)) {
+  throw "Desktop SVG icon source is missing: $desktopIconSvg"
+}
+Assert-ContainsVersion $tauriConfigPath "icons/icon.ico" "Tauri icon config"
 
 function Publish-SidecarCli {
   if (Test-Path $cliPublishDir) {

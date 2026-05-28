@@ -20,6 +20,8 @@
 
 从 0.4.33 开始，Desktop 安装包内置 `cli/config-sheet-forge.exe`。如果 Unity 能打开 Desktop，Desktop 自己就能找到业务 CLI；缺的是 Git、GitHub CLI、lark-cli 或授权时，Desktop 环境页会给安装/授权按钮。普通用户不需要配置 `CONFIG_SHEET_FORGE_CLI`。
 
+从 0.4.34 开始，Desktop 打开后先看到“智能场景”而不是一排命令按钮。场景会根据状态推荐一个下一步，并记住你上次选择。普通用户用 `策划视图`，只看结论和安全说明；主程可以切到 `程序视图` 看生命周期；完整命令和 JSON 只在 `Debug` 里。
+
 通常你只需要看三件事：
 
 1. 当前状态是不是正常。

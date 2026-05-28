@@ -25,6 +25,13 @@ struct ProjectSnapshot {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StartupContext {
+    project_root: String,
+    bridge_session_dir: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ToolCheck {
     name: String,
     status: String,
@@ -47,6 +54,8 @@ struct CliRunResult {
     executable_path: String,
     source: String,
     attempted_paths: Vec<String>,
+    result_path: String,
+    result_json: String,
 }
 
 #[derive(Serialize)]
@@ -80,6 +89,26 @@ impl ResolvedTool {
 #[tauri::command]
 fn startup_project_root() -> String {
     env::args().nth(1).unwrap_or_default()
+}
+
+#[tauri::command]
+fn startup_context() -> StartupContext {
+    let args: Vec<String> = env::args().collect();
+    let project_root = args
+        .iter()
+        .skip(1)
+        .find(|arg| !arg.starts_with("--"))
+        .cloned()
+        .unwrap_or_default();
+    let bridge_session_dir = args
+        .windows(2)
+        .find(|pair| pair[0] == "--bridge-session")
+        .map(|pair| pair[1].clone())
+        .unwrap_or_default();
+    StartupContext {
+        project_root,
+        bridge_session_dir,
+    }
 }
 
 #[tauri::command]
@@ -204,6 +233,28 @@ fn run_cli(project_root: String, args: Vec<String>) -> Result<CliRunResult, Stri
 }
 
 #[tauri::command]
+fn write_bridge_command(bridge_session_dir: String, operation: String, payload_json: String) -> Result<String, String> {
+    let session = PathBuf::from(bridge_session_dir.trim());
+    if session.as_os_str().is_empty() {
+        return Err("Desktop 不是从 Unity bridge 启动，不能直接发送 Unity 命令。".to_string());
+    }
+
+    let commands = session.join("commands");
+    fs::create_dir_all(&commands).map_err(|e| format!("无法创建 Unity bridge 命令目录：{}", e))?;
+    let timestamp = chrono_like_timestamp();
+    let path = commands.join(format!("{}-{}.json", timestamp, sanitize_file_name(&operation)));
+    let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+    let document = serde_json::json!({
+        "operation": operation,
+        "createdAt": timestamp,
+        "payload": payload
+    });
+    fs::write(&path, serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_string()))
+        .map_err(|e| format!("写入 Unity bridge 命令失败：{}", e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn run_setup_action(
     project_root: String,
     action: String,
@@ -286,7 +337,7 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![startup_project_root, discover_project, doctor_tools, run_cli, run_setup_action, open_external_url])
+        .invoke_handler(tauri::generate_handler![startup_project_root, startup_context, discover_project, doctor_tools, run_cli, run_setup_action, write_bridge_command, open_external_url])
         .run(tauri::generate_context!())
         .expect("error while running Config Sheet Forge desktop");
 }
@@ -611,6 +662,13 @@ fn run_capture_resolved(
     }
 
     let output = child.wait_with_output().map_err(|e| format!("等待进程结束失败：{}", e))?;
+    let result_path = find_result_path(root, &all_args).unwrap_or_default();
+    let result_json = if result_path.is_empty() {
+        String::new()
+    } else {
+        fs::read_to_string(&result_path).unwrap_or_default()
+    };
+
     Ok(CliRunResult {
         command_line: build_display_command(tool, &all_args),
         exit_code: output.status.code().unwrap_or(-1),
@@ -619,7 +677,21 @@ fn run_capture_resolved(
         executable_path: tool.display_path.clone(),
         source: tool.source.clone(),
         attempted_paths: tool.attempted_paths.clone(),
+        result_path,
+        result_json,
     })
+}
+
+fn find_result_path(root: &Path, args: &[String]) -> Option<String> {
+    for window in args.windows(2) {
+        if window[0] == "--out" {
+            let path = PathBuf::from(&window[1]);
+            let full = if path.is_absolute() { path } else { root.join(path) };
+            return Some(full.to_string_lossy().to_string());
+        }
+    }
+
+    None
 }
 
 fn run_simple_capture(root: &Path, executable: &str, args: &[&str]) -> Result<CliRunResult, String> {
@@ -799,4 +871,29 @@ fn contains_desktop_dev_url(text: &str) -> bool {
         || text.contains(&loopback_host)
         || text.contains(&localhost_url)
         || text.contains(&localhost_host)
+}
+
+fn chrono_like_timestamp() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    millis.to_string()
+}
+
+fn sanitize_file_name(value: &str) -> String {
+    let mut output = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            output.push(ch);
+        } else {
+            output.push('-');
+        }
+    }
+
+    if output.is_empty() {
+        "command".to_string()
+    } else {
+        output
+    }
 }

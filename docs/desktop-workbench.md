@@ -26,9 +26,31 @@ Desktop 是 Config Sheet Forge 的官方主工作台。它负责日常配表 Sou
 
 从 0.4.33 开始，Windows portable zip 会一起带上 `cli/config-sheet-forge.exe`。Desktop 默认用这个 sidecar CLI，所以新同事只从 Unity 安装 Desktop 也能跑环境检查和项目识别，不需要提前把 `config-sheet-forge` 加进 PATH。`lark-cli` 会自动查找 `%APPDATA%/npm/lark-cli.ps1` 和 `.cmd`，并在环境页显示实际使用路径。
 
+从 0.4.34 开始，Desktop 默认是场景向导，而不是命令面板。首页会在五个场景里推荐一个下一步：环境/授权、同步并导入 Unity、准备 PR 合并、新建配表、从 main/PR base 派生当前分支。普通用户只需要看当前场景里的“下一步”主按钮；完整命令、路径、stdout/stderr、result JSON 都在 Debug 抽屉里。
+
 Legacy 只用于没有 Desktop、CI 调试或救急 fallback。普通策划不需要从 Legacy 开始。
 
 ## Desktop v1 页面
+
+### 三层视图
+
+- `策划视图`：默认视图，只显示人话结论、下一步、安全说明。
+- `程序视图`：补充生命周期和读写范围，例如“将调用 sync-cache dry-run，读取 live registry 和在线 Sheet，不写文件”。
+- `Debug`：独立开关。打开后才显示完整命令、result JSON、stdout/stderr、工具路径和 attempted paths。
+
+普通视图不会展示 token、长路径或 raw JSON。需要复制诊断时再打开 Debug。
+
+### 智能场景
+
+五个场景对应日常流程：
+
+- `环境/授权`：检查 Git、gh、lark-cli、bot/user 授权。
+- `同步并导入 Unity`：预览同步，必要时写入 `.config-sheet-forge` cache，再通过 Unity bridge 导入 ScriptableObject asset。
+- `准备 PR 合并`：生成合并预览，提交 MergeReviews，运行 PR gate。
+- `新建配表`：结构化字段表单，先预览再创建。
+- `从 main/PR base 派生当前分支`：新分支缺在线工作区时，从目标分支派生，不再引导普通用户走历史 Excel Seed。
+
+每个场景只有一个主按钮。次要动作在“更多操作”，工程诊断在 Debug。
 
 ### 项目识别
 
@@ -75,13 +97,15 @@ Desktop 会检查：
 
 ### 写入本地 cache
 
-只有最近一次同输入 dry-run 通过时才允许 apply。写入范围只包括：
+只有最近一次同输入 dry-run 通过时才允许 apply。0.4.34 起 Desktop 会把 dry-run 的 result 通过 `--preview-result <result.json>` 交给 CLI；CLI 会校验 branch/profile/table scope/fingerprint，防止“预览的不是这一次写入”。写入范围只包括：
 
 - `.config-sheet-forge/excel-cache/*.xlsx`
 - `.config-sheet-forge/cache/*.semantic.json`
 - `.config-sheet-forge/cache/*.sha256`
 
 无变化时不会重写，mtime 保持不变。
+
+如果 dry-run 显示 `cacheStatus=upToDate`，Desktop 不会再推荐“写入本地 cache”，而是直接提示“下一步导入 Unity”。如果 `blocked`，写入按钮禁用，并显示阻断表和修复建议。
 
 ### 重写 cache dialect
 
@@ -118,6 +142,8 @@ config-sheet-forge repair-cache-dialect --manifest ProjectSettings/Your.ConfigSh
 4. 只写 Unity ScriptableObject asset。
 
 它不写飞书、不写 registry、不写 main、不改变 ExcelToSO default/local profile。
+
+如果 Desktop 是从 Unity thin bridge 启动的，它会收到一个 bridge session 目录。此时 Desktop 可以直接向 Unity 发送 `import-assets`、`install-profile` 或 `read-pr-gate` 命令；独立启动时则会提示回到 Unity 完成导入。
 
 安装/更新 `SourceOfTruthCache` profile 时，Unity bridge 会镜像现有 default/local ExcelToSO profile：保留脚本目录、asset 目录、namespace、导入选项和 slave 表，只替换 Excel 路径到 `.config-sheet-forge/excel-cache`。如果缺少可用模板，则使用项目配置里的 `unityExcelToSo` 默认值；仍缺目录或 namespace 时会阻断，避免把生成 asset 写到 `Assets` 根目录。
 

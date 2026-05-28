@@ -12,6 +12,8 @@ if (Test-Path apps/desktop/package.json) {
       npm install
     }
     npm run lint
+    npm run test
+    npm run test:ui-smoke
     npm run build
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
       throw "cargo is required for the Tauri Desktop compile smoke."

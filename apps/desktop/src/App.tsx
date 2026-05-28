@@ -1,5 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  decideRecommendedScenario,
+  decideWorkflow,
+  getScenario,
+  scenarios,
+  summarizeLifecycleResult,
+  validateNewTableDraft,
+  type FieldType,
+  type LifecycleResultLike,
+  type NewTableDraft,
+  type ScenarioId,
+  type ToolCheckLike,
+  type ViewMode
+} from "./workflow";
 
 type ProjectSnapshot = {
   projectRoot: string;
@@ -16,10 +30,7 @@ type ProjectSnapshot = {
   prNumber: string;
 };
 
-type ToolCheck = {
-  name: string;
-  status: "ok" | "warning" | "error";
-  summary: string;
+type ToolCheck = ToolCheckLike & {
   detail: string;
   executablePath?: string;
   source?: string;
@@ -36,53 +47,60 @@ type CliRunResult = {
   executablePath?: string;
   source?: string;
   attemptedPaths?: string[];
+  resultPath?: string;
+  resultJson?: string;
 };
 
-type WorkflowStep = {
-  title: string;
-  detail: string;
-  button: string;
-  operation: string;
-  kind: "safe" | "medium" | "danger";
+type StartupContext = {
+  projectRoot: string;
+  bridgeSessionDir: string;
 };
 
 type IdentityMode = "strict-bot" | "user-fallback";
 
 const identityPrefKey = "ConfigSheetForge.Desktop.IdentityMode";
+const scenarioPrefKey = "ConfigSheetForge.Desktop.LastScenario";
+const viewPrefKey = "ConfigSheetForge.Desktop.ViewMode";
+const debugPrefKey = "ConfigSheetForge.Desktop.Debug";
 
-const defaultSteps: WorkflowStep[] = [
-  {
-    title: "同步预览",
-    detail: "只读取飞书和本地 cache，不写任何文件。",
-    button: "预览同步计划",
-    operation: "sync-cache-dry-run",
-    kind: "safe"
-  },
-  {
-    title: "写入本地 cache",
-    detail: "只写 .config-sheet-forge，不碰旧 Excel/ 和飞书在线表。",
-    button: "写入本地 cache",
-    operation: "sync-cache-apply",
-    kind: "medium"
-  },
-  {
-    title: "导入 Unity asset",
-    detail: "调用 ExcelToSO 的 SourceOfTruthCache profile，不改变本地 profile。",
-    button: "导入 Unity 配表资产",
-    operation: "unity-import",
-    kind: "medium"
-  },
-  {
-    title: "合并与 PR gate",
-    detail: "先生成合并预览，再提交 MergeReviews，最后运行 PR 检查。",
-    button: "生成合并预览",
-    operation: "compare-merge",
-    kind: "safe"
-  }
+const operationLabels: Record<string, string> = {
+  doctor: "环境检查",
+  "registry-status": "读取在线注册中心",
+  "sync-cache-dry-run": "预览同步",
+  "sync-cache-apply": "写入本地 cache",
+  "repair-cache-dialect": "修复 cache 类型行",
+  "compare-merge": "生成合并预览",
+  "submit-merge-review": "提交合并审查记录",
+  "pr-gate-report": "运行 PR 检查",
+  "bootstrap-current-branch-from-target-dry-run": "预览派生当前分支",
+  "new-table-dry-run": "预览新建配表",
+  "unity-import": "导入 Unity 配表资产"
+};
+
+const fieldTypes: Array<{ value: FieldType; label: string }> = [
+  { value: "string", label: "文本" },
+  { value: "integer", label: "整数" },
+  { value: "number", label: "小数" },
+  { value: "bool", label: "是/否" },
+  { value: "date", label: "日期" },
+  { value: "datetime", label: "日期时间" },
+  { value: "enum", label: "枚举" },
+  { value: "json", label: "JSON" }
 ];
 
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function readStoredScenario(): ScenarioId {
+  const value = typeof localStorage === "undefined" ? "" : localStorage.getItem(scenarioPrefKey) || "";
+  return scenarios.some((scenario) => scenario.id === value) ? value as ScenarioId : "sync-import";
+}
+
+function readStoredViewMode(): ViewMode {
+  return typeof localStorage !== "undefined" && localStorage.getItem(viewPrefKey) === "programmer"
+    ? "programmer"
+    : "planner";
 }
 
 function redact(value: string) {
@@ -115,40 +133,109 @@ function isInteractiveSafeFallbackOperation(operation: string) {
     || operation === "compare-merge";
 }
 
-function buildCommandArgs(operation: string, snapshot: ProjectSnapshot | null, identityMode: IdentityMode): string[] {
+function isStructuredLifecycle(value: unknown): value is LifecycleResultLike {
+  return Boolean(value) && typeof value === "object";
+}
+
+function parseResultJson(text: string | undefined): LifecycleResultLike | null {
+  if (!text?.trim()) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return isStructuredLifecycle(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function projectPath(root: string | undefined, ...parts: string[]) {
+  const base = (root || "").replace(/[\\/]$/, "");
+  return [base, ...parts].filter(Boolean).join("/");
+}
+
+function desktopResultPath(snapshot: ProjectSnapshot | null, projectRoot: string, name: string) {
+  return projectPath(snapshot?.projectRoot || projectRoot, "Temp", "ConfigSheetForge", "desktop", `${name}.result.json`);
+}
+
+function desktopProgressPath(snapshot: ProjectSnapshot | null, projectRoot: string, name: string) {
+  return projectPath(snapshot?.projectRoot || projectRoot, "Temp", "ConfigSheetForge", "desktop", `${name}.progress.ndjson`);
+}
+
+function buildCommandArgs(
+  operation: string,
+  snapshot: ProjectSnapshot | null,
+  projectRoot: string,
+  identityMode: IdentityMode,
+  previewResultPath: string
+): string[] {
   const manifestArgs = snapshot?.projectConfigPath ? ["--manifest", snapshot.projectConfigPath] : [];
   const fallbackArgs = identityMode === "user-fallback" && isInteractiveSafeFallbackOperation(operation)
     ? ["--interactive-desktop", "--allow-user-fallback"]
     : [];
+  const out = (name: string) => ["--out", desktopResultPath(snapshot, projectRoot, name), "--progress", desktopProgressPath(snapshot, projectRoot, name)];
+
   switch (operation) {
     case "registry-status":
-      return ["registry-status", ...manifestArgs, "--details", ...fallbackArgs];
+      return ["registry-status", ...manifestArgs, "--details", ...out("registry-status"), ...fallbackArgs];
     case "sync-cache-dry-run":
-      return ["sync-cache", ...manifestArgs, "--dry-run", "--details", ...fallbackArgs];
+      return ["sync-cache", ...manifestArgs, "--dry-run", "--details", ...out("sync-cache"), ...fallbackArgs];
     case "sync-cache-apply":
-      return ["sync-cache", ...manifestArgs, "--yes", "--details"];
+      return ["sync-cache", ...manifestArgs, "--yes", "--details", "--preview-result", previewResultPath, ...out("sync-cache-apply")];
     case "repair-cache-dialect":
-      return ["repair-cache-dialect", ...manifestArgs, "--dry-run", "--details"];
-    case "pr-gate-report":
-      return ["apply-contract", "--operation", "pr-gate-report", "--details"];
+      return ["repair-cache-dialect", ...manifestArgs, "--dry-run", "--details", ...out("repair-cache-dialect")];
     case "compare-merge":
-      return ["apply-contract", "--operation", "compare-merge", "--dry-run", "--details", ...fallbackArgs];
-    case "unity-import":
-      return ["doctor", "--details"];
+      return ["apply-contract", "--operation", "compare-merge", "--dry-run", "--details", ...out("compare-merge"), ...fallbackArgs];
+    case "submit-merge-review":
+      return ["submit-merge-review", "--preview-result", previewResultPath, "--details", ...out("submit-merge-review")];
+    case "pr-gate-report":
+      return ["apply-contract", "--operation", "pr-gate-report", "--details", ...out("pr-gate-report")];
+    case "bootstrap-current-branch-from-target-dry-run":
+      return ["bootstrap-current-branch-from-target", ...manifestArgs, "--dry-run", "--details", ...out("bootstrap-current-branch-from-target"), ...fallbackArgs];
+    case "new-table-dry-run":
+      return ["new-table", ...manifestArgs, "--dry-run", "--details", ...out("new-table")];
     default:
-      return ["doctor", "--details"];
+      return ["doctor", "--details", ...out("doctor")];
   }
+}
+
+function operationStage(operation: string) {
+  if (operation.includes("sync-cache")) {
+    return "读取注册中心 / 读取在线表 / 导出 xlsx / 三方一致性检查";
+  }
+
+  if (operation.includes("merge")) {
+    return "解析 PR 上下文 / 准备语义输入 / 生成报告";
+  }
+
+  if (operation.includes("bootstrap")) {
+    return "定位目标分支 / 规划在线表派生 / 生成写入清单";
+  }
+
+  return "准备环境 / 启动本机工具";
 }
 
 export function App() {
   const [projectRoot, setProjectRoot] = useState("");
+  const [startup, setStartup] = useState<StartupContext>({ projectRoot: "", bridgeSessionDir: "" });
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [checks, setChecks] = useState<ToolCheck[]>([]);
   const [activeOperation, setActiveOperation] = useState("");
   const [operationStartedAt, setOperationStartedAt] = useState<number | null>(null);
   const [lastResult, setLastResult] = useState<CliRunResult | null>(null);
+  const [lastResultParsed, setLastResultParsed] = useState<LifecycleResultLike | null>(null);
+  const [lastSyncPreview, setLastSyncPreview] = useState<LifecycleResultLike | null>(null);
+  const [lastSyncPreviewPath, setLastSyncPreviewPath] = useState("");
+  const [lastComparePreview, setLastComparePreview] = useState<LifecycleResultLike | null>(null);
+  const [lastComparePreviewPath, setLastComparePreviewPath] = useState("");
+  const [lastGateReport, setLastGateReport] = useState<LifecycleResultLike | null>(null);
   const [logExpanded, setLogExpanded] = useState(false);
+  const [moreExpanded, setMoreExpanded] = useState(false);
   const [error, setError] = useState("");
+  const [selectedScenario, setSelectedScenario] = useState<ScenarioId>(readStoredScenario);
+  const [viewMode, setViewMode] = useState<ViewMode>(readStoredViewMode);
+  const [debugEnabled, setDebugEnabled] = useState(() => typeof localStorage !== "undefined" && localStorage.getItem(debugPrefKey) === "1");
   const [identityMode, setIdentityMode] = useState<IdentityMode>(() => {
     if (typeof localStorage === "undefined") {
       return "strict-bot";
@@ -158,6 +245,15 @@ export function App() {
   });
   const [botAppId, setBotAppId] = useState("");
   const [botSecret, setBotSecret] = useState("");
+  const [newTable, setNewTable] = useState<NewTableDraft>({
+    tableId: "",
+    displayName: "",
+    ownerRole: "tableOwner",
+    fields: [
+      { key: "id", displayName: "ID", type: "string", description: "唯一ID", primary: true },
+      { key: "name", displayName: "名称", type: "string", description: "显示名称" }
+    ]
+  });
 
   const runtimeAvailable = isTauriRuntime();
   const elapsed = useMemo(() => {
@@ -169,10 +265,52 @@ export function App() {
   }, [operationStartedAt, activeOperation]);
   const larkCheck = checks.find((check) => check.name === "lark-cli");
   const cliCheck = checks.find((check) => check.name === "Config Sheet Forge CLI");
+  const recommendedScenario = useMemo(
+    () => decideRecommendedScenario({
+      snapshot,
+      checks,
+      lastScenario: selectedScenario,
+      lastSyncPreview,
+      lastComparePreview,
+      lastGateReport,
+      bridgeSessionDir: startup.bridgeSessionDir,
+      activeOperation
+    }),
+    [activeOperation, checks, lastComparePreview, lastGateReport, lastSyncPreview, selectedScenario, snapshot, startup.bridgeSessionDir]
+  );
+  const decision = useMemo(
+    () => decideWorkflow(selectedScenario, {
+      snapshot,
+      checks,
+      lastScenario: selectedScenario,
+      lastSyncPreview,
+      lastComparePreview,
+      lastGateReport,
+      bridgeSessionDir: startup.bridgeSessionDir,
+      activeOperation
+    }),
+    [activeOperation, checks, lastComparePreview, lastGateReport, lastSyncPreview, selectedScenario, snapshot, startup.bridgeSessionDir]
+  );
+  const newTableErrors = validateNewTableDraft(newTable);
 
   const persistIdentityMode = useCallback((mode: IdentityMode) => {
     setIdentityMode(mode);
     localStorage.setItem(identityPrefKey, mode);
+  }, []);
+
+  const updateScenario = useCallback((scenario: ScenarioId) => {
+    setSelectedScenario(scenario);
+    localStorage.setItem(scenarioPrefKey, scenario);
+  }, []);
+
+  const updateViewMode = useCallback((mode: ViewMode) => {
+    setViewMode(mode);
+    localStorage.setItem(viewPrefKey, mode);
+  }, []);
+
+  const updateDebug = useCallback((enabled: boolean) => {
+    setDebugEnabled(enabled);
+    localStorage.setItem(debugPrefKey, enabled ? "1" : "0");
   }, []);
 
   const openExternal = useCallback(async (url?: string) => {
@@ -229,11 +367,12 @@ export function App() {
       return;
     }
 
-    invoke<string>("startup_project_root")
-      .then((root) => {
-        if (root) {
-          setProjectRoot(root);
-          void discover(root);
+    invoke<StartupContext>("startup_context")
+      .then((context) => {
+        setStartup(context);
+        if (context.projectRoot) {
+          setProjectRoot(context.projectRoot);
+          void discover(context.projectRoot);
         }
       })
       .catch(() => {
@@ -276,13 +415,93 @@ export function App() {
     }
   }, [botAppId, botSecret, discover, projectRoot, runtimeAvailable, snapshot?.projectRoot]);
 
+  const applyResult = useCallback((operation: string, result: CliRunResult) => {
+    setLastResult(result);
+    const parsed = parseResultJson(result.resultJson);
+    setLastResultParsed(parsed);
+    if (!parsed) {
+      return;
+    }
+
+    if (operation === "sync-cache-dry-run") {
+      setLastSyncPreview(parsed);
+      setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "sync-cache"));
+    } else if (operation === "sync-cache-apply") {
+      setLastSyncPreview(parsed);
+      setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "sync-cache-apply"));
+    } else if (operation === "compare-merge") {
+      setLastComparePreview(parsed);
+      setLastComparePreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "compare-merge"));
+    } else if (operation === "pr-gate-report") {
+      setLastGateReport(parsed);
+    }
+  }, [projectRoot, snapshot]);
+
+  const sendUnityBridgeCommand = useCallback(async (operation: string) => {
+    if (!startup.bridgeSessionDir) {
+      setError("当前 Desktop 不是从 Unity bridge 启动。请回 Unity 点击“导入 Unity 配表资产”。");
+      return;
+    }
+
+    if (!runtimeAvailable) {
+      setLastResult({
+        commandLine: `unity-bridge ${operation}`,
+        exitCode: 0,
+        stdout: "Desktop web preview：Tauri 运行时未连接。",
+        stderr: ""
+      });
+      return;
+    }
+
+    const path = await invoke<string>("write_bridge_command", {
+      bridgeSessionDir: startup.bridgeSessionDir,
+      operation,
+      payloadJson: JSON.stringify({
+        projectRoot: snapshot?.projectRoot || projectRoot,
+        requestedAt: new Date().toISOString()
+      })
+    });
+    setLastResult({
+      commandLine: `unity-bridge ${operation}`,
+      exitCode: 0,
+      stdout: `已发送给 Unity bridge：${path}`,
+      stderr: "",
+      resultPath: path
+    });
+  }, [projectRoot, runtimeAvailable, snapshot?.projectRoot, startup.bridgeSessionDir]);
+
   const runOperation = useCallback(async (operation: string) => {
     setError("");
+    if (!operation) {
+      return;
+    }
+
+    if (operation === "unity-import") {
+      await sendUnityBridgeCommand("import-assets");
+      return;
+    }
+
     if (operation === "sync-cache-apply") {
-      const confirmed = window.confirm("写入本地 cache 会更新 .config-sheet-forge/excel-cache 和 .config-sheet-forge/cache。不会写旧 Excel/，不会写飞书。请确认你已经看过最近一次同步预览。");
+      if (!lastSyncPreviewPath || !lastSyncPreview?.success) {
+        setError("写入本地 cache 前必须先有最近一次同输入 sync-cache dry-run 成功结果。请重新预览同步。");
+        return;
+      }
+
+      const status = lastSyncPreview.syncCacheSummary?.cacheStatus || "unknown";
+      if (status.toLowerCase() === "uptodate") {
+        setError("本地 cache 已最新，不需要写入。下一步请导入 Unity 配表资产。");
+        return;
+      }
+
+      const confirmed = window.confirm("写入本地 cache 会更新 .config-sheet-forge/excel-cache 和 .config-sheet-forge/cache。\n\n不会写旧 Excel/，不会写飞书，不改 ProjectSettings。\n\nDesktop 会把最近一次 dry-run result 交给 CLI 校验，同输入通过后才写入。");
       if (!confirmed) {
         return;
       }
+    }
+
+    if (operation === "submit-merge-review" && (!lastComparePreviewPath || !lastComparePreview?.success)) {
+      setError("提交合并审查前必须先生成合并预览。");
+      return;
     }
 
     if (identityMode === "user-fallback" && operation === "pr-gate-report") {
@@ -292,52 +511,73 @@ export function App() {
       }
     }
 
-    if (operation === "unity-import") {
-      setError("导入 Unity 配表资产必须由 Unity bridge 调用 ExcelToSO ImportByProfile(SourceOfTruthCache)。请回 Unity 点击“导入 Unity 配表资产”。");
-      return;
-    }
-
     setActiveOperation(operation);
     setOperationStartedAt(Date.now());
     setLastResult(null);
     try {
+      const previewPath = operation === "submit-merge-review" ? lastComparePreviewPath : lastSyncPreviewPath;
+      const args = buildCommandArgs(operation, snapshot, projectRoot, identityMode, previewPath);
       if (!runtimeAvailable) {
-        setLastResult({
-          commandLine: `config-sheet-forge ${buildCommandArgs(operation, snapshot, identityMode).join(" ")}`,
+        const mock = {
+          commandLine: `config-sheet-forge ${args.join(" ")}`,
           exitCode: 0,
           stdout: "Desktop web preview：Tauri 运行时未连接。打包为 Desktop 后会调用内置 sidecar CLI。",
-          stderr: ""
-        });
+          stderr: "",
+          resultPath: args[args.indexOf("--out") + 1] || ""
+        };
+        applyResult(operation, mock);
         return;
       }
 
       const result = await invoke<CliRunResult>("run_cli", {
         projectRoot: snapshot?.projectRoot || projectRoot,
-        args: buildCommandArgs(operation, snapshot, identityMode)
+        args
       });
-      setLastResult(result);
+      applyResult(operation, result);
     } catch (ex) {
       setError(ex instanceof Error ? ex.message : String(ex));
     } finally {
       setActiveOperation("");
       setOperationStartedAt(null);
     }
-  }, [identityMode, projectRoot, runtimeAvailable, snapshot]);
+  }, [
+    applyResult,
+    identityMode,
+    lastComparePreview,
+    lastComparePreviewPath,
+    lastSyncPreview,
+    lastSyncPreviewPath,
+    projectRoot,
+    runtimeAvailable,
+    sendUnityBridgeCommand,
+    snapshot
+  ]);
+
+  const primaryDisabled = decision.primaryDisabled
+    || (selectedScenario === "new-table" && decision.primaryOperation === "new-table-dry-run" && newTableErrors.length > 0)
+    || Boolean(activeOperation);
 
   return (
     <main className="app-shell">
       <header className="top-bar">
-        <div>
+        <div className="brand-block">
           <p className="eyebrow">Config Sheet Forge Desktop</p>
           <h1>配表 Source of Truth 工作台</h1>
+          <p>{snapshot?.projectId || "未识别项目"} · {snapshot?.gitBranch || "等待分支"} · {getScenario(selectedScenario).shortTitle}</p>
         </div>
         <div className="top-actions">
-          <button className="secondary" onClick={() => void runOperation("doctor")}>环境检查</button>
-          <button className="primary" onClick={() => void discover()}>识别项目</button>
+          <div className="view-switch" role="tablist" aria-label="视图模式">
+            <button className={viewMode === "planner" ? "selected" : ""} onClick={() => updateViewMode("planner")}>策划视图</button>
+            <button className={viewMode === "programmer" ? "selected" : ""} onClick={() => updateViewMode("programmer")}>程序视图</button>
+          </div>
+          <label className="debug-toggle">
+            <input type="checkbox" checked={debugEnabled} onChange={(event) => updateDebug(event.target.checked)} />
+            <span>Debug</span>
+          </label>
         </div>
       </header>
 
-      <section className="project-picker">
+      <section className="project-picker compact-card">
         <label>
           Unity 项目目录
           <input
@@ -346,7 +586,7 @@ export function App() {
             placeholder="选择或粘贴 Unity project root，例如 K:/Unity/MyGame"
           />
         </label>
-        <p>Desktop 会读取 ProjectSettings/*ConfigSheetForge*.json。长任务都在后台进程运行，不阻塞 Unity。</p>
+        <button className="secondary" onClick={() => void discover()}>识别项目</button>
       </section>
 
       {error ? <section className="error-card">{error}</section> : null}
@@ -354,17 +594,108 @@ export function App() {
       {activeOperation ? (
         <section className="running-card">
           <div>
-            <strong>正在运行：{activeOperation}</strong>
-            <p>当前阶段：准备环境 / 启动本机工具。安装、授权、飞书读取和导出可能需要一点时间。</p>
+            <strong>正在运行：{operationLabels[activeOperation] || activeOperation}</strong>
+            <p>当前阶段：{operationStage(activeOperation)}</p>
+            <p>安全性：{activeOperation.includes("dry-run") || activeOperation.includes("preview") ? "只读预览，不写文件。" : decision.safety}</p>
           </div>
           <span>{elapsed}</span>
         </section>
       ) : null}
 
+      <section className="scenario-home">
+        <div className="section-title">
+          <div>
+            <p className="eyebrow">智能场景</p>
+            <h2>你现在要做什么？</h2>
+          </div>
+          <p>系统推荐：{getScenario(recommendedScenario).title}</p>
+        </div>
+        <div className="scenario-grid">
+          {scenarios.map((scenario) => (
+            <button
+              key={scenario.id}
+              className={`scenario-card ${selectedScenario === scenario.id ? "selected" : ""} ${recommendedScenario === scenario.id ? "recommended" : ""}`}
+              onClick={() => updateScenario(scenario.id)}
+            >
+              <span>{recommendedScenario === scenario.id ? "推荐" : scenario.shortTitle}</span>
+              <strong>{scenario.title}</strong>
+              <small>{scenario.description}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="status-strip">
+        <StatusCard title="在线表" value={lastSyncPreview?.branchStatus ? `${lastSyncPreview.branchStatus.tableCountRegistered || 0}/${lastSyncPreview.branchStatus.tableCountExpected || 0} 已登记` : "等待读取"} detail="以 live registry 为准。" />
+        <StatusCard title="本地 cache" value={lastSyncPreview?.syncCacheSummary?.cacheStatus || "等待预览"} detail={summarizeLifecycleResult(lastSyncPreview)} />
+        <StatusCard title="PR gate" value={lastGateReport?.prGateReport?.gateState || "等待检查"} detail={summarizeLifecycleResult(lastGateReport)} url={snapshot?.prUrl} onOpen={openExternal} />
+        <StatusCard title="飞书注册中心" value={snapshot?.registryBaseToken ? "已配置" : "等待识别"} detail={`Base: ${redact(snapshot?.registryBaseToken || "")}`} url={snapshot?.registryBaseUrl} onOpen={openExternal} />
+      </section>
+
+      <section className="wizard-layout">
+        <aside className="stepper-panel">
+          <h2>{decision.title}</h2>
+          <ol className="stepper">
+            {decision.steps.map((step) => (
+              <li className={step.status} key={step.title}>
+                <span />
+                <p>{step.title}</p>
+              </li>
+            ))}
+          </ol>
+        </aside>
+
+        <section className="primary-panel">
+          <p className="eyebrow">当前结论</p>
+          <h2>{decision.conclusion}</h2>
+          <p className="next-step">{decision.nextStep}</p>
+          {decision.warnings.length > 0 ? (
+            <div className="warning-list">
+              {decision.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+            </div>
+          ) : null}
+          {selectedScenario === "new-table" ? (
+            <NewTableMiniForm draft={newTable} onChange={setNewTable} errors={newTableErrors} />
+          ) : null}
+          <div className="primary-row">
+            <button
+              className="primary large"
+              disabled={primaryDisabled}
+              title={primaryDisabled ? decision.disabledReason || "后台任务运行中，完成后可继续。" : ""}
+              onClick={() => void runOperation(decision.primaryOperation)}
+            >
+              {activeOperation ? "后台任务运行中..." : decision.primaryLabel}
+            </button>
+            {primaryDisabled && (decision.disabledReason || newTableErrors[0]) ? <small>{decision.disabledReason || newTableErrors[0]}</small> : null}
+          </div>
+        </section>
+
+        <aside className="safety-panel">
+          <h3>为什么安全</h3>
+          <p>{decision.safety}</p>
+          {viewMode === "programmer" ? (
+            <>
+              <h3>程序视图</h3>
+              <p>{decision.programSummary}</p>
+              <p>身份策略：{identityMode === "strict-bot" ? "strict bot；PR gate 不允许 user fallback。" : "交互预览可确认后 user fallback；PR gate 仍 strict bot。"}</p>
+            </>
+          ) : null}
+          <details className="more-actions" open={moreExpanded} onToggle={(event) => setMoreExpanded(event.currentTarget.open)}>
+            <summary>更多操作</summary>
+            <div className="secondary-actions">
+              <button onClick={() => void runOperation("registry-status")}>刷新在线状态</button>
+              <button onClick={() => void runOperation("repair-cache-dialect")}>预览修复 cache 类型行</button>
+              <button onClick={() => void runOperation("pr-gate-report")}>运行 PR 检查</button>
+              <button onClick={() => void runOperation("doctor")}>环境检查</button>
+            </div>
+          </details>
+        </aside>
+      </section>
+
       <section className="identity-card">
         <div>
           <h2>身份策略</h2>
-          <p>交互式 Desktop 可以 bot-first，再经你确认后使用飞书用户身份继续；CI / PR hard gate 默认 strict bot，不会静默 fallback。</p>
+          <p>交互式 Desktop 可以 bot-first，再经你确认后使用飞书用户身份继续；CI / PR hard gate 默认 strict bot。</p>
         </div>
         <div className="segmented">
           <button className={identityMode === "strict-bot" ? "selected" : ""} onClick={() => persistIdentityMode("strict-bot")}>strict bot</button>
@@ -372,100 +703,71 @@ export function App() {
         </div>
       </section>
 
-      <section className="status-grid">
-        <StatusCard title="CLI" value={cliCheck?.status === "ok" ? "内置可用" : "需要处理"} detail={cliCheck?.detail || "release zip 应包含 sidecar config-sheet-forge CLI。"} />
-        <StatusCard title="当前分支" value={snapshot?.gitBranch || "等待识别"} detail="从 git branch 读取。" url={snapshot?.gitBranchUrl} onOpen={openExternal} />
-        <StatusCard title="Feishu profile" value={snapshot?.feishuProfile || "等待识别"} detail="按项目 profile 模板推导。" />
-        <StatusCard title="在线注册中心" value={snapshot?.registryBaseToken ? "已配置" : "等待检查"} detail={`Base: ${redact(snapshot?.registryBaseToken || "")}`} url={snapshot?.registryBaseUrl} onOpen={openExternal} />
-        <StatusCard title="GitHub PR" value={snapshot?.prNumber ? `PR #${snapshot.prNumber}` : "等待识别"} detail={snapshot?.prUrl ? "点击打开当前分支 PR。" : "gh 可用时自动识别。"} url={snapshot?.prUrl} onOpen={openExternal} />
-        <StatusCard title="PR gate" value="等待检查" detail="通过后写 Temp/ConfigSheetForge/pr-gate-report.json。" />
-      </section>
-
-      <section className="recommendation">
-        <div>
-          <p className="eyebrow">推荐下一步</p>
-          <h2>先完成环境检查，再预览同步计划</h2>
-          <p>预览只读取飞书和本地 cache，不写飞书、不写旧 Excel、不改 ProjectSettings。</p>
-        </div>
-        <button className="primary large" onClick={() => void runOperation("sync-cache-dry-run")}>预览同步计划</button>
-      </section>
-
-      <section className="workflow">
-        {defaultSteps.map((step) => (
-          <article className={`step ${step.kind}`} key={step.title}>
-            <h3>{step.title}</h3>
-            <p>{step.detail}</p>
-            <button onClick={() => void runOperation(step.operation)}>{step.button}</button>
-          </article>
-        ))}
-      </section>
-
-      <section className="tools-panel">
-        <div>
-          <h2>一键环境 / 授权</h2>
-          <p>缺工具时直接点按钮安装。所有安装和授权只改本机环境，不改 ProjectSettings、Packages、旧 Excel/ 或 cache。</p>
-        </div>
-        <div className="tool-list">
-          {checks.length === 0 ? <p className="muted">点击“识别项目”或“环境检查”后显示。</p> : checks.map((check) => (
-            <div className={`tool-check ${check.status}`} key={check.name}>
-              <div className="tool-check-main">
-                <strong>{check.name}：{statusLabel(check.status)}</strong>
-                <span>{check.summary}</span>
+      {selectedScenario === "environment" || viewMode === "programmer" ? (
+        <section className="tools-panel">
+          <div>
+            <h2>一键环境 / 授权</h2>
+            <p>缺工具时直接点按钮安装。所有安装和授权只改本机环境，不改 ProjectSettings、Packages、旧 Excel/ 或 cache。</p>
+          </div>
+          <div className="tool-list">
+            {checks.length === 0 ? <p className="muted">点击“识别项目”或“开始检查”后显示。</p> : checks.map((check) => (
+              <div className={`tool-check ${check.status}`} key={check.name}>
+                <div className="tool-check-main">
+                  <strong>{check.name}：{statusLabel(check.status)}</strong>
+                  <span>{check.summary}</span>
+                </div>
+                <small>{check.detail}</small>
+                {debugEnabled && check.executablePath ? <code title={check.executablePath}>{check.executablePath}</code> : null}
+                <div className="tool-actions">
+                  {check.action ? <button onClick={() => void runSetupAction(check.action || "")}>{check.actionLabel || "处理"}</button> : null}
+                  {check.name === "gh" && check.status !== "error" ? <button onClick={() => void runSetupAction("gh_auth")}>GitHub 授权</button> : null}
+                  {check.name === "lark-cli" && check.status !== "error" ? (
+                    <>
+                      <button onClick={() => void runSetupAction("lark_doctor")}>重新 doctor</button>
+                      <button onClick={() => void runSetupAction("lark_auth_user")}>登录飞书用户身份</button>
+                    </>
+                  ) : null}
+                  {check.url ? <button className="secondary" onClick={() => void openExternal(check.url)}>打开说明</button> : null}
+                </div>
               </div>
-              <small>{check.detail}</small>
-              {check.executablePath ? <code>{check.executablePath}</code> : null}
-              <div className="tool-actions">
-                {check.action ? <button onClick={() => void runSetupAction(check.action || "")}>{check.actionLabel || "处理"}</button> : null}
-                {check.name === "gh" && check.status !== "error" ? <button onClick={() => void runSetupAction("gh_auth")}>GitHub 授权</button> : null}
-                {check.name === "lark-cli" && check.status !== "error" ? (
-                  <>
-                    <button onClick={() => void runSetupAction("lark_doctor")}>重新 doctor</button>
-                    <button onClick={() => void runSetupAction("lark_auth_user")}>登录飞书用户身份</button>
-                  </>
-                ) : null}
-                {check.url ? <button className="secondary" onClick={() => void openExternal(check.url)}>打开说明</button> : null}
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
-      <section className="bot-card">
-        <div>
-          <h2>配置飞书 bot</h2>
-          <p>App Secret 只通过 stdin 传给 lark-cli，不写仓库、不进命令行、不显示在日志里。</p>
-        </div>
-        <div className="bot-form">
-          <input value={botAppId} onChange={(event) => setBotAppId(event.target.value)} placeholder="App ID，例如 cli_xxx" />
-          <input value={botSecret} onChange={(event) => setBotSecret(event.target.value)} placeholder="App Secret" type="password" />
-          <button onClick={() => void runSetupAction("configure_lark_bot")}>配置飞书 bot</button>
-        </div>
-      </section>
+      {selectedScenario === "environment" ? (
+        <section className="bot-card">
+          <div>
+            <h2>配置飞书 bot</h2>
+            <p>App Secret 只通过 stdin 传给 lark-cli，不写仓库、不进命令行、不显示在日志里。</p>
+          </div>
+          <div className="bot-form">
+            <input value={botAppId} onChange={(event) => setBotAppId(event.target.value)} placeholder="App ID，例如 cli_xxx" />
+            <input value={botSecret} onChange={(event) => setBotSecret(event.target.value)} placeholder="App Secret" type="password" />
+            <button onClick={() => void runSetupAction("configure_lark_bot")}>配置飞书 bot</button>
+          </div>
+        </section>
+      ) : null}
 
-      <section className="operation-grid">
-        <button onClick={() => void runOperation("registry-status")}>读取 live registry 状态</button>
-        <button onClick={() => void runOperation("sync-cache-dry-run")}>预览同步计划</button>
-        <button onClick={() => void runOperation("repair-cache-dialect")}>重写 cache dialect 预览</button>
-        <button onClick={() => void runOperation("pr-gate-report")}>运行 PR 检查</button>
-      </section>
-
-      <section className="result-panel">
+      <section className={`result-dock ${debugEnabled ? "debug-open" : ""}`}>
         <div className="result-header">
           <div>
             <h2>最近结果</h2>
-            <p>{lastResult ? `ExitCode ${lastResult.exitCode} · ${lastResult.source || "unknown source"}` : "暂无任务结果。"}</p>
+            <p>{lastResultParsed ? summarizeLifecycleResult(lastResultParsed) : lastResult ? `ExitCode ${lastResult.exitCode}` : "暂无任务结果。"}</p>
           </div>
           <button className="secondary" onClick={() => setLogExpanded((value) => !value)}>
-            {logExpanded ? "收起详细日志" : "展开详细日志"}
+            {logExpanded ? "收起" : debugEnabled ? "展开 Debug 日志" : "Debug 查看详情"}
           </button>
         </div>
-        {lastResult ? (
-          <>
+        {debugEnabled && lastResult ? (
+          <div className="debug-drawer" hidden={!logExpanded}>
             <pre className="command">{lastResult.commandLine}</pre>
+            {lastResult.resultPath ? <p className="muted">result：{lastResult.resultPath}</p> : null}
             {lastResult.executablePath ? <p className="muted">工具路径：{lastResult.executablePath}</p> : null}
-            {lastResult.attemptedPaths?.length ? <p className="muted">尝试路径：{lastResult.attemptedPaths.slice(0, 8).join("；")}</p> : null}
-            {logExpanded ? <pre className="logs">{`${lastResult.stdout}\n${lastResult.stderr}`.trim()}</pre> : null}
-          </>
+            {lastResult.attemptedPaths?.length ? <p className="muted">尝试路径：{lastResult.attemptedPaths.slice(0, 12).join("；")}</p> : null}
+            <pre className="logs">{`${lastResult.stdout}\n${lastResult.stderr}`.trim()}</pre>
+            {lastResult.resultJson ? <pre className="logs json-log">{lastResult.resultJson}</pre> : null}
+          </div>
         ) : null}
       </section>
     </main>
@@ -476,9 +778,42 @@ function StatusCard(props: { title: string; value: string; detail: string; url?:
   return (
     <article className="status-card">
       <span>{props.title}</span>
-      <strong>{props.value}</strong>
-      <p>{props.detail}</p>
+      <strong title={props.value}>{props.value}</strong>
+      <p title={props.detail}>{props.detail}</p>
       {props.url ? <button className="link-button" onClick={() => props.onOpen?.(props.url)}>打开</button> : null}
     </article>
+  );
+}
+
+function NewTableMiniForm(props: { draft: NewTableDraft; onChange: (draft: NewTableDraft) => void; errors: string[] }) {
+  const updateField = (index: number, patch: Partial<NewTableDraft["fields"][number]>) => {
+    props.onChange({
+      ...props.draft,
+      fields: props.draft.fields.map((field, i) => i === index ? { ...field, ...patch } : field)
+    });
+  };
+
+  return (
+    <div className="new-table-form">
+      <div className="form-grid">
+        <label>配表ID<input value={props.draft.tableId} onChange={(event) => props.onChange({ ...props.draft, tableId: event.target.value })} placeholder="例如 SkillExtraData" /></label>
+        <label>显示名称<input value={props.draft.displayName} onChange={(event) => props.onChange({ ...props.draft, displayName: event.target.value })} placeholder="例如 技能扩展数据" /></label>
+        <label>这张表由谁负责<input value={props.draft.ownerRole} onChange={(event) => props.onChange({ ...props.draft, ownerRole: event.target.value })} placeholder="默认 tableOwner" /></label>
+      </div>
+      <div className="field-table">
+        {props.draft.fields.map((field, index) => (
+          <div className="field-row" key={`${field.key}-${index}`}>
+            <input value={field.key} onChange={(event) => updateField(index, { key: event.target.value })} placeholder="字段 key" />
+            <input value={field.displayName} onChange={(event) => updateField(index, { displayName: event.target.value })} placeholder="中文名" />
+            <select value={field.type} onChange={(event) => updateField(index, { type: event.target.value as FieldType })}>
+              {fieldTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+            </select>
+            <input value={field.description} onChange={(event) => updateField(index, { description: event.target.value })} placeholder="说明" />
+            <label className="inline-check"><input type="checkbox" checked={Boolean(field.primary)} onChange={(event) => updateField(index, { primary: event.target.checked })} />唯一ID</label>
+          </div>
+        ))}
+      </div>
+      {props.errors.length > 0 ? <div className="warning-list">{props.errors.slice(0, 3).map((error) => <p key={error}>{error}</p>)}</div> : null}
+    </div>
   );
 }

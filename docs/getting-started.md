@@ -18,6 +18,8 @@ Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本
 
 从 0.4.33 开始，Desktop zip 自带 `config-sheet-forge` CLI sidecar。团队成员只需要从 Unity 点“安装 Desktop”，不需要再手动安装全局 `config-sheet-forge`。如果本机装过 `lark-cli`，Desktop 会优先识别 `%APPDATA%/npm/lark-cli.ps1` / `.cmd`；缺 Git、gh、lark-cli 或授权时，环境页会给安装/登录按钮。
 
+从 0.4.34 开始，Desktop 首页是场景向导。第一次不知道点什么时，先看推荐场景和唯一主按钮：通常是“环境检查”或“预览同步”。`cacheStatus=upToDate` 时不会再让你写 cache，而是直接进入“导入 Unity”；`blocked` 时写入按钮会禁用并列出阻断表。
+
 ## 安装要求
 
 - .NET 8 SDK 或更新版本，用于 CLI。

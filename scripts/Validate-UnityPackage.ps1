@@ -373,6 +373,22 @@ foreach ($requiredV433Marker in @("Publish-SidecarCli", "sidecarCli", "--expect-
   }
 }
 
+$desktopWorkflowSources = $bridgeWindow + "`n" +
+  (Get-Content -Raw apps/desktop/src/App.tsx) + "`n" +
+  (Get-Content -Raw apps/desktop/src/workflow.ts) + "`n" +
+  (Get-Content -Raw apps/desktop/src/styles.css) + "`n" +
+  (Get-Content -Raw apps/desktop/src-tauri/src/main.rs) + "`n" +
+  (Get-Content -Raw scripts/Package-DesktopRelease.ps1) + "`n" +
+  (Get-Content -Raw apps/desktop/tests/workflow.test.ts) + "`n" +
+  (Get-Content -Raw apps/desktop/tests/ui-smoke.mjs) + "`n" +
+  (Get-Content -Raw apps/desktop/package.json) + "`n" +
+  (Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs)
+foreach ($requiredV434Marker in @("智能场景", "策划视图", "程序视图", "debug-toggle", "scenario-grid", "stepper", "sync-cache --yes --preview-result", "RequireMatchingSyncCachePreviewAsync", "write_bridge_command", "--bridge-session", "icons/icon.ico", "config-sheet-forge.svg", "overflow-x: hidden", "min-width: 0", "vitest run")) {
+  if ($desktopWorkflowSources -notlike "*$requiredV434Marker*") {
+    throw "Unity v0.4.34 Desktop workflow marker is missing: $requiredV434Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."

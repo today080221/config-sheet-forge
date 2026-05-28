@@ -65,6 +65,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("project config probe ignores local state registry", () => RunSync(ProjectConfigProbeIgnoresLocalStateRegistry)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
     ("apply-contract sync-cache apply requires confirmation", ApplyContractSyncCacheApplyRequiresConfirmation),
+    ("sync-cache apply requires preview result", SyncCacheApplyRequiresPreviewResult),
     ("seed dry-run plans xlsx migration without writes", SeedDryRunPlansXlsxMigrationWithoutWrites),
     ("target branch bootstrap dry-run overrides seed target", TargetBranchBootstrapDryRunOverridesSeedTarget),
     ("target branch bootstrap safe apply skips all local writes", TargetBranchBootstrapSafeApplySkipsAllLocalWrites),
@@ -2249,6 +2250,53 @@ static async Task ApplyContractSyncCacheApplyRequiresConfirmation()
 
         AssertEqual("2", exitCode.ToString(), "sync-cache apply-contract should require explicit confirmation.");
         AssertTrue(!File.Exists(resultPath), "Unconfirmed sync-cache apply should fail before writing a lifecycle result.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task SyncCacheApplyRequiresPreviewResult()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-sync-preview-required-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        Directory.SetCurrentDirectory(root);
+        var requestPath = Path.Combine(root, "sync-request.json");
+        var resultPath = Path.Combine(root, "sync-result.json");
+        var request = new LifecycleContractRequest
+        {
+            Operation = "sync-cache",
+            DryRun = false,
+            Git = new ContractGitSpec
+            {
+                Branch = "feature/config",
+                Profile = "feature/config"
+            },
+            BranchWorkspace = new BranchWorkspaceContract
+            {
+                GitBranch = "feature/config",
+                Profile = "feature/config",
+                ExistingWikiNodeToken = "wik_feature"
+            },
+            SyncCache = new SyncCacheContract
+            {
+                ConfirmApply = true
+            }
+        };
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[] { "sync-cache", "--manifest", requestPath, "--yes", "--out", resultPath });
+
+        AssertEqual("2", exitCode.ToString(), "sync-cache apply should require --preview-result even when --yes is present.");
+        AssertTrue(!File.Exists(resultPath), "sync-cache apply without preview-result should fail before writing a lifecycle result.");
     }
     finally
     {

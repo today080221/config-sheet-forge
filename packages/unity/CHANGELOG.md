@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.34
+
+- Desktop 首页改为“智能场景”向导：环境/授权、同步并导入 Unity、准备 PR 合并、新建配表、从 main/PR base 派生当前分支。每个场景只暴露一个主按钮，普通视图优先显示结论、下一步和安全说明。
+- Desktop 增加“策划视图 / 程序视图 / Debug”三层展示。普通视图不再默认展示完整命令、raw JSON、stdout/stderr、attempted paths 或长 token；Debug 抽屉打开后才显示。
+- `sync-cache apply` 增加强护栏：必须传最近一次同输入 `--preview-result`，CLI 会校验 dry-run 成功、未 blocked、fingerprint 一致；`upToDate` 时不再推荐写 cache，而是进入 Unity 导入。
+- Desktop 所有 lifecycle 命令统一写入 `Temp/ConfigSheetForge/desktop/<operation>.result.json`，并解析 result JSON 生成摘要，不再靠 stdout 猜状态。
+- Unity thin bridge 启动 Desktop 时传入 bridge session 目录；Desktop 可以向 Unity 发送 `import-assets`、`install-profile`、`read-pr-gate` 命令。Legacy Unity Workflow 仍保留为 fallback。
+- 新增 Desktop workflow / UI smoke 测试，覆盖 cache 状态机、PR 流程、新建配表字段校验、普通视图防 debug 泄漏、无横向溢出样式守卫。
+- Desktop 增加 SVG 图标源和 Tauri Windows icon 配置；release 打包脚本会检查 icon、sidecar CLI、production build 和 zip smoke。
+
 ## 0.4.33
 
 - Desktop Windows release zip 现在内置 `cli/config-sheet-forge.exe` sidecar。Desktop 默认优先调用 sidecar CLI，不再要求团队成员全局安装 `config-sheet-forge` 或手动配置 PATH。

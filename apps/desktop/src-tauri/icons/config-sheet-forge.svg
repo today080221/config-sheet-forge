@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Config Sheet Forge">
+  <defs>
+    <linearGradient id="sheet" x1="48" y1="48" x2="156" y2="172" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#eff8ff"/>
+      <stop offset="1" stop-color="#cfe7fb"/>
+    </linearGradient>
+    <linearGradient id="cache" x1="116" y1="118" x2="206" y2="210" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1c5d99"/>
+      <stop offset="1" stop-color="#2e8a57"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#f5f7fa"/>
+  <path d="M74 64c10-22 34-35 59-30 19 4 35 18 42 36 23 3 41 22 41 46 0 26-21 47-47 47H80c-23 0-42-19-42-42 0-21 15-39 36-43z" fill="#ffffff" stroke="#8db8dc" stroke-width="10" stroke-linejoin="round"/>
+  <rect x="55" y="72" width="110" height="112" rx="13" fill="url(#sheet)" stroke="#1c5d99" stroke-width="8"/>
+  <path d="M78 104h64M78 130h64M78 156h41" stroke="#1c5d99" stroke-width="8" stroke-linecap="round"/>
+  <path d="M172 91c18 12 29 31 28 52M83 199c-18-11-29-31-28-51" fill="none" stroke="#2e8a57" stroke-width="10" stroke-linecap="round"/>
+  <path d="M198 143l-18-3 13 22zM57 148l18 3-13-22z" fill="#2e8a57"/>
+  <rect x="118" y="124" width="84" height="84" rx="18" fill="url(#cache)" stroke="#ffffff" stroke-width="7"/>
+  <path d="M139 166l15 15 31-36" fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
