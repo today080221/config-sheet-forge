@@ -114,7 +114,7 @@ config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.Conf
 
 策划后续只改飞书 branch 在线表时，先让项目 adapter 生成 `sync-cache` lifecycle contract，再 dry-run / apply。无变化时 semantic hash gate 不会重写 `.xlsx`、`.semantic.json` 或 `.sha256`，mtime 保持不变。
 
-从 0.4.24 开始，Lark provider 不再依赖 `sheets +read` 的无范围默认读取。`sync-cache` 会尽量使用导出的 xlsx 或 Sheet 元数据构造显式 A1 范围；如果遇到 Feishu `90202 wrong startRange`，会自动用显式范围重试，并在结果里写出表 ID、脱敏 token、sheetId、attemptedRange、retryRange 和错误码。这样 no-range 问题不会再被误判成 bot 权限不足。
+从 0.4.25 开始，Lark provider 不再依赖 `sheets +read` 的无范围默认读取，也不会盲信飞书导出 xlsx 里的 `dimension ref=A1`。`sync-cache` 会扫描实际 `sheetData` 计算 used range，再构造显式 A1 范围；如果遇到 Feishu `90202 wrong startRange`，会自动用显式范围重试，并在结果里写出表 ID、脱敏 token、sheetId、attemptedRange、retryRange、finalRange、online rows/cols、xlsx rows/cols 和错误码。这样范围问题不会再被误判成 bot 权限不足。
 
 `sync-cache` 会从 Base 注册中心 live hydrate 当前 Git branch/profile 的 BranchBindings 与 ConfigSheets。若只是缺 MergeReviews / SchemaReviews / Waivers 的 `状态` 单选选项，先用 `config-sheet-forge registry-migrate --base <base-token> --only review-status-options --dry-run` 看窄迁移计划，确认只补状态选项后再由负责人执行 `--yes`。如果 Base 里同一 `GitBranch + Profile` 出现多条 BranchBindings，或需要清理空白默认行、字段歧义，再使用完整 `registry-migrate --dry-run` 做注册中心 schema 清理审计。
 
@@ -123,7 +123,7 @@ config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.Conf
 通过 Unity Package Manager 安装：
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.24
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.25
 ```
 
 打开 `Tools > Config Sheet Forge`。普通使用者优先看首页的 `推荐下一步` 和 [Unity 配表窗口 5 分钟说明](unity-window.md)。

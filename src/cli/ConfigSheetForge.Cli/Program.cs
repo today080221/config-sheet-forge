@@ -384,7 +384,7 @@ public static class Program
             foreach (var finding in CollapseNoisyProviderFindings(table.Id, result.Findings))
             {
                 PrintFinding(finding, args.HasFlag("details"));
-                summary.PortableSubsetFindings.Add(table.Id + ": " + finding.Code + " " + finding.Message);
+                summary.PortableSubsetFindings.Add(FormatProviderFindingForSummary(table.Id, finding));
                 if (finding.Severity == FindingSeverity.Error)
                 {
                     hasError = true;
@@ -4100,6 +4100,38 @@ public static class Program
                 Console.WriteLine("  " + pair.Key + ": " + MaskIfSensitive(pair.Key, pair.Value));
             }
         }
+    }
+
+    private static string FormatProviderFindingForSummary(string tableId, ProviderDoctorFinding finding)
+    {
+        var text = tableId + ": " + finding.Code + " " + finding.Message;
+        if (finding.Details == null || finding.Details.Count == 0)
+        {
+            return text;
+        }
+
+        var interesting = new[]
+        {
+            "attemptedRange",
+            "retryRange",
+            "finalRange",
+            "onlineRows",
+            "onlineColumns",
+            "xlsxRows",
+            "xlsxColumns",
+            "xlsxDimensionRows",
+            "xlsxDimensionColumns",
+            "xlsxCellRows",
+            "xlsxCellColumns",
+            "larkErrorCode",
+            "larkErrorMessage"
+        };
+        var details = interesting
+            .Where(finding.Details.ContainsKey)
+            .Select(key => key + "=" + finding.Details[key])
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToList();
+        return details.Count == 0 ? text : text + " [" + string.Join("; ", details) + "]";
     }
 
     private static IList<ProviderDoctorFinding> CollapseNoisyProviderFindings(string tableId, IEnumerable<ProviderDoctorFinding> findings)

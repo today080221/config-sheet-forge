@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 #if !UNITY_5_3_OR_NEWER
 using System.IO;
 using System.IO.Compression;
@@ -187,7 +188,10 @@ namespace ConfigSheetForge.Core
             AddDiffs(report, "online-read", comparableOnline, "semantic-normalize", comparableNormalized);
             if (report.DiffSummary.Count == 0)
             {
-                report.DiffSummary.Add("三方 hash 不一致，但没有定位到具体单元格差异。请检查 schema、隐藏格式或导出结构。");
+                report.DiffSummary.Add("三方 hash 不一致，但差异定位为空；这是诊断缺口。shape: " +
+                                       DescribeShape("online-read", comparableOnline, report.OnlineHash) + " | " +
+                                       DescribeShape("exported-xlsx", comparableExported, report.ExportedXlsxHash) + " | " +
+                                       DescribeShape("semantic-normalize", comparableNormalized, report.NormalizedHash));
             }
 
             return report;
@@ -223,6 +227,7 @@ namespace ConfigSheetForge.Core
 
         private static void AddDiffs(TriangulationReport report, string leftName, WorkbookDocument left, string rightName, WorkbookDocument right)
         {
+            var matchedRightSheets = new HashSet<SheetDocument>();
             for (var sheetIndex = 0; sheetIndex < left.Sheets.Count; sheetIndex++)
             {
                 var sheet = left.Sheets[sheetIndex];
@@ -236,11 +241,20 @@ namespace ConfigSheetForge.Core
                     continue;
                 }
 
+                matchedRightSheets.Add(rightSheet);
                 foreach (var column in sheet.Columns)
                 {
                     if (!rightSheet.Columns.Any(c => string.Equals(c.Key, column.Key, StringComparison.OrdinalIgnoreCase)))
                     {
                         Add(report, sheetLabel + " 缺少列：" + column.Key + "（" + rightName + "）。");
+                    }
+                }
+
+                foreach (var column in rightSheet.Columns)
+                {
+                    if (!sheet.Columns.Any(c => string.Equals(c.Key, column.Key, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Add(report, sheetLabel + " 在 " + rightName + " 中多出列：" + column.Key + "。");
                     }
                 }
 
@@ -263,6 +277,31 @@ namespace ConfigSheetForge.Core
                             Add(report, sheetLabel + " 行 “" + row.StableId + "” 列 “" + cell.Key + "” 在 " + leftName + " 与 " + rightName + " 中不一致。");
                         }
                     }
+
+                    foreach (var rightCell in rightRow.Cells)
+                    {
+                        if (!row.Cells.ContainsKey(rightCell.Key))
+                        {
+                            Add(report, sheetLabel + " 行 “" + row.StableId + "” 在 " + rightName + " 中多出单元格列 “" + rightCell.Key + "”。");
+                        }
+                    }
+                }
+
+                foreach (var rightRow in rightSheet.Rows)
+                {
+                    if (!sheet.Rows.Any(r => string.Equals(r.StableId, rightRow.StableId, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Add(report, sheetLabel + " 在 " + rightName + " 中多出行：" + rightRow.StableId + "。");
+                    }
+                }
+            }
+
+            foreach (var rightSheet in right.Sheets)
+            {
+                if (!matchedRightSheets.Contains(rightSheet))
+                {
+                    var sheetLabel = rightSheet.Metadata.TryGetValue("triangulationOriginalName", out var originalName) ? originalName : rightSheet.Name;
+                    Add(report, rightName + " 多出工作表 “" + sheetLabel + "”。");
                 }
             }
         }
@@ -286,6 +325,32 @@ namespace ConfigSheetForge.Core
             }
 
             return "";
+        }
+
+        private static string DescribeShape(string name, WorkbookDocument workbook, string hash)
+        {
+            var builder = new StringBuilder();
+            builder.Append(name).Append(" hash=").Append(hash).Append(" sheets=").Append(workbook.Sheets.Count.ToString(CultureInfo.InvariantCulture));
+            for (var i = 0; i < workbook.Sheets.Count && i < 3; i++)
+            {
+                var sheet = workbook.Sheets[i];
+                var sheetLabel = sheet.Metadata.TryGetValue("triangulationOriginalName", out var originalName) ? originalName : FirstNonEmpty(sheet.Name, sheet.Id, "sheet-" + i.ToString(CultureInfo.InvariantCulture));
+                var range = FirstNonEmpty(GetMetadata(workbook.Metadata, "larkFinalRange"), GetMetadata(sheet.Metadata, "larkFinalRange"), GetMetadata(sheet.Metadata, "xlsxRange"), GetMetadata(workbook.Metadata, "xlsxRange"), "(range unknown)");
+                builder.Append(" [").Append(sheetLabel)
+                    .Append(" rows=").Append(sheet.Rows.Count.ToString(CultureInfo.InvariantCulture))
+                    .Append(" cols=").Append(sheet.Columns.Count.ToString(CultureInfo.InvariantCulture))
+                    .Append(" stableIds=").Append(sheet.Rows.Select(r => r.StableId).Where(v => !string.IsNullOrWhiteSpace(v)).Distinct(StringComparer.OrdinalIgnoreCase).Count().ToString(CultureInfo.InvariantCulture))
+                    .Append(" range=").Append(range)
+                    .Append(" columns=").Append(string.Join(",", sheet.Columns.Select(c => c.Key).Where(k => !string.IsNullOrWhiteSpace(k)).Take(12)))
+                    .Append("]");
+            }
+
+            return builder.ToString();
+        }
+
+        private static string GetMetadata(IDictionary<string, string> metadata, string key)
+        {
+            return metadata != null && metadata.TryGetValue(key, out var value) ? value : "";
         }
     }
 

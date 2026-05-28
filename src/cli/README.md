@@ -33,7 +33,7 @@ dry-run 只生成 planned actions 和中文可读失败原因。apply 需要 `--
 
 `sync-cache` 在 contract/manifest 配置了 Base 注册中心时，会从 live BranchBindings 与 ConfigSheets hydrate 当前 Git branch/profile 的在线表定位。dry-run 会读取在线 Sheet、临时导出 xlsx、做三方一致性和 hash gate，并输出 `cacheStatus`；apply 才会在确认后写正式本地 cache。
 
-从 v0.4.24 开始，Lark provider 不再依赖 no-range `sheets +read`。如果没有显式 range，会优先从临时导出的 xlsx 或 Sheet 元数据构造 `sheetId!A1:<col><row>`；遇到 Feishu `90202 wrong startRange` 会自动 retry，并把 attemptedRange、retryRange、sheetId 和脱敏 token 写进 diagnostics。
+从 v0.4.25 开始，Lark provider 不再依赖 no-range `sheets +read`。如果没有显式 range，会优先从临时导出的 xlsx 实际 `sheetData` 或 Sheet 元数据构造 `sheetId!A1:<col><row>`；遇到 Feishu `90202 wrong startRange` 会自动 retry，并把 attemptedRange、retryRange、finalRange、sheetId、脱敏 token、online rows/cols 和 xlsx rows/cols 写进 diagnostics。
 
 ```bash
 config-sheet-forge registry-status --manifest <project-config-or-contract> --details

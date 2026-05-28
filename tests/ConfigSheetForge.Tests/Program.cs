@@ -78,7 +78,10 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("sheet write ranges support columns past z", () => RunSync(SheetWriteRangeSupportsColumnsPastZ)),
     ("portable subset blocks unsupported structures", () => RunSync(PortableSubsetBlocksUnsupportedStructures)),
     ("triangulation passes and fails with readable diffs", () => RunSync(TriangulationPassesAndFailsWithReadableDiffs)),
+    ("triangulation reports right-side extra shape", () => RunSync(TriangulationReportsRightSideExtraShape)),
+    ("xlsx dimension a1 uses sheet data used range", () => RunSync(XlsxDimensionA1UsesSheetDataUsedRange)),
     ("lark read wrong startRange retries explicit range", LarkReadWrongStartRangeRetriesExplicitRange),
+    ("lark read uses xlsx sheet data range when dimension is stale", LarkReadUsesXlsxSheetDataRangeWhenDimensionIsStale),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
     ("seed lifecycle rejects user fallback", SeedLifecycleRejectsUserFallback),
@@ -2598,6 +2601,56 @@ static void TriangulationPassesAndFailsWithReadableDiffs()
     AssertTrue(fail.DiffSummary.Any(d => d.Contains("item_sword") && d.Contains("power")), "Diff should identify the changed row and column.");
 }
 
+static void TriangulationReportsRightSideExtraShape()
+{
+    var online = SampleWorkbook();
+    var exported = SampleWorkbook();
+    exported.Sheets[0].Columns.Add(new ColumnDefinition { Key = "bonus", DisplayName = "bonus", ValueKind = "string" });
+    exported.Sheets[0].Rows[0].Cells["bonus"] = new CellValue { ValueKind = "string", RawText = "extra", NormalizedText = "extra" };
+    exported.Sheets[0].Rows.Add(new RowDocument
+    {
+        StableId = "item_extra",
+        SourceIndex = 99,
+        Cells =
+        {
+            ["id"] = new CellValue { ValueKind = "string", RawText = "item_extra", NormalizedText = "item_extra" },
+            ["name"] = new CellValue { ValueKind = "string", RawText = "Extra", NormalizedText = "Extra" },
+            ["power"] = new CellValue { ValueKind = "integer", RawText = "1", NormalizedText = "1" }
+        }
+    });
+
+    var fail = SemanticTriangulator.Compare(online, exported, SemanticTriangulator.Normalize(online));
+
+    AssertTrue(!fail.Passed, "Right-side extra columns/rows should fail triangulation.");
+    AssertTrue(fail.DiffSummary.Any(d => d.Contains("多出列") && d.Contains("bonus")), "Diff should report columns that only exist in exported-xlsx.");
+    AssertTrue(fail.DiffSummary.Any(d => d.Contains("多出行") && d.Contains("item_extra")), "Diff should report rows that only exist in exported-xlsx.");
+}
+
+static void XlsxDimensionA1UsesSheetDataUsedRange()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-xlsx-dim-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var xlsx = Path.Combine(temp, "BuffData.xlsx");
+        CreateMinimalXlsx(xlsx, withMergedCells: false, dimensionRef: "A1");
+        var method = typeof(LarkCliWorkbookProvider).GetMethod("TryReadXlsxDimensions", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        AssertTrue(method != null, "Expected private TryReadXlsxDimensions helper.");
+        var parameters = new object[] { xlsx, 0, 0 };
+        var ok = (bool)method!.Invoke(null, parameters)!;
+        AssertTrue(ok, "Dimension helper should read xlsx dimensions.");
+        AssertEqual("2", parameters[1].ToString() ?? "", "A stale A1 dimension should be expanded from sheetData rows.");
+        AssertEqual("2", parameters[2].ToString() ?? "", "A stale A1 dimension should be expanded from sheetData columns.");
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
 static async Task LarkReadWrongStartRangeRetriesExplicitRange()
 {
     if (!OperatingSystem.IsWindows())
@@ -2658,6 +2711,83 @@ static async Task LarkReadWrongStartRangeRetriesExplicitRange()
 static string EscapePowerShellSingleQuoted(string value)
 {
     return (value ?? "").Replace("'", "''");
+}
+
+static async Task LarkReadUsesXlsxSheetDataRangeWhenDimensionIsStale()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-lark-stale-dimension-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    var sourceXlsx = Path.Combine(temp, "source.xlsx");
+    CreateMinimalXlsx(sourceXlsx, withMergedCells: false, dimensionRef: "A1");
+    var log = Path.Combine(temp, "calls.log");
+    var script = Path.Combine(temp, "lark-cli.ps1");
+    await File.WriteAllTextAsync(script,
+        "$ErrorActionPreference = 'Continue'\n" +
+        "$log = '" + EscapePowerShellSingleQuoted(log) + "'\n" +
+        "$source = '" + EscapePowerShellSingleQuoted(sourceXlsx) + "'\n" +
+        "Add-Content -LiteralPath $log -Value ($args -join ' ')\n" +
+        "if ($args -contains 'doctor') { exit 0 }\n" +
+        "if ($args -contains '+export') {\n" +
+        "  $i = [array]::IndexOf($args, '--output-path')\n" +
+        "  $out = $args[$i + 1]\n" +
+        "  $parent = Split-Path -Parent $out\n" +
+        "  if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }\n" +
+        "  Copy-Item -LiteralPath $source -Destination $out -Force\n" +
+        "  Write-Output '{\"ok\":true}'\n" +
+        "  exit 0\n" +
+        "}\n" +
+        "if ($args -contains '+read') {\n" +
+        "  $i = [array]::IndexOf($args, '--range')\n" +
+        "  if ($i -lt 0) { Write-Error 'range required'; exit 3 }\n" +
+        "  $range = $args[$i + 1]\n" +
+        "  if ($range -ne 'f83835!A1:B2') { Write-Error ('unexpected range ' + $range); exit 4 }\n" +
+        "  Write-Output '{\"data\":{\"values\":[[\"id\",\"name\"],[\"item_001\",\"Sword\"]]}}'\n" +
+        "  exit 0\n" +
+        "}\n" +
+        "Write-Output '{}'\n" +
+        "exit 0\n");
+
+    try
+    {
+        var provider = new LarkCliWorkbookProvider();
+        var context = new ProviderContext { WorkspaceRoot = temp };
+        context.Settings["larkCliPath"] = script;
+        context.Settings["larkCliIdentity"] = "bot";
+        var result = await provider.ExportAsync(context, new ProviderExportRequest
+        {
+            SpreadsheetTokenOrUrl = "TCkxsBImChmzXTt5HnEcOYOSnqf",
+            TableId = "BuffData",
+            SheetId = "f83835",
+            CacheDirectory = Path.Combine(temp, "cache")
+        }, CancellationToken.None);
+
+        AssertTrue(result.Workbook != null, "Provider should import online read workbook.");
+        AssertTrue(!result.Findings.Any(f => f.Severity == FindingSeverity.Error), "Stale xlsx dimension should not block provider read.");
+        AssertTrue(result.Findings.Any(f => f.Code == "lark.read_range" && f.Details.TryGetValue("finalRange", out var range) && range == "f83835!A1:B2"), "Read diagnostics should expose the corrected final range.");
+        AssertTrue(result.Findings.Any(f => f.Code == "lark.read_range" && f.Details.TryGetValue("xlsxCellRows", out var rows) && rows == "2"), "Read diagnostics should expose xlsx sheetData row count.");
+        var xlsxImport = XlsxWorkbookReader.Import(sourceXlsx, new MatrixWorkbookImportOptions
+        {
+            ProviderId = "xlsx",
+            SourceId = sourceXlsx,
+            SourceTitle = "BuffData",
+            SheetId = "f83835",
+            SheetName = "BuffData"
+        });
+        var triangulation = SemanticTriangulator.Compare(result.Workbook, xlsxImport.Workbook, SemanticTriangulator.Normalize(result.Workbook));
+        AssertTrue(triangulation.Passed, "Complete online-read and exported-xlsx should triangulate even when xlsx dimension is stale A1.");
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
 }
 
 static async Task SyncLocalInputDoesNotRewriteUnchangedCache()
@@ -3021,7 +3151,7 @@ static LifecycleContractRequest SampleTargetBootstrapRequest(bool dryRun)
     };
 }
 
-static void CreateMinimalXlsx(string path, bool withMergedCells)
+static void CreateMinimalXlsx(string path, bool withMergedCells, string dimensionRef = "")
 {
     using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
     AddZipText(archive, "[Content_Types].xml",
@@ -3059,10 +3189,12 @@ static void CreateMinimalXlsx(string path, bool withMergedCells)
         """);
 
     var merge = withMergedCells ? "<mergeCells count=\"1\"><mergeCell ref=\"B2:C2\"/></mergeCells>" : "";
+    var dimension = string.IsNullOrWhiteSpace(dimensionRef) ? "" : "<dimension ref=\"" + dimensionRef + "\"/>";
     AddZipText(archive, "xl/worksheets/sheet1.xml",
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        """ + dimension + """
           <sheetData>
             <row r="1">
               <c r="A1" t="inlineStr"><is><t>id</t></is></c>

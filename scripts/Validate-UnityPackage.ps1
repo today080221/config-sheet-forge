@@ -317,6 +317,12 @@ foreach ($requiredV424Marker in @("lark.read_retry_success", "BuildDefaultReadRa
   }
 }
 
+foreach ($requiredV425Marker in @("TryReadXlsxDimensionInfo", "xlsxCellRows", "finalRange", "triangulation reports right-side extra shape", "xlsx dimension a1 uses sheet data used range", "lark read uses xlsx sheet data range when dimension is stale", "多出列", "多出行")) {
+  if (($coreContracts + "`n" + $cliProgram + "`n" + $window + "`n" + $larkProvider + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV425Marker*") {
+    throw "Unity v0.4.25 stale-dimension/triangulation marker is missing: $requiredV425Marker"
+  }
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

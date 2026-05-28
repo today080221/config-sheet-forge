@@ -10,7 +10,7 @@
 
 从 0.4.23 开始，Unity 状态页把 Feishu Base 注册中心当作 live locator 的 Source of Truth。`ProjectSettings/*ConfigSheetForge*.json` 可以只保存表 ID、分支/profile 规则、路径和治理配置，不需要保存每张表的 `SpreadsheetToken` / `SheetId`。窗口会后台运行只读 `registry-status`，用 BranchBindings + ConfigSheets 判断“当前分支是否已登记在线表”。
 
-从 0.4.24 开始，`sync-cache` 读取在线 Sheet 时不再依赖 `sheets +read` 的无范围默认读取。Lark provider 会构造显式 A1 范围，遇到 `90202 wrong startRange` 会自动 retry，并把 attemptedRange、retryRange、sheetId 和脱敏 token 写进诊断，避免把范围问题误报成权限问题。
+从 0.4.25 开始，`sync-cache` 读取在线 Sheet 时不再依赖 `sheets +read` 的无范围默认读取，也不会盲信飞书导出 xlsx 里的错误 `dimension ref=A1`。Lark provider 会扫描实际 `sheetData` 构造显式 A1 范围，遇到 `90202 wrong startRange` 会自动 retry，并把 attemptedRange、retryRange、finalRange、sheetId、脱敏 token、online rows/cols 和 xlsx rows/cols 写进诊断，避免把范围/形状问题误报成权限问题。
 
 窗口包含：
 
@@ -207,7 +207,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.24
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.25
 ```
 
 ## 测试

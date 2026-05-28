@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.25
+
+- 修复飞书导出的 xlsx `dimension ref=A1` 但 `sheetData` 实际有多行多列时，`sync-cache` 误用 `A1:A1` 读取在线表的问题；used range 现在会扫描实际 `c/@r` 并与 dimension 取更大范围。
+- `sync-cache` dry-run 的 Lark 读取诊断会记录 attemptedRange、retryRange、finalRange、online rows/cols、xlsx dimension rows/cols 与 sheetData rows/cols，便于定位范围和形状问题。
+- 三方一致性比较改为双向 diff：`exported-xlsx` 或 `semantic-normalize` 多出来的列、行、单元格也会报告具体差异，不再出现 hash 不一致但没有可定位 diff 的空诊断。
+- 若未来仍出现 hash mismatch 且 diff 为空，报告会输出三路 shape metadata（hash、sheet rows/cols、column keys、stableId 数量、range），便于继续排查。
+- 测试覆盖 stale xlsx dimension、完整在线读取与导出 xlsx 三方通过、右侧多列/多行 diff，以及既有 `90202 wrong startRange` retry。
+
 ## 0.4.24
 
 - 修复 Lark provider 在 `Range` 为空时依赖 `sheets +read` no-range 默认行为的问题：现在会优先从导出的 xlsx 推导显式 `sheetId!A1:<col><row>`，导出不可用时读取 `sheets +info` 的 grid 信息；遇到 `90202 wrong startRange` 会自动改用显式范围重试。

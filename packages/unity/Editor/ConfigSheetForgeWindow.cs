@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.24";
+        private const string PackageVersion = "v0.4.25";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;

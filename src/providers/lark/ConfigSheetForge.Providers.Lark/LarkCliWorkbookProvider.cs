@@ -180,6 +180,8 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         result.Workbook.ProviderId = Id;
         result.Workbook.SourceId = source;
         result.Workbook.Revision = DateTimeOffset.UtcNow.ToString("O");
+        StampReadDiagnostics(result.Workbook, read);
+        result.Findings.Add(BuildReadSuccessFinding(request, source, read, result.Workbook));
         foreach (var finding in import.Report.Findings)
         {
             result.Findings.Add(ToProviderFinding(finding));
@@ -211,15 +213,26 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
 
     private static async Task<LarkReadAttempt> TryReadValuesAsync(LarkCliGateway gateway, ProviderContext context, string source, ProviderExportRequest request, string exportedXlsxPath, CancellationToken cancellationToken)
     {
+        var hasXlsxInfo = TryReadXlsxDimensionInfo(exportedXlsxPath, out var xlsxInfo);
+        var xlsxRange = hasXlsxInfo && !string.IsNullOrWhiteSpace(request.SheetId)
+            ? BuildA1Range(request.SheetId, xlsxInfo.Rows, xlsxInfo.Columns)
+            : "";
         var explicitRange = FirstNonEmpty(
             request.Range,
-            TryBuildRangeFromXlsx(exportedXlsxPath, request),
+            xlsxRange,
             await TryBuildRangeFromSheetInfoAsync(gateway, context, source, request, cancellationToken).ConfigureAwait(false));
         var initial = await RunReadAsync(gateway, context, source, request, explicitRange, cancellationToken).ConfigureAwait(false);
         var attempt = new LarkReadAttempt
         {
             Result = initial,
-            AttemptedRange = explicitRange
+            AttemptedRange = explicitRange,
+            FinalRange = explicitRange,
+            XlsxRows = hasXlsxInfo ? xlsxInfo.Rows : 0,
+            XlsxColumns = hasXlsxInfo ? xlsxInfo.Columns : 0,
+            XlsxDimensionRows = hasXlsxInfo ? xlsxInfo.DimensionRows : 0,
+            XlsxDimensionColumns = hasXlsxInfo ? xlsxInfo.DimensionColumns : 0,
+            XlsxCellRows = hasXlsxInfo ? xlsxInfo.CellRows : 0,
+            XlsxCellColumns = hasXlsxInfo ? xlsxInfo.CellColumns : 0
         };
 
         if (initial.Success)
@@ -249,6 +262,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         attempt.RetryRange = retryRange;
         var retry = await RunReadAsync(gateway, context, source, request, retryRange, cancellationToken).ConfigureAwait(false);
         attempt.Result = retry;
+        attempt.FinalRange = retryRange;
         if (retry.Success)
         {
             var finding = Finding(FindingSeverity.Info, "lark.read_retry_success", "首次读取在线 Sheet 返回 wrong startRange，已自动改用显式 A1 范围重试成功。");
@@ -314,18 +328,38 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
             return "";
         }
 
-        if (!TryReadXlsxDimensions(exportedXlsxPath, out var rows, out var columns))
+        if (!TryReadXlsxDimensionInfo(exportedXlsxPath, out var info))
         {
             return "";
         }
 
-        return BuildA1Range(request.SheetId, rows, columns);
+        return BuildA1Range(request.SheetId, info.Rows, info.Columns);
     }
 
     private static bool TryReadXlsxDimensions(string path, out int rows, out int columns)
     {
+        if (TryReadXlsxDimensionInfo(path, out var info))
+        {
+            rows = info.Rows;
+            columns = info.Columns;
+            return true;
+        }
+
         rows = 0;
         columns = 0;
+        return false;
+    }
+
+    private static bool TryReadXlsxDimensionInfo(string path, out XlsxDimensionInfo info)
+    {
+        info = new XlsxDimensionInfo();
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return false;
+        }
+
+        var rows = 0;
+        var columns = 0;
         try
         {
             using var archive = ZipFile.OpenRead(path);
@@ -345,26 +379,42 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
 
             var dimension = root.Element(SpreadsheetNs + "dimension");
             var reference = (string?)dimension?.Attribute("ref") ?? "";
-            if (TryParseDimension(reference, out rows, out columns))
-            {
-                return true;
-            }
+            TryParseDimension(reference, out var dimensionRows, out var dimensionColumns);
+            var cellRows = 0;
+            var cellColumns = 0;
 
             foreach (var cell in root.Descendants(SpreadsheetNs + "c"))
             {
                 var position = ParseA1((string?)cell.Attribute("r") ?? "");
-                if (position.Row > rows)
+                if (position.Row > cellRows)
                 {
-                    rows = position.Row;
+                    cellRows = position.Row;
                 }
 
-                if (position.Column > columns)
+                if (position.Column > cellColumns)
                 {
-                    columns = position.Column;
+                    cellColumns = position.Column;
                 }
             }
 
-            return rows > 0 && columns > 0;
+            rows = Math.Max(dimensionRows, cellRows);
+            columns = Math.Max(dimensionColumns, cellColumns);
+            if (rows <= 0 || columns <= 0)
+            {
+                return false;
+            }
+
+            info = new XlsxDimensionInfo
+            {
+                Rows = rows,
+                Columns = columns,
+                DimensionRows = dimensionRows,
+                DimensionColumns = dimensionColumns,
+                CellRows = cellRows,
+                CellColumns = cellColumns,
+                DimensionReference = reference
+            };
+            return true;
         }
         catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is InvalidDataException)
         {
@@ -603,6 +653,24 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         return finding;
     }
 
+    private static ProviderDoctorFinding BuildReadSuccessFinding(ProviderExportRequest request, string source, LarkReadAttempt read, WorkbookDocument workbook)
+    {
+        var finding = Finding(FindingSeverity.Info, "lark.read_range", string.IsNullOrWhiteSpace(read.FinalRange)
+            ? "已读取在线 Sheet；本次没有显式 A1 范围。"
+            : "已使用显式 A1 范围读取在线 Sheet。");
+        AddReadAttemptDetails(finding, request, source, read, read.Result);
+        var shape = FirstSheetShape(workbook);
+        finding.Details["onlineRows"] = shape.Rows.ToString(CultureInfo.InvariantCulture);
+        finding.Details["onlineColumns"] = shape.Columns.ToString(CultureInfo.InvariantCulture);
+        finding.Details["xlsxRows"] = read.XlsxRows.ToString(CultureInfo.InvariantCulture);
+        finding.Details["xlsxColumns"] = read.XlsxColumns.ToString(CultureInfo.InvariantCulture);
+        finding.Details["xlsxDimensionRows"] = read.XlsxDimensionRows.ToString(CultureInfo.InvariantCulture);
+        finding.Details["xlsxDimensionColumns"] = read.XlsxDimensionColumns.ToString(CultureInfo.InvariantCulture);
+        finding.Details["xlsxCellRows"] = read.XlsxCellRows.ToString(CultureInfo.InvariantCulture);
+        finding.Details["xlsxCellColumns"] = read.XlsxCellColumns.ToString(CultureInfo.InvariantCulture);
+        return finding;
+    }
+
     private static void AddReadAttemptDetails(ProviderDoctorFinding finding, ProviderExportRequest request, string source, LarkReadAttempt read, LarkCliResult larkResult)
     {
         finding.Details["tableId"] = request.TableId;
@@ -610,9 +678,38 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         finding.Details["sheetId"] = request.SheetId;
         finding.Details["attemptedRange"] = FirstNonEmpty(read.AttemptedRange, "(none)");
         finding.Details["retryRange"] = FirstNonEmpty(read.RetryRange, "(none)");
+        finding.Details["finalRange"] = FirstNonEmpty(read.FinalRange, "(none)");
         finding.Details["retrySucceeded"] = (!string.IsNullOrWhiteSpace(read.RetryRange) && read.Result.Success).ToString().ToLowerInvariant();
         finding.Details["larkErrorCode"] = ExtractLarkErrorCode(larkResult);
         finding.Details["larkErrorMessage"] = ExtractLarkErrorMessage(larkResult);
+    }
+
+    private static void StampReadDiagnostics(WorkbookDocument workbook, LarkReadAttempt read)
+    {
+        if (workbook == null)
+        {
+            return;
+        }
+
+        workbook.Metadata["larkAttemptedRange"] = FirstNonEmpty(read.AttemptedRange, "(none)");
+        workbook.Metadata["larkRetryRange"] = FirstNonEmpty(read.RetryRange, "(none)");
+        workbook.Metadata["larkFinalRange"] = FirstNonEmpty(read.FinalRange, "(none)");
+        workbook.Metadata["xlsxRows"] = read.XlsxRows.ToString(CultureInfo.InvariantCulture);
+        workbook.Metadata["xlsxColumns"] = read.XlsxColumns.ToString(CultureInfo.InvariantCulture);
+        workbook.Metadata["xlsxDimensionRows"] = read.XlsxDimensionRows.ToString(CultureInfo.InvariantCulture);
+        workbook.Metadata["xlsxDimensionColumns"] = read.XlsxDimensionColumns.ToString(CultureInfo.InvariantCulture);
+        workbook.Metadata["xlsxCellRows"] = read.XlsxCellRows.ToString(CultureInfo.InvariantCulture);
+        workbook.Metadata["xlsxCellColumns"] = read.XlsxCellColumns.ToString(CultureInfo.InvariantCulture);
+        foreach (var sheet in workbook.Sheets)
+        {
+            sheet.Metadata["larkFinalRange"] = FirstNonEmpty(read.FinalRange, "(none)");
+        }
+    }
+
+    private static (int Rows, int Columns) FirstSheetShape(WorkbookDocument workbook)
+    {
+        var sheet = workbook != null ? workbook.Sheets.FirstOrDefault() : null;
+        return sheet == null ? (0, 0) : (sheet.Rows.Count, sheet.Columns.Count);
     }
 
     private static string ExtractLarkErrorCode(LarkCliResult result)
@@ -1227,8 +1324,26 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         public LarkCliResult Result { get; set; } = new LarkCliResult(-1, "", "", "", new LarkCliResolvedCommand("", Array.Empty<string>(), "", ""));
         public string AttemptedRange { get; set; } = "";
         public string RetryRange { get; set; } = "";
+        public string FinalRange { get; set; } = "";
+        public int XlsxRows { get; set; }
+        public int XlsxColumns { get; set; }
+        public int XlsxDimensionRows { get; set; }
+        public int XlsxDimensionColumns { get; set; }
+        public int XlsxCellRows { get; set; }
+        public int XlsxCellColumns { get; set; }
         public List<ProviderDoctorFinding> Findings { get; } = new List<ProviderDoctorFinding>();
         public bool Success => Result.Success;
+    }
+
+    private sealed class XlsxDimensionInfo
+    {
+        public int Rows { get; set; }
+        public int Columns { get; set; }
+        public int DimensionRows { get; set; }
+        public int DimensionColumns { get; set; }
+        public int CellRows { get; set; }
+        public int CellColumns { get; set; }
+        public string DimensionReference { get; set; } = "";
     }
 
     private readonly struct CellPosition
