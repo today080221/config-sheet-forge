@@ -158,5 +158,20 @@ namespace ConfigSheetForge.Unity.Editor.Tests
             Assert.That(windowSource, Does.Contain("不会写旧 Excel/"));
             Assert.That(asmdef, Does.Not.Contain("GreatClock.ExcelToScriptableObject.Editor"));
         }
+
+        [Test]
+        public void DesktopBridgeSupportsExplicitInstallFlow()
+        {
+            var bridgeSource = File.ReadAllText("Packages/dev.config-sheet-forge.unity/Editor/ConfigSheetForgeBridgeWindow.cs");
+
+            Assert.That(bridgeSource, Does.Contain("安装 Desktop"));
+            Assert.That(bridgeSource, Does.Contain("DesktopInstallPathPrefKey"));
+            Assert.That(bridgeSource, Does.Contain("config-sheet-forge-desktop-windows-x64-"));
+            Assert.That(bridgeSource, Does.Contain("sha256 校验失败"));
+            Assert.That(bridgeSource, Does.Contain("不会写仓库文件"));
+            Assert.That(bridgeSource, Does.Contain("EditorPrefs.SetString(DesktopInstallPathPrefKey"));
+            Assert.That(bridgeSource, Does.Contain("CONFIG_SHEET_FORGE_DESKTOP"));
+            Assert.That(bridgeSource, Does.Contain("CONFIG_SHEET_FORGE_ROOT"));
+        }
     }
 }

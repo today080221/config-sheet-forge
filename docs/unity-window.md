@@ -14,6 +14,8 @@
 
 从 0.4.29 开始，默认首页是 Unity thin bridge：最重要的按钮是 `打开 Config Sheet Forge Desktop`。同步、合并、审查、PR gate 这类长任务推荐在 Desktop 里跑；Unity 只保留安装/更新 `SourceOfTruthCache` profile、导入 Unity 配表资产、查看最近结果这些必须或适合在 Editor 内做的动作。旧完整 Unity 工作台还在 `Tools > Config Sheet Forge > Legacy > 完整 Unity 工作台`，只建议在没有 Desktop、CI 调试或救急 fallback 时使用。
 
+从 0.4.31 开始，如果没有安装 Desktop，Unity 窗口会显示 `安装 Desktop`。安装由用户点击触发，不会在 UPM 导入时自动联网；下载后会校验 sha256，并解压到本机用户目录 `%LOCALAPPDATA%/ConfigSheetForge/Desktop/v<version>/`。重启 Unity 后会从 EditorPrefs 找到已安装 Desktop。开发者的 `CONFIG_SHEET_FORGE_DESKTOP` / `CONFIG_SHEET_FORGE_ROOT` 源码模式仍在高级区保留。
+
 通常你只需要看三件事：
 
 1. 当前状态是不是正常。

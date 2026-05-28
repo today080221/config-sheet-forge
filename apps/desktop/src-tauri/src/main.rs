@@ -37,6 +37,11 @@ struct CliRunResult {
 }
 
 #[tauri::command]
+fn startup_project_root() -> String {
+    env::args().nth(1).unwrap_or_default()
+}
+
+#[tauri::command]
 fn discover_project(project_root: String) -> Result<ProjectSnapshot, String> {
     let root = resolve_project_root(project_root)?;
     let project_settings = root.join("ProjectSettings");
@@ -104,7 +109,7 @@ fn run_cli(project_root: String, args: Vec<String>) -> Result<CliRunResult, Stri
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![discover_project, doctor_tools, run_cli])
+        .invoke_handler(tauri::generate_handler![startup_project_root, discover_project, doctor_tools, run_cli])
         .run(tauri::generate_context!())
         .expect("error while running Config Sheet Forge desktop");
 }

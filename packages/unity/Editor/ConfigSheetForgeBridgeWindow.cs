@@ -1,6 +1,12 @@
 using System;
+using System.IO.Compression;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
@@ -8,13 +14,22 @@ namespace ConfigSheetForge.Unity.Editor
 {
     public sealed class ConfigSheetForgeBridgeWindow : EditorWindow
     {
-        private const string PackageVersion = "v0.4.30";
+        internal const string PackageVersion = "v0.4.31";
         private const string DesktopPathEnv = "CONFIG_SHEET_FORGE_DESKTOP";
         private const string SourceCheckoutEnv = "CONFIG_SHEET_FORGE_ROOT";
+        private const string DesktopInstallPathPrefKey = "ConfigSheetForge.Desktop.InstallPath";
+        private const string DesktopInstallVersionPrefKey = "ConfigSheetForge.Desktop.InstallVersion";
+        private const string DesktopInstallShaPrefKey = "ConfigSheetForge.Desktop.InstallSha256";
+        private const string DesktopArtifactNamePrefix = "config-sheet-forge-desktop-windows-x64-";
+        internal const string DesktopExecutableName = "ConfigSheetForgeDesktop.exe";
+        private const string ReleaseBaseUrl = "https://github.com/today080221/config-sheet-forge/releases/download/";
         private Vector2 _scroll;
         private string _projectRoot = "";
         private string _projectConfigPath = "";
         private string _recentSummary = "等待操作。";
+        private DesktopDiscovery _desktopDiscovery = DesktopDiscovery.Empty;
+        private DesktopInstallJob _desktopInstallJob;
+        private bool _showDeveloperDesktopOptions;
 
         [MenuItem("Tools/Config Sheet Forge", false, 1000)]
         public static void OpenStatusWindow()
@@ -62,6 +77,45 @@ namespace ConfigSheetForge.Unity.Editor
         {
             titleContent = new GUIContent("Config Sheet Forge");
             RefreshLocalState();
+            RefreshDesktopDiscovery();
+            EditorApplication.update += OnEditorUpdate;
+        }
+
+        private void OnDisable()
+        {
+            EditorApplication.update -= OnEditorUpdate;
+        }
+
+        private void OnEditorUpdate()
+        {
+            if (_desktopInstallJob == null)
+            {
+                return;
+            }
+
+            if (!_desktopInstallJob.IsCompleted)
+            {
+                Repaint();
+                return;
+            }
+
+            var result = _desktopInstallJob.Result;
+            _desktopInstallJob = null;
+            if (result.Success)
+            {
+                EditorPrefs.SetString(DesktopInstallPathPrefKey, result.ExecutablePath);
+                EditorPrefs.SetString(DesktopInstallVersionPrefKey, PackageVersion);
+                EditorPrefs.SetString(DesktopInstallShaPrefKey, result.Sha256);
+                _recentSummary = "Desktop 已安装：" + result.ExecutablePath;
+                RefreshDesktopDiscovery();
+                LaunchDesktop();
+            }
+            else
+            {
+                _recentSummary = result.Message;
+            }
+
+            Repaint();
         }
 
         private void OnGUI()
@@ -97,6 +151,8 @@ namespace ConfigSheetForge.Unity.Editor
             DrawReadonlyRow("项目目录", string.IsNullOrWhiteSpace(_projectRoot) ? "未识别" : _projectRoot);
             DrawReadonlyRow("项目配置", string.IsNullOrWhiteSpace(_projectConfigPath) ? "未找到 ProjectSettings/*ConfigSheetForge*.json" : _projectConfigPath);
             DrawReadonlyRow("UPM", "dev.config-sheet-forge.unity " + PackageVersion);
+            DrawReadonlyRow("Desktop", _desktopDiscovery.StatusText);
+            DrawReadonlyRow("Desktop 版本", _desktopDiscovery.VersionText);
             EditorGUILayout.HelpBox("网络读取、导出 xlsx、三方一致性检查和合并预览会在 Desktop/CLI 后台进程里跑，不再放在 Unity IMGUI 主流程里。", MessageType.Info);
             EditorGUILayout.EndVertical();
         }
@@ -105,12 +161,45 @@ namespace ConfigSheetForge.Unity.Editor
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("推荐入口", EditorStyles.boldLabel);
-            if (GUILayout.Button(new GUIContent("打开 Config Sheet Forge Desktop", "Desktop 是官方主工作台：状态、同步、合并、审查、PR gate 都从这里走。"), GUILayout.Height(34)))
+            var canOpen = _desktopDiscovery.HasRunnableDesktop || _desktopDiscovery.HasSourceMode;
+            using (new EditorGUI.DisabledScope(_desktopInstallJob != null))
             {
-                LaunchDesktop();
+                if (GUILayout.Button(new GUIContent("打开 Config Sheet Forge Desktop", "Desktop 是官方主工作台：状态、同步、合并、审查、PR gate 都从这里走。"), GUILayout.Height(34)))
+                {
+                    LaunchDesktop();
+                }
             }
 
-            EditorGUILayout.LabelField("Desktop 会接收当前 Unity project root；如果未安装 Desktop，可设置 " + DesktopPathEnv + "，或设置 " + SourceCheckoutEnv + " 指向 config-sheet-forge checkout 后用源码模式启动。", EditorStyles.wordWrappedMiniLabel);
+            if (_desktopInstallJob != null)
+            {
+                EditorGUILayout.HelpBox(_desktopInstallJob.StatusText, MessageType.Info);
+            }
+            else if (!canOpen || _desktopDiscovery.NeedsUpdate)
+            {
+                var label = _desktopDiscovery.HasInstalledDesktop ? "更新 Desktop 到 " + PackageVersion : "安装 Desktop " + PackageVersion;
+                EditorGUILayout.HelpBox(_desktopDiscovery.InstallPrompt, MessageType.Warning);
+                if (GUILayout.Button(new GUIContent(label, "下载当前 UPM 版本对应的 Desktop artifact，校验 sha256 后安装到本机用户目录。"), GUILayout.Height(30)))
+                {
+                    ConfirmAndStartDesktopInstall();
+                }
+                EditorGUILayout.LabelField("安装不会改仓库文件、ProjectSettings、Packages 或旧 Excel/。需要联网下载 GitHub Release artifact。", EditorStyles.wordWrappedMiniLabel);
+            }
+            else if (_desktopDiscovery.IsNewerThanPackage)
+            {
+                EditorGUILayout.HelpBox("已安装 Desktop 版本高于当前 UPM，可能不兼容。普通用户建议更新 UPM 或安装同版本 Desktop；程序视图可继续打开。", MessageType.Warning);
+            }
+            else
+            {
+                EditorGUILayout.LabelField("Desktop 会接收当前 Unity project root；推荐 UPM 与 Desktop 使用同一个 tag。", EditorStyles.wordWrappedMiniLabel);
+            }
+
+            _showDeveloperDesktopOptions = EditorGUILayout.Foldout(_showDeveloperDesktopOptions, "高级 / 开发者启动方式");
+            if (_showDeveloperDesktopOptions)
+            {
+                EditorGUILayout.HelpBox("开发者可以设置 " + DesktopPathEnv + " 指向本地 Desktop exe，或设置 " + SourceCheckoutEnv + " 指向 config-sheet-forge checkout 后用源码模式启动。普通用户优先使用上面的安装按钮。", MessageType.Info);
+                DrawReadonlyRow("ENV Desktop", FirstNonEmpty(Environment.GetEnvironmentVariable(DesktopPathEnv), "未设置"));
+                DrawReadonlyRow("ENV Source", FirstNonEmpty(Environment.GetEnvironmentVariable(SourceCheckoutEnv), "未设置"));
+            }
             EditorGUILayout.EndVertical();
         }
 
@@ -176,38 +265,64 @@ namespace ConfigSheetForge.Unity.Editor
         private void LaunchDesktop()
         {
             RefreshLocalState();
-            var desktopPath = Environment.GetEnvironmentVariable(DesktopPathEnv) ?? "";
+            RefreshDesktopDiscovery();
             try
             {
-                if (!string.IsNullOrWhiteSpace(desktopPath) && File.Exists(desktopPath))
+                if (_desktopDiscovery.HasRunnableDesktop)
                 {
+                    var desktopPath = _desktopDiscovery.ExecutablePath;
                     StartProcess(desktopPath, new[] { _projectRoot }, Path.GetDirectoryName(desktopPath) ?? _projectRoot, visible: true);
                     _recentSummary = "已启动 Desktop：" + desktopPath;
                     return;
                 }
 
-                var sourceRoot = Environment.GetEnvironmentVariable(SourceCheckoutEnv) ?? "";
-                var desktopPackage = string.IsNullOrWhiteSpace(sourceRoot) ? "" : Path.Combine(sourceRoot, "apps", "desktop", "package.json");
-                if (!string.IsNullOrWhiteSpace(sourceRoot) && File.Exists(desktopPackage))
+                if (_desktopDiscovery.HasSourceMode)
                 {
+                    var desktopPackage = Path.Combine(_desktopDiscovery.SourceRoot, "apps", "desktop", "package.json");
                     var npm = Application.platform == RuntimePlatform.WindowsEditor ? "cmd.exe" : "npm";
                     var args = Application.platform == RuntimePlatform.WindowsEditor
                         ? new[] { "/C", "npm", "run", "tauri", "--", "dev" }
                         : new[] { "run", "tauri", "--", "dev" };
-                    StartProcess(npm, args, Path.GetDirectoryName(desktopPackage) ?? sourceRoot, visible: false);
+                    StartProcess(npm, args, Path.GetDirectoryName(desktopPackage) ?? _desktopDiscovery.SourceRoot, visible: false);
                     _recentSummary = "已用源码模式启动 Desktop。首次启动可能需要编译 Tauri。";
                     return;
                 }
 
-                var message = "没有找到 Config Sheet Forge Desktop。\n\n下一步：\n1. 安装 Desktop 后设置 " + DesktopPathEnv + " 指向可执行文件。\n2. 或设置 " + SourceCheckoutEnv + " 指向 config-sheet-forge checkout，用源码模式启动 apps/desktop。\n\n当前项目：" + _projectRoot;
+                var message = "未安装 Config Sheet Forge Desktop。请点击“安装 Desktop " + PackageVersion + "”。\n\n如果无法联网，可手动下载：\n" + BuildReleaseArtifactUrl() + "\n\n当前项目：" + _projectRoot;
                 _recentSummary = message;
                 EditorUtility.DisplayDialog("需要安装 Desktop", message, "知道了");
             }
             catch (Exception ex)
             {
-                _recentSummary = "无法启动 Desktop：" + ex.Message;
+                _recentSummary = "无法启动 Desktop：" + HumanizeDesktopLaunchException(ex);
                 EditorUtility.DisplayDialog("无法启动 Desktop", _recentSummary, "知道了");
             }
+        }
+
+        private void ConfirmAndStartDesktopInstall()
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+            {
+                _recentSummary = "当前自动安装只支持 Windows x64。macOS / Linux 请先使用开发者源码模式或手动安装。";
+                return;
+            }
+
+            var installDir = BuildDesktopInstallDirectory(PackageVersion);
+            var downloadUrl = BuildReleaseArtifactUrl();
+            var checksumUrl = downloadUrl + ".sha256";
+            var message =
+                "将安装 Config Sheet Forge Desktop " + PackageVersion + "。\n\n" +
+                "下载源：\n" + downloadUrl + "\n\n" +
+                "校验：下载后会读取 sha256 文件并校验 zip。\n\n" +
+                "安装位置：\n" + installDir + "\n\n" +
+                "不会写仓库文件，不改 ProjectSettings，不改 Packages，不写旧 Excel/。";
+            if (!EditorUtility.DisplayDialog("安装/更新 Desktop", message, "下载并安装", "取消"))
+            {
+                return;
+            }
+
+            _desktopInstallJob = DesktopInstallJob.Start(PackageVersion, downloadUrl, checksumUrl, installDir);
+            _recentSummary = "正在下载 Desktop " + PackageVersion + "。";
         }
 
         private static void StartProcess(string executable, string[] args, string workingDirectory, bool visible)
@@ -246,12 +361,389 @@ namespace ConfigSheetForge.Unity.Editor
             _projectConfigPath = ConfigSheetForgeEditorUtility.FindProjectConfigPath(_projectRoot);
         }
 
+        private void RefreshDesktopDiscovery()
+        {
+            _desktopDiscovery = DiscoverDesktop();
+        }
+
+        private static DesktopDiscovery DiscoverDesktop()
+        {
+            var discovery = DesktopDiscovery.Empty;
+            var installedPath = EditorPrefs.GetString(DesktopInstallPathPrefKey, "");
+            var installedVersion = EditorPrefs.GetString(DesktopInstallVersionPrefKey, "");
+            if (!string.IsNullOrWhiteSpace(installedPath) && File.Exists(installedPath))
+            {
+                discovery.ExecutablePath = installedPath;
+                discovery.InstalledVersion = FirstNonEmpty(ReadInstalledDesktopVersion(installedPath), installedVersion);
+                discovery.Source = "已安装";
+                return discovery.WithVersionStatus(PackageVersion);
+            }
+
+            var envPath = Environment.GetEnvironmentVariable(DesktopPathEnv) ?? "";
+            if (!string.IsNullOrWhiteSpace(envPath) && File.Exists(envPath))
+            {
+                discovery.ExecutablePath = envPath;
+                discovery.InstalledVersion = ReadInstalledDesktopVersion(envPath);
+                discovery.Source = DesktopPathEnv;
+                return discovery.WithVersionStatus(PackageVersion);
+            }
+
+            var sourceRoot = Environment.GetEnvironmentVariable(SourceCheckoutEnv) ?? "";
+            var desktopPackage = string.IsNullOrWhiteSpace(sourceRoot) ? "" : Path.Combine(sourceRoot, "apps", "desktop", "package.json");
+            if (!string.IsNullOrWhiteSpace(sourceRoot) && File.Exists(desktopPackage))
+            {
+                discovery.SourceRoot = sourceRoot;
+                discovery.Source = "源码模式";
+                return discovery.WithVersionStatus(PackageVersion);
+            }
+
+            return discovery.WithVersionStatus(PackageVersion);
+        }
+
+        private static string BuildReleaseArtifactUrl()
+        {
+            return ReleaseBaseUrl + PackageVersion + "/" + DesktopArtifactNamePrefix + PackageVersion + ".zip";
+        }
+
+        private static string BuildDesktopInstallDirectory(string version)
+        {
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(localAppData))
+            {
+                localAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "AppData", "Local");
+            }
+
+            return Path.Combine(localAppData, "ConfigSheetForge", "Desktop", version);
+        }
+
+        private static string ReadInstalledDesktopVersion(string executablePath)
+        {
+            try
+            {
+                var versionPath = Path.Combine(Path.GetDirectoryName(executablePath) ?? "", "VERSION.txt");
+                return File.Exists(versionPath) ? File.ReadAllText(versionPath).Trim() : "";
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private static string HumanizeDesktopLaunchException(Exception ex)
+        {
+            var message = ex == null ? "" : ex.Message;
+            if (message.IndexOf("not find", StringComparison.OrdinalIgnoreCase) >= 0 || message.IndexOf("找不到", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "文件不存在或路径失效。请重新安装 Desktop，或在高级模式检查 " + DesktopPathEnv + "。";
+            }
+
+            if (message.IndexOf("access", StringComparison.OrdinalIgnoreCase) >= 0 || message.IndexOf("拒绝", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "系统拒绝启动 Desktop，可能被杀软、权限或企业策略拦截。请检查安装目录权限后重试。原始原因：" + message;
+            }
+
+            if (message.IndexOf("npm", StringComparison.OrdinalIgnoreCase) >= 0 || message.IndexOf("cargo", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "源码模式需要 npm/cargo/Tauri 环境。普通用户建议点击安装 Desktop。原始原因：" + message;
+            }
+
+            if (message.IndexOf("port", StringComparison.OrdinalIgnoreCase) >= 0 || message.IndexOf("端口", StringComparison.OrdinalIgnoreCase) >= 0 || message.IndexOf("address", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "Desktop 启动端口可能被占用。请关闭旧的 Desktop/开发服务器后重试。原始原因：" + message;
+            }
+
+            return message;
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            foreach (var value in values ?? Array.Empty<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return "";
+        }
+
         private static void DrawReadonlyRow(string label, string value)
         {
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField(label, GUILayout.Width(86));
             EditorGUILayout.SelectableLabel(value ?? "", EditorStyles.wordWrappedLabel, GUILayout.MinHeight(18));
             EditorGUILayout.EndHorizontal();
+        }
+    }
+
+    internal sealed class DesktopDiscovery
+    {
+        public static DesktopDiscovery Empty { get { return new DesktopDiscovery(); } }
+
+        public string ExecutablePath = "";
+        public string SourceRoot = "";
+        public string InstalledVersion = "";
+        public string Source = "";
+        public bool NeedsUpdate;
+        public bool IsNewerThanPackage;
+
+        public bool HasRunnableDesktop { get { return !string.IsNullOrWhiteSpace(ExecutablePath) && File.Exists(ExecutablePath); } }
+        public bool HasInstalledDesktop { get { return string.Equals(Source, "已安装", StringComparison.OrdinalIgnoreCase) && HasRunnableDesktop; } }
+        public bool HasSourceMode { get { return !string.IsNullOrWhiteSpace(SourceRoot) && File.Exists(Path.Combine(SourceRoot, "apps", "desktop", "package.json")); } }
+
+        public string StatusText
+        {
+            get
+            {
+                if (HasRunnableDesktop)
+                {
+                    return Source + "：" + ExecutablePath;
+                }
+
+                if (HasSourceMode)
+                {
+                    return "源码模式：" + SourceRoot;
+                }
+
+                return "未安装，点击安装 Desktop";
+            }
+        }
+
+        public string VersionText
+        {
+            get
+            {
+                if (HasSourceMode && !HasRunnableDesktop)
+                {
+                    return "源码模式，版本随 checkout";
+                }
+
+                if (string.IsNullOrWhiteSpace(InstalledVersion))
+                {
+                    return HasRunnableDesktop ? "未知版本，建议安装同 tag Desktop" : "未安装";
+                }
+
+                if (NeedsUpdate)
+                {
+                    return InstalledVersion + "，低于 UPM " + ConfigSheetForgeBridgeWindow.PackageVersion;
+                }
+
+                if (IsNewerThanPackage)
+                {
+                    return InstalledVersion + "，高于 UPM " + ConfigSheetForgeBridgeWindow.PackageVersion;
+                }
+
+                return InstalledVersion + "，与 UPM 匹配";
+            }
+        }
+
+        public string InstallPrompt
+        {
+            get
+            {
+                if (NeedsUpdate)
+                {
+                    return "已安装 Desktop 版本低于当前 UPM。建议更新到同 tag，避免 Desktop/Unity contract 不一致。";
+                }
+
+                return "未安装 Desktop。点击安装后会下载当前 UPM 版本对应的 Windows x64 portable zip，并校验 sha256。";
+            }
+        }
+
+        public DesktopDiscovery WithVersionStatus(string packageVersion)
+        {
+            if (!string.IsNullOrWhiteSpace(InstalledVersion))
+            {
+                var installed = NormalizeVersion(InstalledVersion);
+                var package = NormalizeVersion(packageVersion);
+                var comparison = CompareVersions(installed, package);
+                NeedsUpdate = comparison < 0;
+                IsNewerThanPackage = comparison > 0;
+            }
+
+            return this;
+        }
+
+        private static string NormalizeVersion(string version)
+        {
+            return (version ?? "").Trim().TrimStart('v', 'V');
+        }
+
+        private static int CompareVersions(string a, string b)
+        {
+            Version left;
+            Version right;
+            if (Version.TryParse(a, out left) && Version.TryParse(b, out right))
+            {
+                return left.CompareTo(right);
+            }
+
+            return string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    internal sealed class DesktopInstallJob
+    {
+        private Task<DesktopInstallResult> _task;
+
+        private DesktopInstallJob(Task<DesktopInstallResult> task)
+        {
+            _task = task;
+        }
+
+        public bool IsCompleted { get { return _task.IsCompleted; } }
+        public DesktopInstallResult Result
+        {
+            get
+            {
+                if (!_task.IsCompleted)
+                {
+                    return new DesktopInstallResult { Success = false, Message = StatusText };
+                }
+
+                return _task.Result;
+            }
+        }
+
+        public string StatusText { get; private set; } = "正在准备下载 Desktop...";
+
+        public static DesktopInstallJob Start(string version, string downloadUrl, string checksumUrl, string installDir)
+        {
+            var job = new DesktopInstallJob(null);
+            job._task = Task.Run(() => job.Run(version, downloadUrl, checksumUrl, installDir));
+            return job;
+        }
+
+        private DesktopInstallResult Run(string version, string downloadUrl, string checksumUrl, string installDir)
+        {
+            try
+            {
+                var tempRoot = Path.Combine(Path.GetTempPath(), "ConfigSheetForge", "DesktopInstall", Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(tempRoot);
+                var zipPath = Path.Combine(tempRoot, Path.GetFileName(new Uri(downloadUrl).LocalPath));
+                var checksumPath = zipPath + ".sha256";
+
+                StatusText = "正在下载 checksum...";
+                DownloadFile(checksumUrl, checksumPath);
+                var expectedSha = ParseSha256(File.ReadAllText(checksumPath));
+                if (string.IsNullOrWhiteSpace(expectedSha))
+                {
+                    return DesktopInstallResult.Fail("sha256 文件格式不正确。请手动下载并校验：" + checksumUrl);
+                }
+
+                StatusText = "正在下载 Desktop portable zip...";
+                DownloadFile(downloadUrl, zipPath);
+                StatusText = "正在校验 sha256...";
+                var actualSha = ComputeSha256(zipPath);
+                if (!string.Equals(expectedSha, actualSha, StringComparison.OrdinalIgnoreCase))
+                {
+                    return DesktopInstallResult.Fail("sha256 校验失败，已停止安装。\n期望：" + expectedSha + "\n实际：" + actualSha + "\n请检查网络或手动下载：" + downloadUrl);
+                }
+
+                StatusText = "正在解压 Desktop...";
+                var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (string.IsNullOrWhiteSpace(localAppData))
+                {
+                    localAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "AppData", "Local");
+                }
+
+                var installRoot = Path.GetFullPath(Path.Combine(localAppData, "ConfigSheetForge", "Desktop"));
+                var resolvedInstallDir = Path.GetFullPath(installDir);
+                if (!IsSubPathOf(resolvedInstallDir, installRoot))
+                {
+                    return DesktopInstallResult.Fail("安装路径不在用户本地目录下，已阻断：" + resolvedInstallDir);
+                }
+
+                if (Directory.Exists(resolvedInstallDir))
+                {
+                    Directory.Delete(resolvedInstallDir, true);
+                }
+
+                Directory.CreateDirectory(resolvedInstallDir);
+                ZipFile.ExtractToDirectory(zipPath, resolvedInstallDir);
+                var executable = Directory.GetFiles(resolvedInstallDir, ConfigSheetForgeBridgeWindow.DesktopExecutableName, SearchOption.AllDirectories).FirstOrDefault()
+                                 ?? Directory.GetFiles(resolvedInstallDir, "*.exe", SearchOption.AllDirectories).FirstOrDefault();
+                if (string.IsNullOrWhiteSpace(executable) || !File.Exists(executable))
+                {
+                    return DesktopInstallResult.Fail("安装包里没有找到 Desktop exe。请手动下载检查：" + downloadUrl);
+                }
+
+                File.WriteAllText(Path.Combine(Path.GetDirectoryName(executable) ?? resolvedInstallDir, "VERSION.txt"), version, Encoding.UTF8);
+                return new DesktopInstallResult
+                {
+                    Success = true,
+                    ExecutablePath = executable,
+                    Sha256 = actualSha,
+                    Message = "Desktop 安装完成。"
+                };
+            }
+            catch (WebException ex)
+            {
+                return DesktopInstallResult.Fail("下载 Desktop 失败。请检查网络，或手动下载：\n" + downloadUrl + "\n\n原因：" + ex.Message);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return DesktopInstallResult.Fail("写入安装目录失败，可能被权限或杀软拦截。请检查 %LOCALAPPDATA%/ConfigSheetForge/Desktop。\n原因：" + ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return DesktopInstallResult.Fail("安装 Desktop 失败：" + ex.Message + "\n可手动下载：" + downloadUrl);
+            }
+        }
+
+        private static void DownloadFile(string url, string path)
+        {
+            using (var client = new WebClient())
+            {
+                client.Headers.Add("User-Agent", "ConfigSheetForge-Unity");
+                client.DownloadFile(url, path);
+            }
+        }
+
+        private static string ParseSha256(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return "";
+            }
+
+            var tokens = text.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            return tokens.FirstOrDefault(token => token.Length == 64 && token.All(IsHex)) ?? "";
+        }
+
+        private static bool IsHex(char ch)
+        {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+        }
+
+        private static string ComputeSha256(string path)
+        {
+            using (var stream = File.OpenRead(path))
+            using (var sha = SHA256.Create())
+            {
+                return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+            }
+        }
+
+        private static bool IsSubPathOf(string path, string root)
+        {
+            var normalizedPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var normalizedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return normalizedPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    internal sealed class DesktopInstallResult
+    {
+        public bool Success;
+        public string ExecutablePath = "";
+        public string Sha256 = "";
+        public string Message = "";
+
+        public static DesktopInstallResult Fail(string message)
+        {
+            return new DesktopInstallResult { Success = false, Message = message ?? "" };
         }
     }
 }

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type ProjectSnapshot = {
@@ -134,14 +134,15 @@ export function App() {
     return `${Math.max(0, Math.round((Date.now() - operationStartedAt) / 1000))} 秒`;
   }, [operationStartedAt, activeOperation]);
 
-  const discover = useCallback(async () => {
+  const discover = useCallback(async (overrideRoot?: string) => {
+    const targetRoot = typeof overrideRoot === "string" ? overrideRoot : projectRoot;
     setError("");
     setActiveOperation("识别项目");
     setOperationStartedAt(Date.now());
     try {
       if (!runtimeAvailable) {
         setSnapshot({
-          projectRoot: projectRoot || "K:/Unity/Project",
+          projectRoot: targetRoot || "K:/Unity/Project",
           unityProject: true,
           projectConfigPath: "ProjectSettings/Project.ConfigSheetForge.json",
           projectId: "demo",
@@ -153,7 +154,7 @@ export function App() {
         return;
       }
 
-      const result = await invoke<ProjectSnapshot>("discover_project", { projectRoot });
+      const result = await invoke<ProjectSnapshot>("discover_project", { projectRoot: targetRoot });
       setSnapshot(result);
       const toolChecks = await invoke<ToolCheck[]>("doctor_tools", { projectRoot: result.projectRoot });
       setChecks(toolChecks);
@@ -164,6 +165,23 @@ export function App() {
       setOperationStartedAt(null);
     }
   }, [projectRoot, runtimeAvailable]);
+
+  useEffect(() => {
+    if (!runtimeAvailable || projectRoot) {
+      return;
+    }
+
+    invoke<string>("startup_project_root")
+      .then((root) => {
+        if (root) {
+          setProjectRoot(root);
+          void discover(root);
+        }
+      })
+      .catch(() => {
+        // 启动参数只是便利用途，读取失败时仍允许手动粘贴项目目录。
+      });
+  }, [projectRoot, runtimeAvailable, discover]);
 
   const runOperation = useCallback(async (operation: string) => {
     setError("");
@@ -215,7 +233,7 @@ export function App() {
         </div>
         <div className="top-actions">
           <button className="secondary" onClick={() => runOperation("doctor")}>环境检查</button>
-          <button className="primary" onClick={discover}>识别项目</button>
+          <button className="primary" onClick={() => void discover()}>识别项目</button>
         </div>
       </header>
 

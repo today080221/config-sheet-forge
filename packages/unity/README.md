@@ -26,6 +26,8 @@ Legacy 窗口仍采用任务型 Dashboard：第一次打开会提示“飞书在
 
 从 0.4.30 开始，`安装/更新 SourceOfTruthCache profile` 会镜像现有本地/default ExcelToSO profile：保留 `script_directory`、`asset_directory`、`name_space`、导入选项和 `slaves`，只把主表与 slave 的 `excel_name` 改到 `.config-sheet-forge/excel-cache`。如果没有可镜像的 setting，才使用项目配置里的 `table.scriptDirectory / assetDirectory / namespace` 或 `unityExcelToSo` 默认值；仍缺关键目录或 namespace 时会阻断，避免把 asset 写到 `Assets` 根目录。
 
+从 0.4.31 开始，Unity thin bridge 支持一键安装 Desktop。找不到 Desktop 时，窗口会显示 `安装 Desktop`，点击后下载当前 UPM tag 对应的 Windows x64 portable zip，校验 sha256，并安装到 `%LOCALAPPDATA%/ConfigSheetForge/Desktop/v<version>/`。这个动作只写用户本机目录和 EditorPrefs，不会改仓库、ProjectSettings、Packages 或旧 `Excel/`。开发者仍可在高级区使用 `CONFIG_SHEET_FORGE_DESKTOP` 或 `CONFIG_SHEET_FORGE_ROOT` 源码模式。
+
 Legacy 完整窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。

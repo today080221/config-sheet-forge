@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.31
+
+- Unity thin bridge 新增 Desktop 一键安装/更新入口：找不到 Desktop 时不再只提示环境变量，而是引导下载当前 UPM tag 对应的 Windows x64 portable zip。
+- Desktop 安装会下载 GitHub Release artifact、校验 `.sha256`、解压到 `%LOCALAPPDATA%/ConfigSheetForge/Desktop/v<version>/`，并把 exe 路径写入 EditorPrefs；不会写仓库文件、ProjectSettings、Packages 或旧 `Excel/`。
+- Unity bridge 显示 UPM version、Desktop installed version 和匹配状态；启动顺序为 EditorPrefs 已安装路径、`CONFIG_SHEET_FORGE_DESKTOP`、`CONFIG_SHEET_FORGE_ROOT` 源码模式、安装按钮。
+- 新增 `scripts/Package-DesktopRelease.ps1`，用于发布 Windows Desktop portable zip、`.sha256` 和 manifest；当前仓库 token 缺少 `workflow` scope，自动 release workflow 暂不提交到仓库。
+- Desktop app / Tauri / Cargo 版本与 Unity package 对齐到 0.4.31，并能读取 Unity bridge 传入的 project root 启动参数。
+
 ## 0.4.30
 
 - 修复 Unity thin bridge 的 `安装/更新 SourceOfTruthCache profile`：cache profile 现在优先镜像现有 default/本地 ExcelToSO profile，只把 `excel_name` 改到 `.config-sheet-forge/excel-cache/<TableId>.xlsx`。

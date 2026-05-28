@@ -12,6 +12,8 @@ Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本
 
 从 0.4.29 开始，推荐日常使用官方 Tauri Desktop 工作台，而不是在 Unity IMGUI 里跑完整流程。Unity 默认窗口只做 thin bridge：打开 Desktop、安装/更新 `SourceOfTruthCache` profile、导入 Unity asset、运行/读取 PR gate。旧完整 Unity 工作流保留在 `Tools > Config Sheet Forge > Legacy`，用于没有 Desktop 或救急 fallback。Desktop 使用说明见 [Desktop 工作台](desktop-workbench.md)。
 
+从 0.4.31 开始，Unity thin bridge 可以一键安装 Windows Desktop。未安装时点 `安装 Desktop`，工具会下载当前 UPM tag 对应的 GitHub Release zip、校验 sha256，并安装到本机用户目录；不会改项目文件。没有网络时，窗口会给出手动下载链接。
+
 ## 安装要求
 
 - .NET 8 SDK 或更新版本，用于 CLI。

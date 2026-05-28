@@ -355,6 +355,12 @@ foreach ($requiredV430Marker in @("CloneExcelToSoSettingForCache", "CloneExcelTo
   }
 }
 
+foreach ($requiredV431Marker in @("DesktopInstallPathPrefKey", "config-sheet-forge-desktop-windows-x64-", "sha256 校验失败", "安装 Desktop", "不会写仓库文件", "Package-DesktopRelease.ps1", "ConfigSheetForgeDesktop.exe", "startup_project_root")) {
+  if (($bridgeWindow + "`n" + (Get-Content -Raw packages/unity/Tests/Editor/ConfigSheetForgeEditorUtilityTests.cs) + "`n" + (Get-Content -Raw scripts/Package-DesktopRelease.ps1) + "`n" + (Get-Content -Raw apps/desktop/src-tauri/src/main.rs)) -notlike "*$requiredV431Marker*") {
+    throw "Unity v0.4.31 Desktop distribution marker is missing: $requiredV431Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."
