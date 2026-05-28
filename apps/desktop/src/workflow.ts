@@ -40,6 +40,9 @@ export type ProjectSnapshotLike = {
 
 export type SyncCacheSummaryLike = {
   cacheStatus?: string;
+  previewFingerprint?: string;
+  canApplyCache?: boolean;
+  nextAction?: string;
   tableCount?: number;
   changedTables?: string[];
   missingCacheTables?: string[];
@@ -48,6 +51,17 @@ export type SyncCacheSummaryLike = {
   triangulationFailedCount?: number;
   willWriteFiles?: boolean;
   noChangeKeepsMtime?: boolean;
+  tables?: SyncTableCacheStatusLike[];
+};
+
+export type SyncTableCacheStatusLike = {
+  tableId?: string;
+  displayName?: string;
+  cacheStatus?: string;
+  onlineSemanticHash?: string;
+  localSemanticHash?: string;
+  needsWriteCache?: boolean;
+  blockers?: string[];
 };
 
 export type BranchStatusLike = {
@@ -72,6 +86,9 @@ export type LifecycleResultLike = {
   dryRun?: boolean;
   success?: boolean;
   requestFingerprint?: string;
+  previewFingerprint?: string;
+  canApplyCache?: boolean;
+  nextAction?: string;
   humanReadableFailures?: string[];
   syncCacheSummary?: SyncCacheSummaryLike;
   branchStatus?: BranchStatusLike;
@@ -119,15 +136,16 @@ export type WorkflowDecision = {
   debugHints: string[];
 };
 
-export type FieldType = "string" | "integer" | "number" | "bool" | "date" | "datetime" | "enum" | "json";
+export type FieldType = "string" | "int" | "float" | "bool" | "string[]" | "int[]" | "float[]" | "bool[]";
 
 export type NewTableFieldDraft = {
   key: string;
   displayName: string;
   type: FieldType;
   description: string;
-  enumValues?: string[];
   primary?: boolean;
+  defaultValue?: string;
+  required?: boolean;
 };
 
 export type NewTableDraft = {
@@ -183,6 +201,30 @@ export function getScenario(id: ScenarioId): ScenarioDefinition {
 
 export function normalizeCacheStatus(value: string | undefined): string {
   return (value || "unknown").trim().toLowerCase();
+}
+
+export function syncPreviewFingerprint(result: LifecycleResultLike | null | undefined): string {
+  return result?.previewFingerprint || result?.requestFingerprint || result?.syncCacheSummary?.previewFingerprint || "";
+}
+
+export function syncWritableTableCount(summary: SyncCacheSummaryLike | null | undefined): number {
+  const changed = new Set([...(summary?.changedTables || []), ...(summary?.missingCacheTables || [])].filter(Boolean));
+  for (const table of summary?.tables || []) {
+    if (table?.needsWriteCache && table.tableId) {
+      changed.add(table.tableId);
+    }
+  }
+
+  if (changed.size > 0) {
+    return changed.size;
+  }
+
+  const status = normalizeCacheStatus(summary?.cacheStatus);
+  if ((status === "needsupdate" || status === "missingcache") && (summary?.tableCount || 0) > 0) {
+    return summary?.tableCount || 1;
+  }
+
+  return 0;
 }
 
 export function hasBlockingToolIssue(checks: ToolCheckLike[] | undefined): boolean {
@@ -320,8 +362,9 @@ export function decideSyncImport(state: WorkflowState): WorkflowDecision {
   const summary = preview?.syncCacheSummary;
   const status = normalizeCacheStatus(summary?.cacheStatus);
   const blockedTables = summary?.blockedTables ?? [];
-  const changedCount = (summary?.changedTables?.length ?? 0) + (summary?.missingCacheTables?.length ?? 0);
+  const changedCount = syncWritableTableCount(summary);
   const tableCount = summary?.tableCount ?? 0;
+  const fingerprint = syncPreviewFingerprint(preview);
   const base = baseDecision("sync-import", state);
   const hasPreview = Boolean(preview);
 
@@ -394,8 +437,8 @@ export function decideSyncImport(state: WorkflowState): WorkflowDecision {
       nextStep: "写入本地 cache 后再导入 Unity。",
       primaryLabel: `写入本地 cache（${count} 张）`,
       primaryOperation: "sync-cache-apply",
-      primaryDisabled: !preview?.requestFingerprint,
-      disabledReason: preview?.requestFingerprint ? "" : "缺少同步预览 fingerprint，请重新生成预览。",
+      primaryDisabled: !fingerprint || preview?.syncCacheSummary?.canApplyCache === false,
+      disabledReason: fingerprint ? (preview?.syncCacheSummary?.canApplyCache === false ? "当前预览结果没有允许写 cache，请重新生成完整同步预览。" : "") : "缺少同步预览 fingerprint，请重新生成预览。",
       safety: "只写 .config-sheet-forge/excel-cache 和 .config-sheet-forge/cache，不写旧 Excel/ 或飞书。",
       programSummary: "调用 sync-cache --yes --preview-result <dry-run result>，CLI 会校验同输入预览。",
       steps: syncSteps("apply")
@@ -568,12 +611,8 @@ export function validateNewTableDraft(draft: NewTableDraft): string[] {
       errors.push(`字段 ${field.key || "未命名"} 缺少说明。`);
     }
 
-    if (!["string", "integer", "number", "bool", "date", "datetime", "enum", "json"].includes(field.type)) {
-      errors.push(`字段 ${field.key || "未命名"} 类型不在安全类型列表里。`);
-    }
-
-    if (field.type === "enum" && (field.enumValues || []).filter((value) => value.trim()).length === 0) {
-      errors.push(`枚举字段 ${field.key || "未命名"} 至少需要一个枚举值。`);
+    if (!["string", "int", "float", "bool", "string[]", "int[]", "float[]", "bool[]"].includes(field.type)) {
+      errors.push(`字段 ${field.key || "未命名"} 类型不在 ExcelToSO 支持列表里。`);
     }
 
     if (field.primary) {
@@ -613,7 +652,7 @@ export function summarizeLifecycleResult(result: LifecycleResultLike | PrGateRep
     }
 
     if (status === "needsupdate") {
-      return `同步预览通过，${(summary?.changedTables || []).length || "若干"} 张表需要写入 cache。`;
+      return `同步预览通过，${syncWritableTableCount(summary) || "若干"} 张表需要写入 cache。`;
     }
 
     if (status === "missingcache") {

@@ -542,9 +542,36 @@ button.large {
 
 .field-row {
   display: grid;
-  grid-template-columns: minmax(80px, 0.8fr) minmax(90px, 0.8fr) minmax(98px, 0.7fr) minmax(120px, 1fr) auto;
+  grid-template-columns: minmax(80px, 0.75fr) minmax(90px, 0.75fr) minmax(100px, 0.75fr) minmax(130px, 1fr) minmax(100px, 0.7fr) auto auto minmax(150px, auto);
   gap: 8px;
   align-items: center;
+}
+
+.field-toolbar,
+.field-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.role-hint {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #d9e6f2;
+  border-radius: 9px;
+  background: #f6f9fc;
+  padding: 9px 10px;
+}
+
+.role-hint span {
+  color: #556779;
+  line-height: 1.45;
+}
+
+.icon-button {
+  min-width: 32px;
+  padding: 6px 8px;
 }
 
 .inline-check {
@@ -703,6 +730,54 @@ button.large {
   display: grid;
   gap: 8px;
   margin-top: 10px;
+}
+
+.result-details {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.sync-table-summary {
+  display: grid;
+  gap: 8px;
+}
+
+.mini-table {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.mini-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid #d7e1ec;
+  border-radius: 8px;
+  padding: 7px 8px;
+}
+
+.mini-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-row span {
+  border-radius: 999px;
+  background: #eef4fa;
+  padding: 3px 7px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mini-row small {
+  grid-column: 1 / -1;
+  color: #8a5a12;
+  overflow-wrap: anywhere;
 }
 
 pre {

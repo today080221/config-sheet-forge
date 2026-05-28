@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.38
+
+- sync-cache result 现在输出可直接驱动工作流的结构化结论：`previewFingerprint`、`canApplyCache`、`nextAction` 和逐表 cache 状态。`cacheStatus=needsUpdate/missingCache` 时会列出需要写入的表，不再出现预览成功后 Desktop 仍说“还没有同步预览”。
+- Desktop 会在启动或重新识别项目后读取 `Temp/ConfigSheetForge/desktop/*.result.json` 恢复最近同步、合并和 PR gate 状态；关闭重开后仍能继续“写入本地 cache / 导入 Unity asset”。
+- 最近结果面板默认只显示一行摘要和下一步按钮；展开后显示表格摘要，完整命令、progress ndjson、stdout/stderr 和 result JSON 仍只在 Debug。
+- Debug 打开时会实时显示后台任务的 progress ndjson 与 stdout/stderr，不再只能等任务结束后看日志。
+- 新建配表页改为更完整的结构化字段编辑器：可添加、删除、移动、复制字段，类型限定为 ExcelToSO 支持 dialect，并用中文解释表负责人和配置负责人。
+- `new-table --dry-run` 现在走 lifecycle preview，不再写旧本地 registry；Desktop 会把结构化字段作为 dry-run 输入传给 CLI。
+
 ## 0.4.37
 
 - 修复 Desktop 在 Windows 下把 `\\?\` 长路径和 `/` 混用后传给 CLI 的 P0 问题。Desktop 现在会把 `--manifest`、`--out`、`--progress`、`--preview-result` 等路径统一规范成普通绝对路径，例如 `N:\UnityProject\Temp\ConfigSheetForge\desktop\sync-cache.result.json`。

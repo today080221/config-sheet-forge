@@ -11,6 +11,8 @@ import {
   secondaryToolActions,
   shouldShowBotSecretForm,
   summarizeLifecycleResult,
+  syncPreviewFingerprint,
+  syncWritableTableCount,
   validateNewTableDraft,
   type FieldType,
   type LifecycleResultLike,
@@ -63,6 +65,7 @@ type TaskSnapshot = CliRunResult & {
   message: string;
   elapsedMs: number;
   progressPath?: string;
+  progressLog?: string;
   pid?: number;
   tableId?: string;
   current?: number;
@@ -100,13 +103,13 @@ const operationLabels: Record<string, string> = {
 
 const fieldTypes: Array<{ value: FieldType; label: string }> = [
   { value: "string", label: "文本" },
-  { value: "integer", label: "整数" },
-  { value: "number", label: "小数" },
+  { value: "int", label: "整数" },
+  { value: "float", label: "小数" },
   { value: "bool", label: "是/否" },
-  { value: "date", label: "日期" },
-  { value: "datetime", label: "日期时间" },
-  { value: "enum", label: "枚举" },
-  { value: "json", label: "JSON" }
+  { value: "string[]", label: "文本列表" },
+  { value: "int[]", label: "整数列表" },
+  { value: "float[]", label: "小数列表" },
+  { value: "bool[]", label: "是/否列表" }
 ];
 
 function isTauriRuntime() {
@@ -190,7 +193,8 @@ function buildCommandArgs(
   snapshot: ProjectSnapshot | null,
   projectRoot: string,
   identityMode: IdentityMode,
-  previewResultPath: string
+  previewResultPath: string,
+  newTable?: NewTableDraft
 ): string[] {
   const manifestArgs = snapshot?.projectConfigPath ? ["--manifest", snapshot.projectConfigPath] : [];
   const fallbackArgs = identityMode === "user-fallback" && isInteractiveSafeFallbackOperation(operation)
@@ -218,7 +222,21 @@ function buildCommandArgs(
     case "bootstrap-current-branch-from-target-dry-run":
       return ["bootstrap-current-branch-from-target", ...manifestArgs, "--dry-run", "--details", ...out("bootstrap-current-branch-from-target"), ...fallbackArgs];
     case "new-table-dry-run":
-      return ["new-table", ...manifestArgs, "--dry-run", "--details", ...out("new-table")];
+      return [
+        "new-table",
+        ...manifestArgs,
+        "--dry-run",
+        "--details",
+        "--id",
+        newTable?.tableId || "",
+        "--name",
+        newTable?.displayName || "",
+        "--owner-role",
+        newTable?.ownerRole || "tableOwner",
+        "--fields-json",
+        JSON.stringify(newTable?.fields || []),
+        ...out("new-table")
+      ];
     default:
       return ["doctor", "--details", ...out("doctor")];
   }
@@ -623,6 +641,41 @@ export function App() {
     }
   }, [projectRoot, snapshot]);
 
+  useEffect(() => {
+    if (!runtimeAvailable || !snapshot?.projectRoot) {
+      return;
+    }
+
+    let canceled = false;
+    const restore = async () => {
+      const entries: Array<[string, string]> = [
+        ["sync-cache", "sync-cache-dry-run"],
+        ["sync-cache-apply", "sync-cache-apply"],
+        ["compare-merge", "compare-merge"],
+        ["pr-gate-report", "pr-gate-report"]
+      ];
+
+      for (const [name, operation] of entries) {
+        try {
+          const result = await invoke<CliRunResult>("read_desktop_result", {
+            projectRoot: snapshot.projectRoot,
+            name
+          });
+          if (!canceled && result.resultJson?.trim()) {
+            applyResult(operation, result);
+          }
+        } catch {
+          // 旧项目没有 result 文件是正常情况，静默跳过即可。
+        }
+      }
+    };
+
+    void restore();
+    return () => {
+      canceled = true;
+    };
+  }, [applyResult, runtimeAvailable, snapshot?.projectRoot]);
+
   const sendUnityBridgeCommand = useCallback(async (operation: string) => {
     if (!startup.bridgeSessionDir) {
       setError("当前 Desktop 不是从 Unity bridge 启动。请回 Unity 点击“导入 Unity 配表资产”。");
@@ -703,6 +756,11 @@ export function App() {
         return;
       }
 
+      if (!syncPreviewFingerprint(lastSyncPreview)) {
+        setError("最近一次同步预览缺少 fingerprint，不能写入本地 cache。请重新预览同步。");
+        return;
+      }
+
       const confirmed = window.confirm("写入本地 cache 会更新 .config-sheet-forge/excel-cache 和 .config-sheet-forge/cache。\n\n不会写旧 Excel/，不会写飞书，不改 ProjectSettings。\n\nDesktop 会把最近一次 dry-run result 交给 CLI 校验，同输入通过后才写入。");
       if (!confirmed) {
         return;
@@ -724,7 +782,7 @@ export function App() {
     setLastResult(null);
     try {
       const previewPath = operation === "submit-merge-review" ? lastComparePreviewPath : lastSyncPreviewPath;
-      const args = buildCommandArgs(operation, snapshot, projectRoot, identityMode, previewPath);
+      const args = buildCommandArgs(operation, snapshot, projectRoot, identityMode, previewPath, newTable);
       if (!runtimeAvailable) {
         const mock = {
           commandLine: `config-sheet-forge ${args.join(" ")}`,
@@ -744,6 +802,12 @@ export function App() {
       });
       const task = await waitForTask(initial);
       const result = taskToCliResult(task);
+      if (task.status === "canceled") {
+        setLastResult(result);
+        setLastResultParsed(null);
+        return;
+      }
+
       applyResult(operation, result);
     } catch (ex) {
       setError(ordinaryErrorText(ex));
@@ -756,6 +820,7 @@ export function App() {
     lastComparePreviewPath,
     lastSyncPreview,
     lastSyncPreviewPath,
+    newTable,
     projectRoot,
     runtimeAvailable,
     sendUnityBridgeCommand,
@@ -770,6 +835,9 @@ export function App() {
   const desktopVersion = startup.desktopVersion || "开发预览";
   const unityVersion = snapshot?.unityPackageVersion || "未识别";
   const cliVersion = startup.sidecarCliVersion || (cliCheck?.source?.includes("sidecar") ? desktopVersion : cliCheck?.source || "未识别");
+  const visibleResult = activeTask ? taskToCliResult(activeTask) : lastResult;
+  const visibleParsed = activeTask ? parseResultJson(activeTask.resultJson) : lastResultParsed;
+  const resultNext = resultNextAction(visibleParsed, startup.bridgeSessionDir);
 
   return (
     <main className="app-shell">
@@ -977,20 +1045,32 @@ export function App() {
         <div className="result-header">
           <div>
             <h2>最近结果</h2>
-            <p>{lastResultParsed ? summarizeLifecycleResult(lastResultParsed) : lastResult ? `ExitCode ${lastResult.exitCode}` : "暂无任务结果。"}</p>
+            <p>{activeTask ? taskHumanProgress(activeTask, activeTask.operation) : visibleParsed ? summarizeLifecycleResult(visibleParsed) : visibleResult ? `ExitCode ${visibleResult.exitCode}` : "暂无任务结果。"}</p>
           </div>
+          {resultNext ? <button className="primary compact" onClick={() => void runOperation(resultNext.operation)}>{resultNext.label}</button> : null}
           <button className="secondary" onClick={() => setLogExpanded((value) => !value)}>
-            {logExpanded ? "收起" : debugEnabled ? "展开 Debug 日志" : "Debug 查看详情"}
+            {logExpanded ? "收起" : "展开详情"}
           </button>
         </div>
-        {debugEnabled && lastResult ? (
+        {logExpanded && visibleParsed ? (
+          <div className="result-details">
+            <p>{summarizeLifecycleResult(visibleParsed)}</p>
+            {visibleParsed.syncCacheSummary ? <SyncTableSummary summary={visibleParsed.syncCacheSummary} /> : null}
+            {visibleResult?.resultPath && viewMode === "programmer" ? <p className="muted">result：{visibleResult.resultPath}</p> : null}
+          </div>
+        ) : null}
+        {debugEnabled && visibleResult ? (
           <div className="debug-drawer" hidden={!logExpanded}>
-            <pre className="command">{lastResult.commandLine}</pre>
-            {lastResult.resultPath ? <p className="muted">result：{lastResult.resultPath}</p> : null}
-            {lastResult.executablePath ? <p className="muted">工具路径：{lastResult.executablePath}</p> : null}
-            {lastResult.attemptedPaths?.length ? <p className="muted">尝试路径：{lastResult.attemptedPaths.slice(0, 12).join("；")}</p> : null}
-            <pre className="logs">{`${lastResult.stdout}\n${lastResult.stderr}`.trim()}</pre>
-            {lastResult.resultJson ? <pre className="logs json-log">{lastResult.resultJson}</pre> : null}
+            <p className="muted">Debug 已开启：这里会显示 CLI 命令、路径、stdout/stderr、progress ndjson 和 result JSON。</p>
+            <pre className="command">{visibleResult.commandLine}</pre>
+            {activeTask?.taskId ? <p className="muted">task：{activeTask.taskId}{activeTask.pid ? ` · PID ${activeTask.pid}` : ""}</p> : null}
+            {visibleResult.resultPath ? <p className="muted">result：{visibleResult.resultPath}</p> : null}
+            {activeTask?.progressPath ? <p className="muted">progress：{activeTask.progressPath}</p> : null}
+            {visibleResult.executablePath ? <p className="muted">工具路径：{visibleResult.executablePath}</p> : null}
+            {visibleResult.attemptedPaths?.length ? <p className="muted">尝试路径：{visibleResult.attemptedPaths.slice(0, 12).join("；")}</p> : null}
+            {activeTask?.progressLog ? <pre className="logs json-log">{activeTask.progressLog}</pre> : null}
+            <pre className="logs">{`${visibleResult.stdout}\n${visibleResult.stderr}`.trim()}</pre>
+            {visibleResult.resultJson ? <pre className="logs json-log">{visibleResult.resultJson}</pre> : null}
           </div>
         ) : null}
       </section>
@@ -1042,6 +1122,72 @@ function StatusCard(props: { title: string; value: string; detail: string; url?:
   );
 }
 
+function resultNextAction(result: LifecycleResultLike | null, bridgeSessionDir: string): { operation: string; label: string } | null {
+  if (!result?.syncCacheSummary) {
+    return null;
+  }
+
+  if (result.operation === "sync-status" || result.operation === "registry-status") {
+    return { operation: "sync-cache-dry-run", label: "完整同步预览" };
+  }
+
+  const status = (result.syncCacheSummary.cacheStatus || "").toLowerCase();
+  const next = result.syncCacheSummary.nextAction || result.nextAction || "";
+  if ((next === "write-cache" || status === "needsupdate" || status === "missingcache") && result.syncCacheSummary.canApplyCache !== false) {
+    const count = Math.max(1, syncWritableTableCount(result.syncCacheSummary));
+    return { operation: "sync-cache-apply", label: `写入本地 cache（${count} 张）` };
+  }
+
+  if (next === "import-unity" || status === "uptodate") {
+    return bridgeSessionDir
+      ? { operation: "unity-import", label: "导入 Unity asset" }
+      : null;
+  }
+
+  return null;
+}
+
+function SyncTableSummary(props: { summary: LifecycleResultLike["syncCacheSummary"] }) {
+  const summary = props.summary;
+  if (!summary) {
+    return null;
+  }
+
+  const tables = summary.tables || [];
+  const changed = syncWritableTableCount(summary);
+  return (
+    <div className="sync-table-summary">
+      <p>{summary.tableCount || tables.length || 0} 张表，{changed} 张需要更新 / {(summary.upToDateTables || []).length} 张已最新 / {(summary.blockedTables || []).length} 张阻断。</p>
+      {tables.length > 0 ? (
+        <div className="mini-table">
+          {tables.slice(0, 24).map((table) => (
+            <div className={`mini-row ${table.cacheStatus || "unknown"}`} key={table.tableId || table.displayName}>
+              <strong>{table.displayName || table.tableId}</strong>
+              <span>{humanCacheStatus(table.cacheStatus)}</span>
+              {table.blockers?.length ? <small>{table.blockers[0]}</small> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function humanCacheStatus(status?: string) {
+  switch ((status || "").toLowerCase()) {
+    case "uptodate":
+      return "已最新";
+    case "needsupdate":
+      return "需写 cache";
+    case "missingcache":
+      return "缺 cache";
+    case "blocked":
+      return "阻断";
+    default:
+      return "待确认";
+  }
+}
+
 function NewTableMiniForm(props: { draft: NewTableDraft; onChange: (draft: NewTableDraft) => void; errors: string[] }) {
   const updateField = (index: number, patch: Partial<NewTableDraft["fields"][number]>) => {
     props.onChange({
@@ -1049,13 +1195,60 @@ function NewTableMiniForm(props: { draft: NewTableDraft; onChange: (draft: NewTa
       fields: props.draft.fields.map((field, i) => i === index ? { ...field, ...patch } : field)
     });
   };
+  const moveField = (index: number, delta: number) => {
+    const next = [...props.draft.fields];
+    const target = index + delta;
+    if (target < 0 || target >= next.length) {
+      return;
+    }
+
+    const [field] = next.splice(index, 1);
+    next.splice(target, 0, field);
+    props.onChange({ ...props.draft, fields: next });
+  };
+  const addField = () => props.onChange({
+    ...props.draft,
+    fields: [...props.draft.fields, { key: "", displayName: "", type: "string", description: "", required: false }]
+  });
+  const duplicateField = (index: number) => {
+    const source = props.draft.fields[index];
+    const copy = { ...source, key: `${source.key || "field"}Copy`, displayName: `${source.displayName || "字段"} 副本`, primary: false };
+    const next = [...props.draft.fields];
+    next.splice(index + 1, 0, copy);
+    props.onChange({ ...props.draft, fields: next });
+  };
+  const deleteField = (index: number) => {
+    props.onChange({ ...props.draft, fields: props.draft.fields.filter((_, i) => i !== index) });
+  };
 
   return (
     <div className="new-table-form">
       <div className="form-grid">
         <label>配表ID<input value={props.draft.tableId} onChange={(event) => props.onChange({ ...props.draft, tableId: event.target.value })} placeholder="例如 SkillExtraData" /></label>
         <label>显示名称<input value={props.draft.displayName} onChange={(event) => props.onChange({ ...props.draft, displayName: event.target.value })} placeholder="例如 技能扩展数据" /></label>
-        <label>这张表由谁负责<input value={props.draft.ownerRole} onChange={(event) => props.onChange({ ...props.draft, ownerRole: event.target.value })} placeholder="默认 tableOwner" /></label>
+        <label>这张表由谁负责
+          <select value={props.draft.ownerRole} onChange={(event) => props.onChange({ ...props.draft, ownerRole: event.target.value })}>
+            <option value="currentUser">当前创建人</option>
+            <option value="tableOwner">表负责人</option>
+            <option value="configOwner">配置负责人</option>
+            <option value="later">稍后在注册中心补</option>
+          </select>
+        </label>
+      </div>
+      <div className="role-hint">
+        <strong>负责人说明</strong>
+        <span>表负责人负责这张表的日常维护；配置负责人负责最终流程、临时放行和 PR gate 例外。角色列表后续会优先从在线注册中心读取。</span>
+      </div>
+      <p className="muted">字段类型只能从 ExcelToSO 支持列表选择，避免生成 Unity 无法导入的 cache。</p>
+      <div className="field-toolbar">
+        <button className="secondary" onClick={addField}>添加字段</button>
+        <button className="secondary" onClick={() => props.onChange({
+          ...props.draft,
+          fields: [
+            { key: "id", displayName: "ID", type: "string", description: "唯一 ID", primary: true, required: true },
+            { key: "name", displayName: "名称", type: "string", description: "显示名称", required: true }
+          ]
+        })}>重置默认字段</button>
       </div>
       <div className="field-table">
         {props.draft.fields.map((field, index) => (
@@ -1066,7 +1259,15 @@ function NewTableMiniForm(props: { draft: NewTableDraft; onChange: (draft: NewTa
               {fieldTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
             </select>
             <input value={field.description} onChange={(event) => updateField(index, { description: event.target.value })} placeholder="说明" />
+            <input value={field.defaultValue || ""} onChange={(event) => updateField(index, { defaultValue: event.target.value })} placeholder="默认值，可空" />
             <label className="inline-check"><input type="checkbox" checked={Boolean(field.primary)} onChange={(event) => updateField(index, { primary: event.target.checked })} />唯一ID</label>
+            <label className="inline-check"><input type="checkbox" checked={Boolean(field.required)} onChange={(event) => updateField(index, { required: event.target.checked })} />必填</label>
+            <div className="field-actions">
+              <button className="icon-button" title="上移字段" disabled={index === 0} onClick={() => moveField(index, -1)}>↑</button>
+              <button className="icon-button" title="下移字段" disabled={index + 1 >= props.draft.fields.length} onClick={() => moveField(index, 1)}>↓</button>
+              <button className="icon-button" title="复制字段" onClick={() => duplicateField(index)}>⧉</button>
+              <button className="icon-button danger-button" title="删除字段" disabled={props.draft.fields.length <= 1} onClick={() => deleteField(index)}>×</button>
+            </div>
           </div>
         ))}
       </div>

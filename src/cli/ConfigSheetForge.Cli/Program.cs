@@ -188,6 +188,28 @@ public static class Program
             throw new CliException("new-table needs --id and --name.", 2);
         }
 
+        if (args.HasFlag("dry-run"))
+        {
+            var request = args.TryGet("manifest", out var manifestPath)
+                ? await ReadSeedManifestAsync(workspace, manifestPath, args)
+                : NewSeedRequestFromWorkspace(workspace, args);
+            request.Operation = "new-table";
+            request.DryRun = true;
+            request.Table.TableId = id;
+            request.Table.DisplayName = name;
+            request.Table.OwnerRole = args.Get("owner-role", request.Table.OwnerRole);
+            request.Table.Fields = ParseNewTableFieldsJson(args.Get("fields-json", ""));
+            if (request.Table.Fields.Count == 0)
+            {
+                request.Table.Fields.Add(new ContractFieldSpec { Key = "id", DisplayName = "ID", ValueKind = "string", Description = "唯一 ID" });
+                request.Table.Fields.Add(new ContractFieldSpec { Key = "name", DisplayName = "名称", ValueKind = "string", Description = "显示名称" });
+            }
+
+            var result = await LifecycleExecutor.ExecuteAsync(request, new PreviewLifecyclePlatform(), CancellationToken.None);
+            await EmitLifecycleResultAsync(args, result);
+            return result.Success ? 0 : 1;
+        }
+
         var existing = workspace.Registry.Tables.FirstOrDefault(t => string.Equals(t.Id, id, StringComparison.OrdinalIgnoreCase));
         if (existing == null)
         {
@@ -210,6 +232,48 @@ public static class Program
         await WriteJsonAsync(workspace.Paths.RegistryPath, workspace.Registry);
         Console.WriteLine("Registered table " + id + ".");
         return 0;
+    }
+
+    private static List<ContractFieldSpec> ParseNewTableFieldsJson(string json)
+    {
+        var fields = new List<ContractFieldSpec>();
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return fields;
+        }
+
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            return fields;
+        }
+
+        foreach (var item in document.RootElement.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var key = GetJsonString(item, "key", "id");
+            var displayName = GetJsonString(item, "displayName", "name", "title");
+            if (string.IsNullOrWhiteSpace(key) && string.IsNullOrWhiteSpace(displayName))
+            {
+                continue;
+            }
+
+            fields.Add(new ContractFieldSpec
+            {
+                Key = key,
+                DisplayName = displayName,
+                ValueKind = GetJsonString(item, "type", "valueKind", "excelToSoType"),
+                ExcelToSoType = GetJsonString(item, "type", "excelToSoType"),
+                OriginalType = GetJsonString(item, "type", "originalType"),
+                Description = GetJsonString(item, "description", "comment")
+            });
+        }
+
+        return fields;
     }
 
     private static async Task<int> SyncAsync(ParsedArgs args)
@@ -368,6 +432,12 @@ public static class Program
         foreach (var table in tables)
         {
             tableIndex++;
+            var tableStatus = new SyncTableCacheStatus
+            {
+                TableId = table.Id,
+                DisplayName = FirstNonEmpty(table.Name, table.Id)
+            };
+            summary.Tables.Add(tableStatus);
             var tableProvider = CreateProvider(FirstNonEmpty(table.Provider, workspace.Config.Provider));
             var tableTemp = Path.Combine(Directory.GetCurrentDirectory(), "Temp", "ConfigSheetForge", "sync-cache-temp", Guid.NewGuid().ToString("N"), table.Id);
             Directory.CreateDirectory(tableTemp);
@@ -397,6 +467,7 @@ public static class Program
                 if (finding.Severity == FindingSeverity.Error)
                 {
                     hasError = true;
+                    tableStatus.Blockers.Add(finding.Code + ": " + finding.Message);
                 }
             }
 
@@ -405,6 +476,11 @@ public static class Program
             {
                 hasError = true;
                 summary.BlockedTables.Add(table.Id);
+                tableStatus.CacheStatus = "blocked";
+                if (tableStatus.Blockers.Count == 0)
+                {
+                    tableStatus.Blockers.Add("在线表读取失败，未生成可比较的语义数据。");
+                }
                 continue;
             }
 
@@ -423,6 +499,7 @@ public static class Program
                 hasError = true;
                 tableHasError = true;
                 summary.PortableSubsetFindings.Add(table.Id + ": " + finding.Code + " " + finding.Message);
+                tableStatus.Blockers.Add(finding.Code + ": " + finding.Message);
             }
             else
             {
@@ -435,6 +512,7 @@ public static class Program
                     {
                         hasError = true;
                         tableHasError = true;
+                        tableStatus.Blockers.Add(finding.Code + ": " + finding.Message);
                     }
                 }
 
@@ -459,6 +537,7 @@ public static class Program
                     {
                         hasError = true;
                         tableHasError = true;
+                        tableStatus.Blockers.Add(finding.Code + ": " + finding.Message);
                     }
                 }
 
@@ -471,6 +550,7 @@ public static class Program
                     foreach (var diff in triangulation.DiffSummary)
                     {
                         Console.WriteLine("[error] " + diff + " (sync.triangulation_failed)");
+                        tableStatus.Blockers.Add("sync.triangulation_failed: " + diff);
                     }
                 }
                 else
@@ -492,6 +572,7 @@ public static class Program
                         tableHasError = true;
                         Console.WriteLine("[error] " + table.Id + ": " + error + " (excel_to_so_cache_dialect)");
                         summary.PortableSubsetFindings.Add(table.Id + ": excel_to_so_cache_dialect " + error);
+                        tableStatus.Blockers.Add("excel_to_so_cache_dialect: " + error);
                     }
                 }
             }
@@ -502,17 +583,25 @@ public static class Program
                 await EmitProgressEventAsync(args, "sync-cache", "cache_hash_gate", table.Id, tableIndex, tables.Count, "正在比较 cache hash：" + table.Id, "info");
                 var hash = SemanticHasher.ComputeHash(result.Workbook);
                 var cacheState = await InspectCacheStateAsync(workspace, cacheDirectory, excelCacheDirectory, table, hash, xlsxPath);
+                tableStatus.OnlineSemanticHash = hash;
+                tableStatus.LocalSemanticHash = cacheState.ExistingHash;
                 if (cacheState.Missing)
                 {
                     summary.MissingCacheTables.Add(table.Id);
+                    tableStatus.CacheStatus = writeFormalCache ? "upToDate" : "missingCache";
+                    tableStatus.NeedsWriteCache = !writeFormalCache;
                 }
                 else if (cacheState.Changed)
                 {
                     summary.ChangedTables.Add(table.Id);
+                    tableStatus.CacheStatus = writeFormalCache ? "upToDate" : "needsUpdate";
+                    tableStatus.NeedsWriteCache = !writeFormalCache;
                 }
                 else
                 {
                     summary.UpToDateTables.Add(table.Id);
+                    tableStatus.CacheStatus = "upToDate";
+                    tableStatus.NeedsWriteCache = false;
                 }
 
                 bool cacheWrite = false;
@@ -538,17 +627,16 @@ public static class Program
             else
             {
                 summary.BlockedTables.Add(table.Id);
+                tableStatus.CacheStatus = "blocked";
+                tableStatus.NeedsWriteCache = false;
+                if (tableStatus.Blockers.Count == 0)
+                {
+                    tableStatus.Blockers.Add("同步预检未通过，但没有拿到更细的阻断原因。请打开 Debug 查看 stdout/stderr。");
+                }
             }
         }
 
-        summary.ChangedTables = DistinctSorted(summary.ChangedTables);
-        summary.MissingCacheTables = DistinctSorted(summary.MissingCacheTables);
-        summary.UpToDateTables = DistinctSorted(summary.UpToDateTables);
-        summary.BlockedTables = DistinctSorted(summary.BlockedTables);
-        summary.WillWriteFilePaths = DistinctSorted(summary.WillWriteFilePaths);
-        summary.PortableSubsetFindings = DistinctSorted(summary.PortableSubsetFindings);
-        summary.CacheStatus = ComputeSyncCacheStatus(summary, hasError);
-        summary.WillWriteFiles = writeFormalCache && (summary.ChangedTables.Count > 0 || summary.MissingCacheTables.Count > 0);
+        FinalizeSyncCacheSummary(summary, hasError, writeFormalCache);
         return summary;
     }
 
@@ -568,7 +656,7 @@ public static class Program
             changed = true;
         }
 
-        return new CacheState { Missing = missing, Changed = changed, Fresh = !missing && !changed };
+        return new CacheState { Missing = missing, Changed = changed, Fresh = !missing && !changed, ExistingHash = existingHash };
     }
 
     private static List<string> BuildCacheFilePaths(string cacheDirectory, string excelCacheDirectory, string tableId)
@@ -617,9 +705,80 @@ public static class Program
         return "unknown";
     }
 
+    private static void FinalizeSyncCacheSummary(SyncCacheSummary summary, bool hasError, bool writeFormalCache)
+    {
+        summary.ChangedTables = DistinctSorted(summary.ChangedTables);
+        summary.MissingCacheTables = DistinctSorted(summary.MissingCacheTables);
+        summary.UpToDateTables = DistinctSorted(summary.UpToDateTables);
+        summary.BlockedTables = DistinctSorted(summary.BlockedTables);
+        summary.WillWriteFilePaths = DistinctSorted(summary.WillWriteFilePaths);
+        summary.PortableSubsetFindings = DistinctSorted(summary.PortableSubsetFindings);
+
+        foreach (var table in summary.Tables)
+        {
+            table.Blockers = DistinctSorted(table.Blockers);
+        }
+
+        if (summary.ChangedTables.Count == 0)
+        {
+            summary.ChangedTables = DistinctSorted(summary.Tables
+                .Where(t => string.Equals(t.CacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase) || (t.NeedsWriteCache && !string.Equals(t.CacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase)))
+                .Select(t => t.TableId));
+        }
+
+        if (summary.MissingCacheTables.Count == 0)
+        {
+            summary.MissingCacheTables = DistinctSorted(summary.Tables
+                .Where(t => string.Equals(t.CacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase))
+                .Select(t => t.TableId));
+        }
+
+        if (writeFormalCache && !hasError && summary.BlockedTables.Count == 0)
+        {
+            summary.CacheStatus = "upToDate";
+        }
+        else
+        {
+            summary.CacheStatus = ComputeSyncCacheStatus(summary, hasError);
+        }
+
+        summary.WillWriteFiles = writeFormalCache && (summary.ChangedTables.Count > 0 || summary.MissingCacheTables.Count > 0);
+        summary.CanApplyCache = !writeFormalCache && !hasError && summary.BlockedTables.Count == 0 &&
+            (string.Equals(summary.CacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase) || string.Equals(summary.CacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase));
+        summary.NextAction = ComputeSyncNextAction(summary);
+    }
+
+    private static string ComputeSyncNextAction(SyncCacheSummary summary)
+    {
+        var status = summary?.CacheStatus ?? "";
+        if (string.Equals(status, "blocked", StringComparison.OrdinalIgnoreCase))
+        {
+            return "fix-blocker";
+        }
+
+        if (summary?.CanApplyCache == true ||
+            string.Equals(status, "needsUpdate", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(status, "missingCache", StringComparison.OrdinalIgnoreCase))
+        {
+            return "write-cache";
+        }
+
+        if (string.Equals(status, "upToDate", StringComparison.OrdinalIgnoreCase))
+        {
+            return "import-unity";
+        }
+
+        return "run-pr-gate";
+    }
+
     private static void ApplySyncCacheSummary(LifecycleContractResult result, SyncCacheSummary summary)
     {
         result.SyncCacheSummary = summary ?? new SyncCacheSummary();
+        var previewFingerprint = FirstNonEmpty(result.SyncCacheSummary.PreviewFingerprint, result.PreviewFingerprint, result.RequestFingerprint);
+        result.SyncCacheSummary.PreviewFingerprint = previewFingerprint;
+        result.PreviewFingerprint = previewFingerprint;
+        result.CanApplyCache = result.SyncCacheSummary.CanApplyCache;
+        result.NextAction = result.SyncCacheSummary.NextAction;
         if (result.BranchStatus != null && result.BranchStatus.RegisteredOnlineTables.Count > 0)
         {
             result.SyncCacheSummary.ResolvedOnlineTables = new List<ResolvedOnlineTableStatus>(result.BranchStatus.RegisteredOnlineTables);
@@ -634,6 +793,8 @@ public static class Program
             action.Details["blockedTables"] = string.Join(", ", result.SyncCacheSummary.BlockedTables);
             action.Details["willWriteFiles"] = result.SyncCacheSummary.WillWriteFiles.ToString().ToLowerInvariant();
             action.Details["noChangeKeepsMtime"] = result.SyncCacheSummary.NoChangeKeepsMtime.ToString().ToLowerInvariant();
+            action.Details["canApplyCache"] = result.SyncCacheSummary.CanApplyCache.ToString().ToLowerInvariant();
+            action.Details["nextAction"] = result.SyncCacheSummary.NextAction;
         }
     }
 
@@ -665,9 +826,19 @@ public static class Program
                 continue;
             }
 
+            var tableStatus = new SyncTableCacheStatus
+            {
+                TableId = table.TableId,
+                DisplayName = FirstNonEmpty(table.DisplayName, table.TableId),
+                OnlineSemanticHash = table.SemanticHash
+            };
+            summary.Tables.Add(tableStatus);
+
             if (!string.IsNullOrWhiteSpace(table.BlockingReason))
             {
                 summary.BlockedTables.Add(table.TableId);
+                tableStatus.CacheStatus = "blocked";
+                tableStatus.Blockers.Add(table.BlockingReason);
                 continue;
             }
 
@@ -680,32 +851,35 @@ public static class Program
             if (!File.Exists(semanticPath) || !File.Exists(shaPath) || !File.Exists(xlsxPath))
             {
                 summary.MissingCacheTables.Add(table.TableId);
+                tableStatus.CacheStatus = "missingCache";
+                tableStatus.NeedsWriteCache = true;
                 continue;
             }
 
             var localHash = File.ReadAllText(shaPath).Trim();
+            tableStatus.LocalSemanticHash = localHash;
             if (!string.IsNullOrWhiteSpace(table.SemanticHash) &&
                 !string.Equals(localHash, table.SemanticHash, StringComparison.OrdinalIgnoreCase))
             {
                 summary.ChangedTables.Add(table.TableId);
+                tableStatus.CacheStatus = "needsUpdate";
+                tableStatus.NeedsWriteCache = true;
                 continue;
             }
 
             summary.UpToDateTables.Add(table.TableId);
+            tableStatus.CacheStatus = "upToDate";
             if (string.IsNullOrWhiteSpace(table.SemanticHash))
             {
                 summary.PortableSubsetFindings.Add(table.TableId + ": registry.semanticHash 缺失，sync-status 只能确认本地 cache 文件存在；请用 sync-cache dry-run 做最终判断。");
             }
         }
 
-        summary.ChangedTables = DistinctSorted(summary.ChangedTables);
-        summary.MissingCacheTables = DistinctSorted(summary.MissingCacheTables);
-        summary.UpToDateTables = DistinctSorted(summary.UpToDateTables);
-        summary.BlockedTables = DistinctSorted(summary.BlockedTables);
-        summary.PortableSubsetFindings = DistinctSorted(summary.PortableSubsetFindings);
-        summary.CacheStatus = ComputeSyncCacheStatus(summary, summary.BlockedTables.Count > 0);
+        FinalizeSyncCacheSummary(summary, summary.BlockedTables.Count > 0, writeFormalCache: false);
         result.SyncCacheSummary = summary;
         result.ResolvedOnlineTables = summary.ResolvedOnlineTables;
+        result.CanApplyCache = summary.CanApplyCache;
+        result.NextAction = summary.NextAction;
 
         var action = result.AddAction("sync-status.local_cache.inspect", "done", "只读：已根据 live registry 与本地 cache/sha 文件估算当前 cache 状态；没有读取/导出在线 Sheet，也没有写文件。");
         action.Details["cacheStatus"] = summary.CacheStatus;
@@ -721,6 +895,7 @@ public static class Program
         public bool Missing { get; set; }
         public bool Changed { get; set; }
         public bool Fresh { get; set; }
+        public string ExistingHash { get; set; } = "";
     }
 
     private readonly struct CellReference
@@ -842,6 +1017,13 @@ public static class Program
         await HydrateSyncCacheRequestFromRegistryAsync(request, args, hydrateSelection);
         await RequireMatchingSyncCachePreviewAsync(request, args);
         var result = await LifecycleExecutor.ExecuteAsync(request, new CliLifecyclePlatform(args, request), CancellationToken.None);
+        var syncPreviewFingerprint = ComputeSyncCachePreviewFingerprint(request);
+        result.PreviewFingerprint = syncPreviewFingerprint;
+        if (request.DryRun)
+        {
+            result.RequestFingerprint = syncPreviewFingerprint;
+        }
+
         if (result.Success)
         {
             var tables = BuildSyncCacheTables(request, args.Get("table", ""));
@@ -916,17 +1098,18 @@ public static class Program
         }
 
         var expectedFingerprint = ComputeSyncCachePreviewFingerprint(request);
-        if (string.IsNullOrWhiteSpace(preview.RequestFingerprint))
+        var dryRunFingerprint = FirstNonEmpty(preview.PreviewFingerprint, preview.RequestFingerprint, preview.SyncCacheSummary?.PreviewFingerprint ?? "");
+        if (string.IsNullOrWhiteSpace(dryRunFingerprint))
         {
             throw new CliException("dry-run result 缺少 requestFingerprint，无法确认 apply 输入是否一致。请重新生成同步预览。", 2, fullPreviewPath);
         }
 
-        if (!string.Equals(preview.RequestFingerprint, expectedFingerprint, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(dryRunFingerprint, expectedFingerprint, StringComparison.OrdinalIgnoreCase))
         {
             throw new CliException(
                 "sync-cache apply 的输入和最近一次 dry-run 不一致，已阻断写入。请重新生成同步预览。",
                 2,
-                "dryRunFingerprint=" + preview.RequestFingerprint + "\napplyPreviewFingerprint=" + expectedFingerprint);
+                "dryRunFingerprint=" + dryRunFingerprint + "\napplyPreviewFingerprint=" + expectedFingerprint);
         }
     }
 

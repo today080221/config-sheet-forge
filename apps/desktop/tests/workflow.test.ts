@@ -17,14 +17,21 @@ function syncPreview(status: string, patch: Partial<LifecycleResultLike["syncCac
     dryRun: true,
     success: status !== "blocked",
     requestFingerprint: "fp-sync",
+    previewFingerprint: "fp-sync",
     syncCacheSummary: {
       cacheStatus: status,
+      previewFingerprint: "fp-sync",
+      canApplyCache: status === "needsUpdate" || status === "missingCache",
+      nextAction: status === "upToDate" ? "import-unity" : status === "blocked" ? "fix-blocker" : "write-cache",
       tableCount: 16,
       changedTables: [],
       missingCacheTables: [],
       upToDateTables: status === "upToDate" ? ["ProjectileData"] : [],
       blockedTables: status === "blocked" ? ["BuffData"] : [],
       triangulationFailedCount: status === "blocked" ? 1 : 0,
+      tables: status === "needsUpdate"
+        ? [{ tableId: "ProjectileData", displayName: "ProjectileData", cacheStatus: "needsUpdate", needsWriteCache: true }]
+        : [],
       ...patch
     }
   };
@@ -47,12 +54,22 @@ describe("Desktop workflow state machine", () => {
       changedTables: ["ProjectileData"]
     });
     missingFingerprint.requestFingerprint = "";
+    missingFingerprint.previewFingerprint = "";
+    missingFingerprint.syncCacheSummary!.previewFingerprint = "";
 
     const decision = decideSyncImport({ lastSyncPreview: missingFingerprint });
 
     expect(decision.primaryOperation).toBe("sync-cache-apply");
     expect(decision.primaryDisabled).toBe(true);
     expect(decision.disabledReason).toContain("fingerprint");
+  });
+
+  it("routes successful needsUpdate preview to cache apply even when legacy changedTables is empty", () => {
+    const decision = decideSyncImport({ lastSyncPreview: syncPreview("needsUpdate") });
+
+    expect(decision.primaryOperation).toBe("sync-cache-apply");
+    expect(decision.primaryLabel).toContain("写入本地 cache");
+    expect(decision.primaryDisabled).toBe(false);
   });
 
   it("blocks cache apply when sync dry-run is blocked", () => {
@@ -90,24 +107,24 @@ describe("new table validation", () => {
     ownerRole: "tableOwner",
     fields: [
       { key: "id", displayName: "ID", type: "string", description: "唯一ID", primary: true },
-      { key: "rarity", displayName: "稀有度", type: "enum", description: "稀有度枚举", enumValues: ["N", "R"] }
+      { key: "rarity", displayName: "稀有度", type: "int", description: "稀有度数值" }
     ]
   };
 
-  it("accepts structured safe field rows and enum values", () => {
+  it("accepts structured ExcelToSO field rows", () => {
     expect(validateNewTableDraft(validDraft)).toEqual([]);
   });
 
-  it("rejects invalid free-form field keys and missing enum values", () => {
+  it("rejects invalid free-form field keys and unsupported types", () => {
     const errors = validateNewTableDraft({
       ...validDraft,
       fields: [
-        { key: "1 bad", displayName: "", type: "enum", description: "", enumValues: [], primary: false }
+        { key: "1 bad", displayName: "", type: "json" as any, description: "", primary: false }
       ]
     });
 
     expect(errors.join(" ")).toContain("字段 key 不合法");
-    expect(errors.join(" ")).toContain("至少需要一个枚举值");
+    expect(errors.join(" ")).toContain("ExcelToSO");
     expect(errors.join(" ")).toContain("至少需要一个唯一 ID 字段");
   });
 });

@@ -24,6 +24,8 @@
 
 从 0.4.37 开始，Desktop 会在顶部显示 Desktop / UPM / CLI 版本。普通视图不会显示内部 taskId、PID 或 .NET stack trace；同步预览运行时会显示“当前第几张表 / TableId / 当前动作 / 已用时间”，取消按钮也会明确说明不会写 cache 或飞书。
 
+从 0.4.38 开始，Desktop 同步预览完成后会直接告诉你下一步：需要更新时写入 `.config-sheet-forge` cache，已最新时导入 Unity asset，阻断时先修复在线读取或三方一致性问题。最近结果默认只是一行摘要，完整日志仍在 Debug。
+
 通常你只需要看三件事：
 
 1. 当前状态是不是正常。

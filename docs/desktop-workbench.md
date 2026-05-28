@@ -34,6 +34,10 @@ Desktop 是 Config Sheet Forge 的官方主工作台。它负责日常配表 Sou
 
 从 0.4.37 开始，Desktop 顶部会常驻显示 Desktop / UPM / CLI 版本，方便确认团队是否都升级到了同一版。普通视图不再显示内部 taskId、PID 或 .NET 堆栈；这些只在 Debug 展示。同步预览会明确写着“会读取在线表并临时导出 xlsx，可能需要几分钟；不会写 cache、飞书或 ProjectSettings”。如果只是刷新首页状态，请用“快速状态检查（不导出 xlsx）”。
 
+从 0.4.38 开始，Desktop 会把同步预览结果当作工作流状态恢复，而不是只看 stdout。`cacheStatus=needsUpdate/missingCache` 时下一步会变成“写入本地 cache”；`upToDate` 时会直接进入“导入 Unity asset”；`blocked` 时写入按钮禁用并列出阻断表。关闭重开 Desktop 后，也会从 `Temp/ConfigSheetForge/desktop/*.result.json` 恢复最近状态。
+
+0.4.38 还把最近结果区改成真正的轻量摘要：默认只显示成功/失败、表数量、下一步按钮；展开后才看表格详情；完整命令、progress ndjson、stdout/stderr 和 result JSON 只在 Debug。新建配表也改成字段编辑器，可以添加、删除、移动、复制字段，字段类型只允许 ExcelToSO 支持的安全类型。
+
 Legacy 只用于没有 Desktop、CI 调试或救急 fallback。普通策划不需要从 Legacy 开始。
 
 ## Desktop v1 页面

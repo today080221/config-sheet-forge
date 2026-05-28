@@ -280,6 +280,9 @@ namespace ConfigSheetForge.Core
     public sealed class SyncCacheSummary
     {
         public string CacheStatus { get; set; } = "unknown";
+        public string PreviewFingerprint { get; set; } = "";
+        public bool CanApplyCache { get; set; }
+        public string NextAction { get; set; } = "";
         public List<string> ChangedTables { get; set; } = new List<string>();
         public List<string> MissingCacheTables { get; set; } = new List<string>();
         public List<string> UpToDateTables { get; set; } = new List<string>();
@@ -292,6 +295,18 @@ namespace ConfigSheetForge.Core
         public int TriangulationFailedCount { get; set; }
         public List<string> PortableSubsetFindings { get; set; } = new List<string>();
         public List<ResolvedOnlineTableStatus> ResolvedOnlineTables { get; set; } = new List<ResolvedOnlineTableStatus>();
+        public List<SyncTableCacheStatus> Tables { get; set; } = new List<SyncTableCacheStatus>();
+    }
+
+    public sealed class SyncTableCacheStatus
+    {
+        public string TableId { get; set; } = "";
+        public string DisplayName { get; set; } = "";
+        public string CacheStatus { get; set; } = "unknown";
+        public string OnlineSemanticHash { get; set; } = "";
+        public string LocalSemanticHash { get; set; } = "";
+        public bool NeedsWriteCache { get; set; }
+        public List<string> Blockers { get; set; } = new List<string>();
     }
 
     public sealed class LifecycleContractResult
@@ -316,6 +331,9 @@ namespace ConfigSheetForge.Core
         public List<string> HumanReadableFailures { get; set; } = new List<string>();
         public Dictionary<string, string> DocumentationTargets { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public string RequestFingerprint { get; set; } = "";
+        public string PreviewFingerprint { get; set; } = "";
+        public bool CanApplyCache { get; set; }
+        public string NextAction { get; set; } = "";
         public Dictionary<string, string> RequestSummary { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public PrGateReport PrGateReport { get; set; } = new PrGateReport();
         public string GateReportPath { get; set; } = "";

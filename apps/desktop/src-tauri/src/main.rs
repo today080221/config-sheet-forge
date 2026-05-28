@@ -101,6 +101,7 @@ struct TaskSnapshot {
     exit_code: i32,
     stdout: String,
     stderr: String,
+    progress_log: String,
     result_path: String,
     result_json: String,
     executable_path: String,
@@ -423,6 +424,36 @@ fn cancel_task(task_id: String) -> Result<TaskSnapshot, String> {
 }
 
 #[tauri::command]
+fn read_desktop_result(project_root: String, name: String) -> Result<CliRunResult, String> {
+    let root = resolve_project_root(project_root)?;
+    let safe_name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if safe_name.is_empty() {
+        return Err("result 名称不合法。".to_string());
+    }
+
+    let result_path = root
+        .join("Temp")
+        .join("ConfigSheetForge")
+        .join("desktop")
+        .join(format!("{}.result.json", safe_name));
+    let result_json = fs::read_to_string(&result_path).unwrap_or_default();
+    Ok(CliRunResult {
+        command_line: String::new(),
+        exit_code: if result_json.is_empty() { -1 } else { 0 },
+        stdout: String::new(),
+        stderr: String::new(),
+        executable_path: String::new(),
+        source: "desktop-result-cache".to_string(),
+        attempted_paths: Vec::new(),
+        result_path: normalize_path_string_for_cli(&result_path.to_string_lossy()),
+        result_json,
+    })
+}
+
+#[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();
     if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
@@ -474,6 +505,7 @@ fn main() {
             start_setup_task,
             get_task,
             cancel_task,
+            read_desktop_result,
             write_bridge_command,
             open_external_url
         ])
@@ -1822,6 +1854,7 @@ fn apply_progress_line(task_state: &Arc<Mutex<TaskState>>, line: &str) {
 
     let parsed = serde_json::from_str::<Value>(trimmed).unwrap_or(Value::Null);
     update_task(task_state, |state| {
+        append_limited(&mut state.snapshot.progress_log, &(trimmed.to_string() + "\n"));
         if let Some(phase) = parsed.get("phase").and_then(|v| v.as_str()) {
             state.snapshot.phase = human_progress_phase(phase);
         }
@@ -1931,6 +1964,7 @@ fn create_task_state(
         exit_code: -1,
         stdout: String::new(),
         stderr: String::new(),
+        progress_log: String::new(),
         result_path,
         result_json: String::new(),
         executable_path,

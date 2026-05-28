@@ -414,6 +414,12 @@ foreach ($requiredV437Marker in @("normalize_cli_path_args", "strip_windows_verb
   }
 }
 
+foreach ($requiredV438Marker in @("read_desktop_result", "syncPreviewFingerprint", "canApplyCache", "nextAction", "SyncTableCacheStatus", "SyncTableSummary", "resultNextAction", "activeTask?.progressLog", "添加字段", "复制字段", "ExcelToSO 支持列表", "ParseNewTableFieldsJson")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw packages/unity/Runtime/Core/LifecycleContracts.cs)) -notlike "*$requiredV438Marker*") {
+    throw "Unity v0.4.38 Desktop workflow state marker is missing: $requiredV438Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."
