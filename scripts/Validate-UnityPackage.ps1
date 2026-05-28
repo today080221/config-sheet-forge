@@ -323,7 +323,7 @@ foreach ($requiredV425Marker in @("TryReadXlsxDimensionInfo", "xlsxCellRows", "f
   }
 }
 
-foreach ($requiredV426Marker in @("ConfigSheetForgeExcelToSoImporter", "ExcelToScriptableObjectApi", "导入 Unity 配表资产", "当前 ExcelToSO 还指向旧 Excel 路径", "更新 ExcelToSO settings 到 cache", "ProjectSettings/ExcelToScriptableObjectSettings.asset", "ExcelToSO public API 可用")) {
+foreach ($requiredV426Marker in @("ConfigSheetForgeExcelToSoImporter", "ExcelToScriptableObjectApi", "导入 Unity 配表资产", "ProjectSettings/ExcelToScriptableObjectSettings.asset", "ExcelToSO public API 可用")) {
   if (($editorSources + "`n" + $window + "`n" + (Get-Content -Raw packages/unity/README.md) + "`n" + (Get-Content -Raw docs/unity-window.md)) -notlike "*$requiredV426Marker*") {
     throw "Unity v0.4.26 ExcelToSO asset import marker is missing: $requiredV426Marker"
   }
@@ -332,6 +332,12 @@ foreach ($requiredV426Marker in @("ConfigSheetForgeExcelToSoImporter", "ExcelToS
 foreach ($requiredV427Marker in @("BuildExcelToSoCacheDialectPlan", "excelToSoType", "originalType", "InspectCacheTypes", "cache 类型需要处理", "无法写入 ExcelToSO cache xlsx", "excel to so cache dialect restores json arrays from source xlsx", "excel to so cache dialect blocks unresolved json")) {
   if (($coreContracts + "`n" + $cliProgram + "`n" + $editorSources + "`n" + $window + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs) + "`n" + (Get-Content -Raw docs/unity-window.md)) -notlike "*$requiredV427Marker*") {
     throw "Unity v0.4.27 ExcelToSO cache dialect marker is missing: $requiredV427Marker"
+  }
+}
+
+foreach ($requiredV428Marker in @("SourceOfTruthCache", "ImportByProfile", "安装/更新 Source of Truth 导入 profile", "不改变本地 Excel profile", "ExcelToSoProfile", "source_of_truth_cache")) {
+  if (($editorSources + "`n" + $window + "`n" + (Get-Content -Raw packages/unity/README.md) + "`n" + (Get-Content -Raw docs/unity-window.md) + "`n" + (Get-Content -Raw packages/unity/Tests/Editor/ConfigSheetForgeEditorUtilityTests.cs)) -notlike "*$requiredV428Marker*") {
+    throw "Unity v0.4.28 ExcelToSO profile marker is missing: $requiredV428Marker"
   }
 }
 

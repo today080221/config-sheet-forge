@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.28
+
+- ExcelToSO 集成改为显式使用 `SourceOfTruthCache` named profile；`导入 Unity 配表资产` 不再要求把本地/default profile 的 `Excel/` 路径改成 `.config-sheet-forge/excel-cache`。
+- Unity 窗口新增 `安装/更新 Source of Truth 导入 profile`：只新增/更新 `ProjectSettings/ExcelToScriptableObjectSettings.asset` 里的 cache profile，并在发现本地 profile 被旧版本改到 cache 时恢复到 `oldExcelPath` / `Excel/<TableId>.xlsx`。
+- ExcelToSO backend 现在要求 v1.0.6 的 `ImportByProfile` API；未安装或版本过旧时显示中文前置条件提示，仍保持可选 peer dependency，不添加硬 asmdef 依赖。
+- 文档说明两套 profile：本地 Excel / OneDrive 工作流给人工 ExcelToSO UI 使用，Source of Truth cache profile 给 config-sheet-forge / CI 使用。
+
 ## 0.4.27
 
 - `sync-cache` / seed 写正式 `.config-sheet-forge/excel-cache/*.xlsx` 时，ExcelToSO backend 会把物理 xlsx 的类型行写成 ExcelToSO dialect：`integer -> int`、`number -> float`、`bool/string` 保持可导入；semantic JSON 与 hash 仍继续使用 canonical portable 类型。

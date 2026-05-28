@@ -43,6 +43,7 @@ namespace ConfigSheetForge.Unity.Editor
         public string DisplayName = "";
         public string CacheXlsxPath = "";
         public string OldExcelPath = "";
+        public string LocalExcelPath = "";
         public string AssetDirectory = "";
         public string Namespace = "";
     }
@@ -58,29 +59,62 @@ namespace ConfigSheetForge.Unity.Editor
     internal static class ConfigSheetForgeExcelToSoImporter
     {
         private const string ApiTypeFullName = "GreatClock.Common.ExcelToSO.ExcelToScriptableObjectApi";
+        public const string SourceOfTruthProfileId = "SourceOfTruthCache";
         private static readonly XNamespace SpreadsheetNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
         private static readonly XNamespace RelationshipNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         private static readonly XNamespace PackageRelationshipNs = "http://schemas.openxmlformats.org/package/2006/relationships";
         private static Type _cachedApiType;
         private static MethodInfo _cachedImportExcelPaths;
+        private static MethodInfo _cachedImportByProfile;
 
         public static ExcelToSoImportBackendStatus Probe()
         {
             var type = FindApiType();
             if (type == null)
             {
-                return ExcelToSoImportBackendStatus.Missing("未安装 ExcelToSO 包，或版本低于 v1.0.4。请在 Packages/manifest.json 安装 com.greatclock.exceltoscriptableobject，并 pin 到 today080221/excel_to_scriptableobject#v1.0.4 或更新版本。");
+                return ExcelToSoImportBackendStatus.Missing("未安装 ExcelToSO 包，或版本低于 v1.0.6。请在 Packages/manifest.json 安装 com.greatclock.exceltoscriptableobject，并 pin 到 today080221/excel_to_scriptableobject#v1.0.6 或更新版本。");
             }
 
-            var method = FindImportMethod(type);
+            var method = FindImportByProfileMethod(type);
             if (method == null)
             {
-                return ExcelToSoImportBackendStatus.Missing("已发现 ExcelToSO，但没有找到 ExcelToScriptableObjectApi.ImportExcelPaths。请升级 ExcelToSO 到 v1.0.4 或更新版本。");
+                return ExcelToSoImportBackendStatus.Missing("已发现 ExcelToSO，但没有找到 ExcelToScriptableObjectApi.ImportByProfile。请升级 ExcelToSO 到 v1.0.6 或更新版本。");
             }
 
             _cachedApiType = type;
-            _cachedImportExcelPaths = method;
+            _cachedImportByProfile = method;
             return ExcelToSoImportBackendStatus.Found(type.FullName);
+        }
+
+        public static List<ExcelToSoSingleImportResult> ImportSourceOfTruthProfile()
+        {
+            var status = Probe();
+            if (!status.Available)
+            {
+                var missing = new ExcelToSoSingleImportResult { Success = false, TableId = SourceOfTruthProfileId };
+                missing.Errors.Add(status.Message);
+                return new List<ExcelToSoSingleImportResult> { missing };
+            }
+
+            object resultObject;
+            try
+            {
+                resultObject = _cachedImportByProfile.Invoke(null, new object[] { SourceOfTruthProfileId, null });
+            }
+            catch (TargetInvocationException ex)
+            {
+                var failed = new ExcelToSoSingleImportResult { Success = false, TableId = SourceOfTruthProfileId };
+                failed.Errors.Add(ex.InnerException == null ? ex.ToString() : ex.InnerException.ToString());
+                return new List<ExcelToSoSingleImportResult> { failed };
+            }
+            catch (Exception ex)
+            {
+                var failed = new ExcelToSoSingleImportResult { Success = false, TableId = SourceOfTruthProfileId };
+                failed.Errors.Add(ex.ToString());
+                return new List<ExcelToSoSingleImportResult> { failed };
+            }
+
+            return ConvertResults(resultObject);
         }
 
         public static ExcelToSoSingleImportResult ImportExcelPath(string tableId, string excelPath)
@@ -96,7 +130,15 @@ namespace ConfigSheetForge.Unity.Editor
             object resultObject;
             try
             {
-                resultObject = _cachedImportExcelPaths.Invoke(null, new object[] { new[] { excelPath }, null });
+                var method = FindImportMethod(_cachedApiType);
+                if (method == null)
+                {
+                    var failed = new ExcelToSoSingleImportResult { Success = false, TableId = tableId ?? "", ExcelPath = excelPath ?? "" };
+                    failed.Errors.Add("已发现 ExcelToSO，但没有找到 ExcelToScriptableObjectApi.ImportExcelPaths。");
+                    return failed;
+                }
+
+                resultObject = method.Invoke(null, new object[] { new[] { excelPath }, null });
             }
             catch (TargetInvocationException ex)
             {
@@ -502,6 +544,95 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return null;
+        }
+
+        private static MethodInfo FindImportByProfileMethod(Type apiType)
+        {
+            if (_cachedImportByProfile != null)
+            {
+                return _cachedImportByProfile;
+            }
+
+            if (apiType == null)
+            {
+                return null;
+            }
+
+            foreach (var method in apiType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (!string.Equals(method.Name, "ImportByProfile", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var parameters = method.GetParameters();
+                if (parameters.Length == 2 && parameters[0].ParameterType == typeof(string))
+                {
+                    _cachedImportByProfile = method;
+                    return method;
+                }
+            }
+
+            return null;
+        }
+
+        private static List<ExcelToSoSingleImportResult> ConvertResults(object resultObject)
+        {
+            var results = new List<ExcelToSoSingleImportResult>();
+            if (resultObject == null)
+            {
+                var failed = new ExcelToSoSingleImportResult { Success = false, TableId = SourceOfTruthProfileId };
+                failed.Errors.Add("ExcelToSO ImportByProfile 返回空结果。");
+                results.Add(failed);
+                return results;
+            }
+
+            var items = ReadValue(resultObject, "items") as IEnumerable;
+            if (items == null)
+            {
+                var single = new ExcelToSoSingleImportResult { Success = ReadBool(resultObject, "success"), TableId = SourceOfTruthProfileId };
+                if (!single.Success)
+                {
+                    single.Errors.Add("ExcelToSO 导入失败，但结果里没有具体表项。");
+                }
+                results.Add(single);
+                return results;
+            }
+
+            foreach (var item in items)
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                var converted = new ExcelToSoSingleImportResult();
+                converted.Success = true;
+                converted.TableId = ReadString(item, "tableId");
+                converted.ExcelPath = ReadString(item, "excelPath");
+                converted.AssetPath = ReadString(item, "assetPath");
+                converted.Errors.AddRange(ReadStringEnumerable(item, "errors"));
+                converted.Warnings.AddRange(ReadStringEnumerable(item, "warnings"));
+                var status = ReadValue(item, "status");
+                if (status != null && !string.Equals(status.ToString(), "Imported", StringComparison.OrdinalIgnoreCase))
+                {
+                    converted.Success = false;
+                }
+                if (!converted.Success && converted.Errors.Count == 0)
+                {
+                    converted.Errors.Add("ExcelToSO 导入失败。请在程序视图展开详细日志查看 ExcelToSO 返回结果。");
+                }
+                results.Add(converted);
+            }
+
+            if (results.Count == 0)
+            {
+                var empty = new ExcelToSoSingleImportResult { Success = false, TableId = SourceOfTruthProfileId };
+                empty.Errors.Add("ExcelToSO SourceOfTruthCache profile 没有返回任何导入表项。");
+                results.Add(empty);
+            }
+
+            return results;
         }
 
         private static ExcelToSoSingleImportResult ConvertResult(string tableId, string excelPath, object resultObject)

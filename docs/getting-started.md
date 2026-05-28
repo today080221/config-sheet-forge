@@ -91,7 +91,7 @@ config-sheet-forge gate --details --annotations github
 4. 如果结果是 `needsUpdate` 或 `missingCache`，再确认 `写入本地 cache`。
 5. 如果项目使用 ExcelToSO，cache 已最新后在 Unity 窗口点 `导入 Unity 配表资产`，把 `.config-sheet-forge/excel-cache/*.xlsx` 导入 ScriptableObject asset。这一步只写 Unity asset，不写飞书、不改 registry、不写 main。
 
-ExcelToSO 是可选 peer dependency。需要项目在 `Packages/manifest.json` 显式安装 `com.greatclock.exceltoscriptableobject`，推荐 pin 到 `https://github.com/today080221/excel_to_scriptableobject.git#v1.0.5` 或更新版本。若窗口提示 ExcelToSO settings 仍指向旧 `Excel/` 路径，先用窗口里的确认按钮把 settings 更新到 Source of Truth cache；工具不会直接导旧表，也不会写旧 `Excel/`。从 0.4.27 开始，正式 cache xlsx 的类型行会写成 ExcelToSO dialect；如果 `json` 列无法从旧 Excel 或 schema 还原为 `int[]/float[]/string[]/string`，同步会阻断并提示负责人补字段类型。
+ExcelToSO 是可选 peer dependency。需要项目在 `Packages/manifest.json` 显式安装 `com.greatclock.exceltoscriptableobject`，推荐 pin 到 `https://github.com/today080221/excel_to_scriptableobject.git#v1.0.6` 或更新版本。config-sheet-forge 会使用 ExcelToSO 的 `SourceOfTruthCache` profile 导入 `.config-sheet-forge/excel-cache`，不会覆盖人工 ExcelToSO UI 使用的本地 Excel profile。若窗口提示缺少 cache profile，先点 `安装/更新 Source of Truth 导入 profile`。从 0.4.27 开始，正式 cache xlsx 的类型行会写成 ExcelToSO dialect；如果 `json` 列无法从旧 Excel 或 schema 还原为 `int[]/float[]/string[]/string`，同步会阻断并提示负责人补字段类型。
 5. 合并 PR 前生成合并预览、提交合并审查记录、运行 PR gate。
 
 新建 git 分支如果还没有在线工作区，应从 PR base/main 派生当前分支在线表。这个流程叫 `bootstrap-current-branch-from-target`。`本地 Excel Seed` 只用于历史迁移，不是日常功能分支入口。
@@ -126,7 +126,7 @@ config-sheet-forge seed-from-xlsx --all --manifest "ProjectSettings/Example.Conf
 通过 Unity Package Manager 安装：
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.27
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.28
 ```
 
 打开 `Tools > Config Sheet Forge`。普通使用者优先看首页的 `推荐下一步` 和 [Unity 配表窗口 5 分钟说明](unity-window.md)。

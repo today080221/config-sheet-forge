@@ -12,9 +12,11 @@
 
 从 0.4.25 开始，`sync-cache` 读取在线 Sheet 时不再依赖 `sheets +read` 的无范围默认读取，也不会盲信飞书导出 xlsx 里的错误 `dimension ref=A1`。Lark provider 会扫描实际 `sheetData` 构造显式 A1 范围，遇到 `90202 wrong startRange` 会自动 retry，并把 attemptedRange、retryRange、finalRange、sheetId、脱敏 token、online rows/cols 和 xlsx rows/cols 写进诊断，避免把范围/形状问题误报成权限问题。
 
-从 0.4.26 开始，Unity 窗口可以继续完成 `本地 cache xlsx -> Unity ScriptableObject asset` 这一步。项目显式安装 ExcelToSO v1.0.5 或更新版本后，`配表` 页会出现 `导入 Unity 配表资产`。它只写 Unity asset，不写飞书、不改在线表、不改 registry、不写 main；如果 ExcelToSO settings 还指向旧 `Excel/` 路径，窗口会先阻断，并提供单独确认的“更新 settings 到 Source of Truth cache”步骤。
+从 0.4.26 开始，Unity 窗口可以继续完成 `本地 cache xlsx -> Unity ScriptableObject asset` 这一步。项目显式安装 ExcelToSO 后，`配表` 页会出现 `导入 Unity 配表资产`。它只写 Unity asset，不写飞书、不改在线表、不改 registry、不写 main。
 
 从 0.4.27 开始，Source of Truth 的 semantic JSON 仍使用 `integer/number/json` 等 canonical 类型做 hash，但正式 `.config-sheet-forge/excel-cache/*.xlsx` 会写成 ExcelToSO 可导入的类型行，例如 `int/float/string[]`。如果某列是 `json`，工具会尝试从旧 Excel 类型或字段 `originalType/excelToSoType` 还原为 `int[]`、`float[]`、`string[]` 或 `string`；无法还原时会阻断并给中文修复建议，不会生成会让 ExcelToSO 弹错的 cache。
+
+从 0.4.28 开始，ExcelToSO 需要 v1.0.6 或更新版本。config-sheet-forge 会显式使用 ExcelToSO 的 `SourceOfTruthCache` profile 导入 `.config-sheet-forge/excel-cache/*.xlsx`，不会再把 ExcelToSO 的本地/default profile 改到 cache 路径。窗口里的 `安装/更新 Source of Truth 导入 profile` 只新增或更新 cache profile；人工打开 ExcelToSO UI 时仍默认看到 `本地 Excel` profile，继续指向 `Excel/*.xlsx` / OneDrive 工作流。
 
 窗口包含：
 
@@ -41,7 +43,7 @@
 | 刷新状态 / 预览同步计划 / 预览新建配表 / 生成合并预览 / 运行 PR 检查 | 安全 | 只读取或生成报告，不写飞书、不改本地 cache |
 | 写入本地 cache | 中风险 | 会更新本地 cache，需要勾选确认 |
 | 导入 Unity 配表资产 | 中风险 | 只写 Unity ScriptableObject asset；要求最近一次同步预览通过且 cache 已最新 |
-| 更新 ExcelToSO settings 到 cache | 中风险 | 只改 `ProjectSettings/ExcelToScriptableObjectSettings.asset` 中对应表的 `excel_name`，不会写旧 Excel |
+| 安装/更新 Source of Truth 导入 profile | 中风险 | 只在 `ProjectSettings/ExcelToScriptableObjectSettings.asset` 中维护 `SourceOfTruthCache` profile，不改变本地 Excel profile，不会写旧 Excel |
 | 创建在线表并登记 / 本地 Excel Seed apply / 确认写回 main | 高风险 | 会写飞书、项目状态或目标工作区，需要预览成功 + 勾选 + 二次确认 |
 | 初始化目标分支 | 高风险 | 先 dry-run；apply 必须校验同输入 dry-run result，再拆分确认在线 Sheet、Base 注册、SchemaReviews、本地 cache、ProjectSettings、ExcelToSO |
 | 从目标分支初始化当前分支 | 中/高风险 | 新功能分支缺在线工作区时使用；先 dry-run，apply 前分项确认在线 Sheet、注册中心和 SchemaReviews，默认不写本地 cache / ProjectSettings / ExcelToSO，避免误用历史 Excel Seed |
@@ -213,7 +215,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.27
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.28
 ```
 
 ## 测试

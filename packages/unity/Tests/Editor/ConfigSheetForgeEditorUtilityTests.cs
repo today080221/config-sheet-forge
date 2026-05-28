@@ -142,9 +142,11 @@ namespace ConfigSheetForge.Unity.Editor.Tests
             var asmdef = File.ReadAllText("Packages/dev.config-sheet-forge.unity/Editor/ConfigSheetForge.Editor.asmdef");
 
             Assert.That(importerSource, Does.Contain("ExcelToScriptableObjectApi"));
-            Assert.That(importerSource, Does.Contain("ImportExcelPaths"));
+            Assert.That(importerSource, Does.Contain("ImportByProfile"));
+            Assert.That(importerSource, Does.Contain("SourceOfTruthCache"));
             Assert.That(windowSource, Does.Contain("导入 Unity 配表资产"));
-            Assert.That(windowSource, Does.Contain("当前 ExcelToSO 还指向旧 Excel 路径"));
+            Assert.That(windowSource, Does.Contain("安装/更新 Source of Truth 导入 profile"));
+            Assert.That(windowSource, Does.Contain("不改变本地 Excel profile"));
             Assert.That(windowSource, Does.Contain("不会写旧 Excel/"));
             Assert.That(asmdef, Does.Not.Contain("GreatClock.ExcelToScriptableObject.Editor"));
         }
