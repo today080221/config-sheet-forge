@@ -19,6 +19,7 @@ if (Test-Path apps/desktop/package.json) {
       throw "cargo is required for the Tauri Desktop compile smoke."
     }
     cargo check --manifest-path src-tauri/Cargo.toml
+    cargo test --manifest-path src-tauri/Cargo.toml
   }
   finally {
     Pop-Location

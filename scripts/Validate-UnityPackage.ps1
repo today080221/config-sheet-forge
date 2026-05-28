@@ -395,6 +395,18 @@ foreach ($requiredV435Marker in @("needsAuth", "needsScope", "primaryToolAction"
   }
 }
 
+foreach ($requiredV436Marker in @("start_task", "start_setup_task", "start_tool_check_task", "get_task", "cancel_task", "taskkill", "tail_progress_file", "start_process_task_returns_before_long_process_exits", "cancel_task_kills_child_process_tree", "cargo test --manifest-path src-tauri/Cargo.toml")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw scripts/Run-CI.ps1)) -notlike "*$requiredV436Marker*") {
+    throw "Unity v0.4.36 Desktop async task marker is missing: $requiredV436Marker"
+  }
+}
+
+foreach ($forbiddenV436Marker in @('invoke<CliRunResult>("run_cli"', 'invoke<CliRunResult>("run_setup_action"', 'doctor_tools,')) {
+  if ($desktopWorkflowSources -like "*$forbiddenV436Marker*") {
+    throw "Unity v0.4.36 Desktop async task regression marker found: $forbiddenV436Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."

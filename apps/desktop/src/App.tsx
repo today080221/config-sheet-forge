@@ -54,6 +54,17 @@ type CliRunResult = {
   resultJson?: string;
 };
 
+type TaskSnapshot = CliRunResult & {
+  taskId: string;
+  operation: string;
+  status: "running" | "canceling" | "succeeded" | "failed" | "canceled";
+  phase: string;
+  message: string;
+  elapsedMs: number;
+  progressPath?: string;
+  pid?: number;
+};
+
 type StartupContext = {
   projectRoot: string;
   bridgeSessionDir: string;
@@ -207,12 +218,35 @@ function operationStage(operation: string) {
   return "准备环境 / 启动本机工具";
 }
 
+function isTerminalTask(status: TaskSnapshot["status"]) {
+  return status === "succeeded" || status === "failed" || status === "canceled";
+}
+
+function taskToCliResult(task: TaskSnapshot): CliRunResult {
+  return {
+    commandLine: task.commandLine,
+    exitCode: task.exitCode,
+    stdout: task.stdout,
+    stderr: task.stderr,
+    executablePath: task.executablePath,
+    source: task.source,
+    attemptedPaths: task.attemptedPaths,
+    resultPath: task.resultPath,
+    resultJson: task.resultJson
+  };
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 export function App() {
   const [projectRoot, setProjectRoot] = useState("");
   const [startup, setStartup] = useState<StartupContext>({ projectRoot: "", bridgeSessionDir: "" });
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [checks, setChecks] = useState<ToolCheck[]>([]);
   const [activeOperation, setActiveOperation] = useState("");
+  const [activeTask, setActiveTask] = useState<TaskSnapshot | null>(null);
   const [operationStartedAt, setOperationStartedAt] = useState<number | null>(null);
   const [lastResult, setLastResult] = useState<CliRunResult | null>(null);
   const [lastResultParsed, setLastResultParsed] = useState<LifecycleResultLike | null>(null);
@@ -249,12 +283,16 @@ export function App() {
 
   const runtimeAvailable = isTauriRuntime();
   const elapsed = useMemo(() => {
+    if (activeTask?.elapsedMs) {
+      return `${Math.max(0, Math.round(activeTask.elapsedMs / 1000))} 秒`;
+    }
+
     if (!operationStartedAt) {
       return "";
     }
 
     return `${Math.max(0, Math.round((Date.now() - operationStartedAt) / 1000))} 秒`;
-  }, [operationStartedAt, activeOperation]);
+  }, [activeTask?.elapsedMs, operationStartedAt, activeOperation]);
   const larkCheck = checks.find((check) => check.name === "lark-cli");
   const cliCheck = checks.find((check) => check.name === "Config Sheet Forge CLI");
   const recommendedScenario = useMemo(
@@ -318,6 +356,56 @@ export function App() {
     await invoke("open_external_url", { url });
   }, [runtimeAvailable]);
 
+  const waitForTask = useCallback(async (initial: TaskSnapshot): Promise<TaskSnapshot> => {
+    let current = initial;
+    setActiveTask(current);
+    setActiveOperation(current.operation);
+    setOperationStartedAt(Date.now());
+    while (!isTerminalTask(current.status)) {
+      await delay(500);
+      current = await invoke<TaskSnapshot>("get_task", { taskId: current.taskId });
+      setActiveTask(current);
+    }
+    setActiveTask(null);
+    setActiveOperation("");
+    setOperationStartedAt(null);
+    return current;
+  }, []);
+
+  const startToolCheckTask = useCallback(async (root: string) => {
+    if (!runtimeAvailable) {
+      return;
+    }
+
+    const initial = await invoke<TaskSnapshot>("start_tool_check_task", { projectRoot: root });
+    const finalTask = await waitForTask(initial);
+    if (finalTask.status === "succeeded" && finalTask.resultJson) {
+      try {
+        setChecks(JSON.parse(finalTask.resultJson) as ToolCheck[]);
+      } catch {
+        setError("工具检查完成，但结果解析失败。请打开 Debug 查看诊断。");
+      }
+    } else if (finalTask.status === "canceled") {
+      setLastResult(taskToCliResult(finalTask));
+    } else {
+      setError(finalTask.message || "工具检查失败。");
+      setLastResult(taskToCliResult(finalTask));
+    }
+  }, [runtimeAvailable, waitForTask]);
+
+  const cancelActiveTask = useCallback(async () => {
+    if (!activeTask?.taskId || !runtimeAvailable) {
+      return;
+    }
+
+    try {
+      const canceled = await invoke<TaskSnapshot>("cancel_task", { taskId: activeTask.taskId });
+      setActiveTask(canceled);
+    } catch (ex) {
+      setError(ex instanceof Error ? ex.message : String(ex));
+    }
+  }, [activeTask?.taskId, runtimeAvailable]);
+
   const discover = useCallback(async (overrideRoot?: string) => {
     const targetRoot = typeof overrideRoot === "string" ? overrideRoot : projectRoot;
     setError("");
@@ -344,15 +432,14 @@ export function App() {
 
       const result = await invoke<ProjectSnapshot>("discover_project", { projectRoot: targetRoot });
       setSnapshot(result);
-      const toolChecks = await invoke<ToolCheck[]>("doctor_tools", { projectRoot: result.projectRoot });
-      setChecks(toolChecks);
+      void startToolCheckTask(result.projectRoot);
     } catch (ex) {
       setError(ex instanceof Error ? ex.message : String(ex));
     } finally {
       setActiveOperation("");
       setOperationStartedAt(null);
     }
-  }, [projectRoot, runtimeAvailable]);
+  }, [projectRoot, runtimeAvailable, startToolCheckTask]);
 
   useEffect(() => {
     if (!runtimeAvailable || projectRoot) {
@@ -374,8 +461,11 @@ export function App() {
 
   const runSetupAction = useCallback(async (action: string) => {
     setError("");
-    setActiveOperation(action);
-    setOperationStartedAt(Date.now());
+    if (activeTask && !isTerminalTask(activeTask.status)) {
+      setError("后台任务正在运行，完成或取消后再启动新的安装/授权动作。");
+      return;
+    }
+
     setLastResult(null);
     try {
       if (!runtimeAvailable) {
@@ -388,24 +478,23 @@ export function App() {
         return;
       }
 
-      const result = await invoke<CliRunResult>("run_setup_action", {
+      const initial = await invoke<TaskSnapshot>("start_setup_task", {
         projectRoot: snapshot?.projectRoot || projectRoot,
         action,
         appId: botAppId,
         secretValue: botSecret
       });
+      const task = await waitForTask(initial);
+      const result = taskToCliResult(task);
       setLastResult(result);
       if (action === "configure_lark_bot") {
         setBotSecret("");
       }
-      await discover(snapshot?.projectRoot || projectRoot);
+      void startToolCheckTask(snapshot?.projectRoot || projectRoot);
     } catch (ex) {
       setError(ex instanceof Error ? ex.message : String(ex));
-    } finally {
-      setActiveOperation("");
-      setOperationStartedAt(null);
     }
-  }, [botAppId, botSecret, discover, projectRoot, runtimeAvailable, snapshot?.projectRoot]);
+  }, [activeTask, botAppId, botSecret, projectRoot, runtimeAvailable, snapshot?.projectRoot, startToolCheckTask, waitForTask]);
 
   const applyResult = useCallback((operation: string, result: CliRunResult) => {
     setLastResult(result);
@@ -487,6 +576,11 @@ export function App() {
       return;
     }
 
+    if (activeTask && !isTerminalTask(activeTask.status)) {
+      setError("后台任务正在运行，可以继续查看页面或点击取消；完成后再启动新的任务。");
+      return;
+    }
+
     if (operation === "unity-import") {
       await sendUnityBridgeCommand("import-assets");
       return;
@@ -522,8 +616,6 @@ export function App() {
       }
     }
 
-    setActiveOperation(operation);
-    setOperationStartedAt(Date.now());
     setLastResult(null);
     try {
       const previewPath = operation === "submit-merge-review" ? lastComparePreviewPath : lastSyncPreviewPath;
@@ -540,19 +632,20 @@ export function App() {
         return;
       }
 
-      const result = await invoke<CliRunResult>("run_cli", {
+      const initial = await invoke<TaskSnapshot>("start_task", {
         projectRoot: snapshot?.projectRoot || projectRoot,
+        operation,
         args
       });
+      const task = await waitForTask(initial);
+      const result = taskToCliResult(task);
       applyResult(operation, result);
     } catch (ex) {
       setError(ex instanceof Error ? ex.message : String(ex));
-    } finally {
-      setActiveOperation("");
-      setOperationStartedAt(null);
     }
   }, [
     applyResult,
+    activeTask,
     identityMode,
     lastComparePreview,
     lastComparePreviewPath,
@@ -561,7 +654,8 @@ export function App() {
     projectRoot,
     runtimeAvailable,
     sendUnityBridgeCommand,
-    snapshot
+    snapshot,
+    waitForTask
   ]);
 
   const primaryDisabled = decision.primaryDisabled
@@ -606,10 +700,16 @@ export function App() {
         <section className="running-card">
           <div>
             <strong>正在运行：{operationLabels[activeOperation] || activeOperation}</strong>
-            <p>当前阶段：{operationStage(activeOperation)}</p>
+            <p>Task：{activeTask?.taskId || "准备中"}</p>
+            <p>当前阶段：{activeTask?.phase || operationStage(activeOperation)}</p>
+            {activeTask?.message ? <p>{activeTask.message}</p> : null}
             <p>安全性：{activeOperation.includes("dry-run") || activeOperation.includes("preview") ? "只读预览，不写文件。" : decision.safety}</p>
+            {(activeTask?.elapsedMs || 0) > 10000 ? <p>仍在运行，可以取消；取消会终止进程树，不会继续写入本地 cache/飞书。</p> : null}
           </div>
-          <span>{elapsed}</span>
+          <div className="running-actions">
+            <span>{elapsed}</span>
+            {activeTask?.taskId ? <button className="danger-button" onClick={() => void cancelActiveTask()}>取消</button> : null}
+          </div>
         </section>
       ) : null}
 

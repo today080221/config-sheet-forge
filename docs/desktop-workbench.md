@@ -30,6 +30,8 @@ Desktop 是 Config Sheet Forge 的官方主工作台。它负责日常配表 Sou
 
 从 0.4.35 开始，环境/授权页会把“工具已安装”和“账号已授权”分开显示。`gh` 已登录时只显示“已授权为 xxx”，不会再给醒目的“GitHub 授权”按钮；`lark-cli` bot doctor 通过时会收起 App Secret 输入框，只在更多操作里提供重新配置。普通视图会把 doctor JSON 转成人话，完整路径和 raw 输出仍只在 Debug 里。
 
+从 0.4.36 开始，Desktop 不再在窗口主线程里等待 `sync-cache`、`doctor`、`gh auth` 或 `lark-cli` 结束。点击按钮会立即创建后台 task，页面可以继续切换视图、展开 Debug、查看进度或取消；取消会终止 Windows 进程树，不只是杀父进程。
+
 Legacy 只用于没有 Desktop、CI 调试或救急 fallback。普通策划不需要从 Legacy 开始。
 
 ## Desktop v1 页面

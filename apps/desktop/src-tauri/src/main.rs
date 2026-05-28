@@ -1,10 +1,18 @@
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+
+static TASKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<TaskState>>>>> = OnceLock::new();
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +85,47 @@ struct CliRunResult {
     result_json: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskSnapshot {
+    task_id: String,
+    operation: String,
+    status: String,
+    phase: String,
+    message: String,
+    elapsed_ms: u128,
+    command_line: String,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    result_path: String,
+    result_json: String,
+    executable_path: String,
+    source: String,
+    attempted_paths: Vec<String>,
+    progress_path: String,
+    pid: u32,
+}
+
+struct TaskState {
+    snapshot: TaskSnapshot,
+    started_at: Instant,
+    finished_at: Option<Instant>,
+    cancel_requested: bool,
+}
+
+#[derive(Clone)]
+struct TaskSpec {
+    operation: String,
+    root: PathBuf,
+    tool: ResolvedTool,
+    args: Vec<String>,
+    lark_cli: Option<ResolvedTool>,
+    stdin: Option<String>,
+    result_path: String,
+    progress_path: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReleaseSmokeReport {
@@ -143,18 +192,13 @@ fn discover_project(project_root: String) -> Result<ProjectSnapshot, String> {
     })?;
 
     let config = read_json(&config_path).unwrap_or(Value::Null);
-    let git_branch = run_simple_capture(&root, "git", &["branch", "--show-current"])
-        .ok()
-        .map(|r| r.stdout.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+    let git_branch = read_git_branch_from_files(&root).unwrap_or_else(|| "unknown".to_string());
     let feishu_profile = find_string_deep(&config, &["feishuProfile", "profile", "currentProfile"])
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| git_branch.clone());
     let github_repository = find_string_deep(&config, &["githubRepository", "repository"])
-        .or_else(|| github_repo_from_git_remote(&root))
+        .or_else(|| github_repo_from_git_config(&root))
         .unwrap_or_default();
-    let pr = detect_current_pr(&root);
 
     Ok(ProjectSnapshot {
         project_root: root.to_string_lossy().to_string(),
@@ -176,13 +220,12 @@ fn discover_project(project_root: String) -> Result<ProjectSnapshot, String> {
         registry_base_url: find_string_deep(&config, &["registryBaseUrl", "baseUrl"])
             .unwrap_or_default(),
         github_repository,
-        pr_url: pr.1,
-        pr_number: pr.0,
+        pr_url: String::new(),
+        pr_number: String::new(),
     })
 }
 
-#[tauri::command]
-fn doctor_tools(project_root: String) -> Vec<ToolCheck> {
+fn doctor_tools_snapshot(project_root: String) -> Vec<ToolCheck> {
     let root = resolve_project_root(project_root)
         .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let config = read_desktop_project_config(&root);
@@ -241,14 +284,60 @@ fn doctor_tools(project_root: String) -> Vec<ToolCheck> {
 }
 
 #[tauri::command]
-fn run_cli(project_root: String, args: Vec<String>) -> Result<CliRunResult, String> {
+fn start_tool_check_task(project_root: String) -> Result<TaskSnapshot, String> {
     let root = resolve_project_root(project_root)?;
-    let config = read_desktop_project_config(&root);
-    let resolved = resolve_config_sheet_forge_cli(&root, &config)
-        .ok_or_else(|| missing_cli_message(&root, &config))?;
-    let lark = resolve_lark_cli(&root, &config);
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    run_capture_resolved(&root, &resolved, &arg_refs, lark.as_ref(), None)
+    let (task_id, task_state, initial) = create_task_state(
+        "tool-check".to_string(),
+        "Desktop 内部任务：检查工具安装、授权和账号状态".to_string(),
+        String::new(),
+        "desktop-internal".to_string(),
+        Vec::new(),
+        String::new(),
+        String::new(),
+    );
+
+    thread::spawn({
+        let task_state = task_state.clone();
+        move || {
+            update_task(&task_state, |state| {
+                state.snapshot.phase = "检查本机工具".to_string();
+                state.snapshot.message =
+                    "正在检查 Config Sheet Forge CLI、git、gh、lark-cli 和飞书直连。".to_string();
+            });
+
+            let checks = doctor_tools_snapshot(root.to_string_lossy().to_string());
+            let result_json =
+                serde_json::to_string_pretty(&checks).unwrap_or_else(|_| "[]".to_string());
+            update_task(&task_state, |state| {
+                if state.cancel_requested {
+                    state.snapshot.status = "canceled".to_string();
+                    state.snapshot.message = "已取消工具检查。".to_string();
+                    state.snapshot.exit_code = -1;
+                } else {
+                    state.snapshot.status = "succeeded".to_string();
+                    state.snapshot.phase = "工具检查完成".to_string();
+                    state.snapshot.message = "工具安装、授权和账号状态已刷新。".to_string();
+                    state.snapshot.exit_code = 0;
+                    state.snapshot.result_json = result_json;
+                }
+                state.finished_at = Some(Instant::now());
+            });
+        }
+    });
+
+    remember_task(task_id, task_state);
+    Ok(initial)
+}
+
+#[tauri::command]
+fn start_task(
+    project_root: String,
+    operation: String,
+    args: Vec<String>,
+) -> Result<TaskSnapshot, String> {
+    let root = resolve_project_root(project_root)?;
+    let spec = build_cli_task_spec(root, operation, args)?;
+    start_process_task(spec)
 }
 
 #[tauri::command]
@@ -285,82 +374,41 @@ fn write_bridge_command(
 }
 
 #[tauri::command]
-fn run_setup_action(
+fn start_setup_task(
     project_root: String,
     action: String,
     app_id: String,
     secret_value: String,
-) -> Result<CliRunResult, String> {
+) -> Result<TaskSnapshot, String> {
     let root = resolve_project_root(project_root)?;
     let config = read_desktop_project_config(&root);
-    match action.as_str() {
-        "install_git" => run_setup_tool(
-            &root,
-            "winget",
-            &["install", "--id", "Git.Git", "-e", "--source", "winget"],
-            None,
-        ),
-        "install_gh" => run_setup_tool(
-            &root,
-            "winget",
-            &["install", "--id", "GitHub.cli", "-e", "--source", "winget"],
-            None,
-        ),
-        "gh_auth" => {
-            let gh = resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""])
-                .ok_or_else(|| "没有找到 gh。请先点击“安装 GitHub CLI”。".to_string())?;
-            run_capture_resolved(&root, &gh, &["auth", "login"], None, None)
-        }
-        "gh_logout" => {
-            let gh = resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""])
-                .ok_or_else(|| "没有找到 gh。请先点击“安装 GitHub CLI”。".to_string())?;
-            run_capture_resolved(
-                &root,
-                &gh,
-                &["auth", "logout", "-h", "github.com"],
-                None,
-                None,
-            )
-        }
-        "install_lark_cli" => {
-            run_setup_tool(&root, "npm", &["install", "-g", "@larksuite/cli"], None)
-        }
-        "lark_auth_user" => {
-            let lark = resolve_lark_cli(&root, &config)
-                .ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?;
-            run_capture_resolved(&root, &lark, &["auth", "login", "--recommend"], None, None)
-        }
-        "lark_doctor" => {
-            let lark = resolve_lark_cli(&root, &config)
-                .ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?;
-            run_capture_resolved(&root, &lark, &["doctor"], None, None)
-        }
-        "configure_lark_bot" => {
-            if app_id.trim().is_empty() || secret_value.is_empty() {
-                return Err("请先填写飞书 App ID 和 App Secret。Secret 只会通过 stdin 传给 lark-cli，不写入仓库或日志。".to_string());
-            }
+    let spec = build_setup_task_spec(root, &config, action, app_id, secret_value)?;
+    start_process_task(spec)
+}
 
-            let lark = resolve_lark_cli(&root, &config)
-                .ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?;
-            let stdin = format!("{}\n", secret_value);
-            run_capture_resolved(
-                &root,
-                &lark,
-                &[
-                    "config",
-                    "init",
-                    "--app-id",
-                    app_id.trim(),
-                    "--app-secret-stdin",
-                    "--brand",
-                    "feishu",
-                ],
-                None,
-                Some(&stdin),
-            )
-        }
-        _ => Err("未知安装/授权动作：".to_string() + &action),
+#[tauri::command]
+fn get_task(task_id: String) -> Result<TaskSnapshot, String> {
+    let state = find_task(&task_id)?;
+    Ok(snapshot_task(&state))
+}
+
+#[tauri::command]
+fn cancel_task(task_id: String) -> Result<TaskSnapshot, String> {
+    let state = find_task(&task_id)?;
+    let pid = {
+        let mut guard = state.lock().map_err(|_| "任务状态锁已损坏。".to_string())?;
+        guard.cancel_requested = true;
+        guard.snapshot.status = "canceling".to_string();
+        guard.snapshot.phase = "正在取消".to_string();
+        guard.snapshot.message = "正在终止后台进程树；取消后不会写本地 cache 或飞书。".to_string();
+        guard.snapshot.pid
+    };
+
+    if pid > 0 {
+        kill_process_tree(pid);
     }
+
+    Ok(snapshot_task(&state))
 }
 
 #[tauri::command]
@@ -410,9 +458,11 @@ fn main() {
             startup_project_root,
             startup_context,
             discover_project,
-            doctor_tools,
-            run_cli,
-            run_setup_action,
+            start_tool_check_task,
+            start_task,
+            start_setup_task,
+            get_task,
+            cancel_task,
             write_bridge_command,
             open_external_url
         ])
@@ -709,17 +759,6 @@ fn tool_from_path(path: PathBuf, source: &str) -> ResolvedTool {
         source: source.to_string(),
         attempted_paths: Vec::new(),
     }
-}
-
-fn run_setup_tool(
-    root: &Path,
-    name: &str,
-    args: &[&str],
-    stdin: Option<&str>,
-) -> Result<CliRunResult, String> {
-    let tool = resolve_path_tool(name, &[".exe", ".cmd", ".bat", ""])
-        .ok_or_else(|| format!("没有找到 {}，请先安装或手动配置 PATH。", name))?;
-    run_capture_resolved(root, &tool, args, None, stdin)
 }
 
 fn tool_check_resolved(
@@ -1437,6 +1476,509 @@ fn shorten_line(value: &str, max_chars: usize) -> String {
     output
 }
 
+fn build_cli_task_spec(
+    root: PathBuf,
+    operation: String,
+    args: Vec<String>,
+) -> Result<TaskSpec, String> {
+    let config = read_desktop_project_config(&root);
+    let tool = resolve_config_sheet_forge_cli(&root, &config)
+        .ok_or_else(|| missing_cli_message(&root, &config))?;
+    let lark_cli = resolve_lark_cli(&root, &config);
+    let result_path = find_result_path(
+        &root,
+        &tool.command_args(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+    )
+    .unwrap_or_default();
+    let progress_path = find_named_arg_path(&root, &args, "--progress").unwrap_or_default();
+    Ok(TaskSpec {
+        operation,
+        root,
+        tool,
+        args,
+        lark_cli,
+        stdin: None,
+        result_path,
+        progress_path,
+    })
+}
+
+fn build_setup_task_spec(
+    root: PathBuf,
+    config: &Value,
+    action: String,
+    app_id: String,
+    secret_value: String,
+) -> Result<TaskSpec, String> {
+    let (tool, args, stdin) = match action.as_str() {
+        "install_git" => (
+            resolve_path_tool("winget", &[".exe", ".cmd", ".bat", ""]).ok_or_else(|| {
+                "没有找到 winget。请手动安装 Git，或把安装器路径加入 PATH。".to_string()
+            })?,
+            vec!["install", "--id", "Git.Git", "-e", "--source", "winget"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            None,
+        ),
+        "install_gh" => (
+            resolve_path_tool("winget", &[".exe", ".cmd", ".bat", ""]).ok_or_else(|| {
+                "没有找到 winget。请手动安装 GitHub CLI，或把安装器路径加入 PATH。".to_string()
+            })?,
+            vec!["install", "--id", "GitHub.cli", "-e", "--source", "winget"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            None,
+        ),
+        "gh_auth" => (
+            resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""])
+                .ok_or_else(|| "没有找到 gh。请先点击“安装 GitHub CLI”。".to_string())?,
+            vec!["auth", "login"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            None,
+        ),
+        "gh_logout" => (
+            resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""])
+                .ok_or_else(|| "没有找到 gh。请先点击“安装 GitHub CLI”。".to_string())?,
+            vec!["auth", "logout", "-h", "github.com"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            None,
+        ),
+        "install_lark_cli" => (
+            resolve_path_tool("npm", &[".cmd", ".exe", ".bat", ""]).ok_or_else(|| {
+                "没有找到 npm。请先安装 Node.js LTS，然后重试安装 lark-cli。".to_string()
+            })?,
+            vec!["install", "-g", "@larksuite/cli"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            None,
+        ),
+        "lark_auth_user" => (
+            resolve_lark_cli(&root, config)
+                .ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?,
+            vec!["auth", "login", "--recommend"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            None,
+        ),
+        "lark_doctor" => (
+            resolve_lark_cli(&root, config)
+                .ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?,
+            vec!["doctor"].into_iter().map(|s| s.to_string()).collect(),
+            None,
+        ),
+        "configure_lark_bot" => {
+            if app_id.trim().is_empty() || secret_value.is_empty() {
+                return Err("请先填写飞书 App ID 和 App Secret。Secret 只会通过 stdin 传给 lark-cli，不写入仓库或日志。".to_string());
+            }
+
+            (
+                resolve_lark_cli(&root, config)
+                    .ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?,
+                vec![
+                    "config",
+                    "init",
+                    "--app-id",
+                    app_id.trim(),
+                    "--app-secret-stdin",
+                    "--brand",
+                    "feishu",
+                ]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+                Some(format!("{}\n", secret_value)),
+            )
+        }
+        _ => return Err("未知安装/授权动作：".to_string() + &action),
+    };
+
+    Ok(TaskSpec {
+        operation: action,
+        root,
+        tool,
+        args,
+        lark_cli: None,
+        stdin,
+        result_path: String::new(),
+        progress_path: String::new(),
+    })
+}
+
+fn start_process_task(spec: TaskSpec) -> Result<TaskSnapshot, String> {
+    let all_args = spec
+        .tool
+        .command_args(&spec.args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let command_line = build_display_command(&spec.tool, &all_args);
+    let (task_id, task_state, initial) = create_task_state(
+        spec.operation.clone(),
+        command_line,
+        spec.tool.display_path.clone(),
+        spec.tool.source.clone(),
+        spec.tool.attempted_paths.clone(),
+        spec.result_path.clone(),
+        spec.progress_path.clone(),
+    );
+
+    thread::spawn({
+        let task_state = task_state.clone();
+        move || run_process_task_thread(task_state, spec)
+    });
+
+    remember_task(task_id, task_state);
+    Ok(initial)
+}
+
+fn run_process_task_thread(task_state: Arc<Mutex<TaskState>>, spec: TaskSpec) {
+    update_task(&task_state, |state| {
+        state.snapshot.phase = "正在启动本机工具".to_string();
+        state.snapshot.message = format!("正在执行：{}", state.snapshot.operation);
+    });
+
+    if !spec.progress_path.is_empty() {
+        let progress_state = task_state.clone();
+        let progress_path = spec.progress_path.clone();
+        thread::spawn(move || tail_progress_file(progress_state, progress_path));
+    }
+
+    let mut command = Command::new(&spec.tool.program);
+    let all_args = spec
+        .tool
+        .command_args(&spec.args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    command.args(&all_args).current_dir(&spec.root);
+    configure_process_environment(&mut command, spec.lark_cli.as_ref());
+    if spec.stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            update_task(&task_state, |state| {
+                state.snapshot.status = "failed".to_string();
+                state.snapshot.phase = "启动失败".to_string();
+                state.snapshot.message = format!("无法启动 {}：{}", spec.tool.display_path, err);
+                state.snapshot.exit_code = -1;
+                state.finished_at = Some(Instant::now());
+            });
+            return;
+        }
+    };
+
+    let pid = child.id();
+    update_task(&task_state, |state| {
+        state.snapshot.pid = pid;
+        state.snapshot.phase = infer_phase_from_args(&spec.args);
+        state.snapshot.message = format!("进程已启动，可以切换页面或随时取消。PID {}", pid);
+    });
+
+    if let Some(input) = spec.stdin.as_deref() {
+        if let Some(mut pipe) = child.stdin.take() {
+            if let Err(err) = pipe.write_all(input.as_bytes()) {
+                update_task(&task_state, |state| {
+                    append_limited(
+                        &mut state.snapshot.stderr,
+                        &format!("写入 stdin 失败：{}\n", err),
+                    );
+                });
+            }
+        }
+    }
+
+    if let Some(stdout) = child.stdout.take() {
+        spawn_pipe_reader(task_state.clone(), stdout, false);
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_pipe_reader(task_state.clone(), stderr, true);
+    }
+
+    let wait_result = child.wait();
+    let exit_code = wait_result
+        .as_ref()
+        .ok()
+        .and_then(|status| status.code())
+        .unwrap_or(-1);
+    let result_json = if spec.result_path.is_empty() {
+        String::new()
+    } else {
+        fs::read_to_string(&spec.result_path).unwrap_or_default()
+    };
+
+    update_task(&task_state, |state| {
+        state.snapshot.exit_code = exit_code;
+        state.snapshot.result_json = result_json;
+        state.finished_at = Some(Instant::now());
+        if state.cancel_requested {
+            state.snapshot.status = "canceled".to_string();
+            state.snapshot.phase = "已取消".to_string();
+            state.snapshot.message =
+                "已取消，本次没有继续写入本地 cache、飞书或 ProjectSettings。".to_string();
+        } else if wait_result.is_err() {
+            state.snapshot.status = "failed".to_string();
+            state.snapshot.phase = "等待进程失败".to_string();
+            state.snapshot.message = wait_result
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "等待进程失败。".to_string());
+        } else if exit_code == 0 {
+            state.snapshot.status = "succeeded".to_string();
+            state.snapshot.phase = "完成".to_string();
+            state.snapshot.message = "任务完成。".to_string();
+        } else {
+            state.snapshot.status = "failed".to_string();
+            state.snapshot.phase = "失败".to_string();
+            state.snapshot.message = format!(
+                "任务失败，退出码 {}。请看结果摘要或 Debug 日志。",
+                exit_code
+            );
+        }
+    });
+}
+
+fn spawn_pipe_reader<R>(task_state: Arc<Mutex<TaskState>>, pipe: R, stderr: bool)
+where
+    R: std::io::Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let reader = BufReader::new(pipe);
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            update_task(&task_state, |state| {
+                if stderr {
+                    append_limited(&mut state.snapshot.stderr, &(line.clone() + "\n"));
+                } else {
+                    append_limited(&mut state.snapshot.stdout, &(line.clone() + "\n"));
+                }
+                if state.snapshot.progress_path.is_empty() {
+                    state.snapshot.message = shorten_line(&line, 160);
+                }
+            });
+        }
+    });
+}
+
+fn tail_progress_file(task_state: Arc<Mutex<TaskState>>, progress_path: String) {
+    let path = PathBuf::from(progress_path);
+    let mut offset = 0usize;
+    loop {
+        let status = task_state
+            .lock()
+            .ok()
+            .map(|state| state.snapshot.status.clone())
+            .unwrap_or_else(|| "failed".to_string());
+        if !matches!(status.as_str(), "running" | "canceling") {
+            break;
+        }
+
+        if let Ok(text) = fs::read_to_string(&path) {
+            if text.len() > offset {
+                for line in text[offset..].lines() {
+                    apply_progress_line(&task_state, line);
+                }
+                offset = text.len();
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn apply_progress_line(task_state: &Arc<Mutex<TaskState>>, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let parsed = serde_json::from_str::<Value>(trimmed).unwrap_or(Value::Null);
+    update_task(task_state, |state| {
+        if let Some(phase) = parsed.get("phase").and_then(|v| v.as_str()) {
+            state.snapshot.phase = human_progress_phase(phase);
+        }
+
+        let table = parsed.get("tableId").and_then(|v| v.as_str()).unwrap_or("");
+        let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let current = parsed.get("current").and_then(|v| v.as_i64()).unwrap_or(0);
+        let total = parsed.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+        state.snapshot.message = if !table.is_empty() && current > 0 && total > 0 {
+            format!("{}（{} / {}）：{}", table, current, total, message)
+        } else if !table.is_empty() {
+            format!("{}：{}", table, message)
+        } else if !message.is_empty() {
+            message.to_string()
+        } else {
+            shorten_line(trimmed, 160)
+        };
+    });
+}
+
+fn human_progress_phase(phase: &str) -> String {
+    let lower = phase.to_lowercase();
+    if lower.contains("registry") {
+        "读取注册中心".to_string()
+    } else if lower.contains("online") || lower.contains("sheet") || lower.contains("read") {
+        "读取在线表".to_string()
+    } else if lower.contains("export") || lower.contains("xlsx") {
+        "导出 xlsx".to_string()
+    } else if lower.contains("triangulation") || lower.contains("compare") {
+        "三方一致性检查".to_string()
+    } else if lower.contains("hash") {
+        "比较 cache hash".to_string()
+    } else if lower.contains("report") {
+        "生成报告".to_string()
+    } else {
+        phase.to_string()
+    }
+}
+
+fn infer_phase_from_args(args: &[String]) -> String {
+    let joined = args.join(" ").to_lowercase();
+    if joined.contains("sync-cache") {
+        "读取注册中心 / 读取在线表 / 导出 xlsx / 三方一致性检查".to_string()
+    } else if joined.contains("pr-gate") {
+        "生成 PR 检查报告".to_string()
+    } else if joined.contains("compare") || joined.contains("merge") {
+        "解析 PR 上下文 / 准备语义输入 / 生成报告".to_string()
+    } else if joined.contains("doctor") {
+        "检查工具授权".to_string()
+    } else {
+        "运行本机命令".to_string()
+    }
+}
+
+fn create_task_state(
+    operation: String,
+    command_line: String,
+    executable_path: String,
+    source: String,
+    attempted_paths: Vec<String>,
+    result_path: String,
+    progress_path: String,
+) -> (String, Arc<Mutex<TaskState>>, TaskSnapshot) {
+    let sequence = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    let task_id = format!("task-{}-{}", chrono_like_timestamp(), sequence);
+    let snapshot = TaskSnapshot {
+        task_id: task_id.clone(),
+        operation,
+        status: "running".to_string(),
+        phase: "已开始后台任务".to_string(),
+        message: "后台任务已启动，窗口仍可切换页面、打开 Debug 或取消。".to_string(),
+        elapsed_ms: 0,
+        command_line,
+        exit_code: -1,
+        stdout: String::new(),
+        stderr: String::new(),
+        result_path,
+        result_json: String::new(),
+        executable_path,
+        source,
+        attempted_paths,
+        progress_path,
+        pid: 0,
+    };
+    let state = TaskState {
+        snapshot: snapshot.clone(),
+        started_at: Instant::now(),
+        finished_at: None,
+        cancel_requested: false,
+    };
+    (task_id, Arc::new(Mutex::new(state)), snapshot)
+}
+
+fn task_registry() -> &'static Mutex<HashMap<String, Arc<Mutex<TaskState>>>> {
+    TASKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_task(task_id: String, task_state: Arc<Mutex<TaskState>>) {
+    if let Ok(mut registry) = task_registry().lock() {
+        registry.insert(task_id, task_state);
+    }
+}
+
+fn find_task(task_id: &str) -> Result<Arc<Mutex<TaskState>>, String> {
+    task_registry()
+        .lock()
+        .map_err(|_| "任务注册表锁已损坏。".to_string())?
+        .get(task_id)
+        .cloned()
+        .ok_or_else(|| format!("没有找到后台任务：{}", task_id))
+}
+
+fn snapshot_task(task_state: &Arc<Mutex<TaskState>>) -> TaskSnapshot {
+    let guard = task_state.lock().expect("task state poisoned");
+    let mut snapshot = guard.snapshot.clone();
+    snapshot.elapsed_ms = guard
+        .finished_at
+        .unwrap_or_else(Instant::now)
+        .duration_since(guard.started_at)
+        .as_millis();
+    snapshot
+}
+
+fn update_task<F>(task_state: &Arc<Mutex<TaskState>>, update: F)
+where
+    F: FnOnce(&mut TaskState),
+{
+    if let Ok(mut guard) = task_state.lock() {
+        update(&mut guard);
+    }
+}
+
+fn append_limited(buffer: &mut String, text: &str) {
+    const MAX_LOG_CHARS: usize = 262_144;
+    buffer.push_str(text);
+    if buffer.chars().count() > MAX_LOG_CHARS {
+        let trimmed: String = buffer
+            .chars()
+            .rev()
+            .take(MAX_LOG_CHARS)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        *buffer = "[日志已截断，仅保留最近部分]\n".to_string() + &trimmed;
+    }
+}
+
+fn find_named_arg_path(root: &Path, args: &[String], name: &str) -> Option<String> {
+    for window in args.windows(2) {
+        if window[0] == name {
+            let path = PathBuf::from(&window[1]);
+            let full = if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            };
+            return Some(full.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+fn kill_process_tree(pid: u32) {
+    if cfg!(windows) {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    } else {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+}
+
 fn run_capture_resolved(
     root: &Path,
     tool: &ResolvedTool,
@@ -1503,21 +2045,6 @@ fn find_result_path(root: &Path, args: &[String]) -> Option<String> {
     }
 
     None
-}
-
-fn run_simple_capture(
-    root: &Path,
-    executable: &str,
-    args: &[&str],
-) -> Result<CliRunResult, String> {
-    let tool = ResolvedTool {
-        program: executable.to_string(),
-        prefix_args: Vec::new(),
-        display_path: executable.to_string(),
-        source: "direct".to_string(),
-        attempted_paths: Vec::new(),
-    };
-    run_capture_resolved(root, &tool, args, None, None)
 }
 
 fn configure_process_environment(command: &mut Command, lark_cli: Option<&ResolvedTool>) {
@@ -1641,13 +2168,53 @@ fn find_string_deep(value: &Value, keys: &[&str]) -> Option<String> {
     }
 }
 
-fn github_repo_from_git_remote(root: &Path) -> Option<String> {
-    let remote = run_simple_capture(root, "git", &["remote", "get-url", "origin"])
-        .ok()?
-        .stdout
-        .trim()
-        .to_string();
-    parse_github_repository(&remote)
+fn read_git_branch_from_files(root: &Path) -> Option<String> {
+    let git_dir = resolve_git_dir(root)?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let trimmed = head.trim();
+    if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
+        return Some(branch.trim().to_string());
+    }
+    if trimmed.len() >= 7 {
+        return Some(trimmed.chars().take(7).collect());
+    }
+    None
+}
+
+fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+
+    let git_file = fs::read_to_string(dot_git).ok()?;
+    let path = git_file.trim().strip_prefix("gitdir:")?.trim();
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        Some(candidate)
+    } else {
+        Some(root.join(candidate))
+    }
+}
+
+fn github_repo_from_git_config(root: &Path) -> Option<String> {
+    let git_dir = resolve_git_dir(root)?;
+    let config = fs::read_to_string(git_dir.join("config")).ok()?;
+    let mut in_origin = false;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_origin = trimmed.contains("remote \"origin\"");
+            continue;
+        }
+
+        if in_origin && trimmed.starts_with("url") {
+            if let Some((_, value)) = trimmed.split_once('=') {
+                return parse_github_repository(value.trim());
+            }
+        }
+    }
+    None
 }
 
 fn parse_github_repository(remote: &str) -> Option<String> {
@@ -1661,37 +2228,6 @@ fn parse_github_repository(remote: &str) -> Option<String> {
     }
 
     None
-}
-
-fn detect_current_pr(root: &Path) -> (String, String) {
-    let Some(gh) = resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""]) else {
-        return (String::new(), String::new());
-    };
-    let Ok(result) = run_capture_resolved(
-        root,
-        &gh,
-        &["pr", "view", "--json", "number,url"],
-        None,
-        None,
-    ) else {
-        return (String::new(), String::new());
-    };
-    if result.exit_code != 0 {
-        return (String::new(), String::new());
-    }
-
-    let json = serde_json::from_str::<Value>(&result.stdout).unwrap_or(Value::Null);
-    let number = json
-        .get("number")
-        .and_then(|v| v.as_i64())
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let url = json
-        .get("url")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    (number, url)
 }
 
 fn first_line(text: &str) -> Option<String> {
@@ -1737,5 +2273,104 @@ fn sanitize_file_name(value: &str) -> String {
         "command".to_string()
     } else {
         output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn powershell_tool() -> ResolvedTool {
+        ResolvedTool {
+            program: "powershell.exe".to_string(),
+            prefix_args: vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+            ],
+            display_path: "powershell.exe".to_string(),
+            source: "test".to_string(),
+            attempted_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn start_process_task_returns_before_long_process_exits() {
+        let spec = TaskSpec {
+            operation: "test-long-process".to_string(),
+            root: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            tool: powershell_tool(),
+            args: vec!["Start-Sleep -Seconds 30".to_string()],
+            lark_cli: None,
+            stdin: None,
+            result_path: String::new(),
+            progress_path: String::new(),
+        };
+        let started = Instant::now();
+        let snapshot = start_process_task(spec).expect("task should start");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(snapshot.status, "running");
+        let _ = cancel_task(snapshot.task_id);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cancel_task_kills_child_process_tree() {
+        let pid_file =
+            env::temp_dir().join(format!("csforge-child-{}.pid", chrono_like_timestamp()));
+        let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$p=Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' -PassThru; Set-Content -LiteralPath '{}' $p.Id; Start-Sleep -Seconds 60",
+            escaped_pid_file
+        );
+        let spec = TaskSpec {
+            operation: "test-child-tree".to_string(),
+            root: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            tool: powershell_tool(),
+            args: vec![script],
+            lark_cli: None,
+            stdin: None,
+            result_path: String::new(),
+            progress_path: String::new(),
+        };
+        let snapshot = start_process_task(spec).expect("task should start");
+        let mut child_pid = String::new();
+        for _ in 0..20 {
+            if let Ok(text) = fs::read_to_string(&pid_file) {
+                child_pid = text.trim().to_string();
+                if !child_pid.is_empty() {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!child_pid.is_empty(), "child process pid should be written");
+
+        let _ = cancel_task(snapshot.task_id.clone()).expect("cancel should start");
+        for _ in 0..30 {
+            let task = get_task(snapshot.task_id.clone()).expect("task should exist");
+            if is_task_terminal(&task.status) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", child_pid)])
+            .output()
+            .expect("tasklist should run");
+        let tasklist = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !tasklist.contains(&child_pid),
+            "child process should be killed with process tree"
+        );
+        let _ = fs::remove_file(pid_file);
+    }
+
+    fn is_task_terminal(status: &str) -> bool {
+        matches!(status, "succeeded" | "failed" | "canceled")
     }
 }

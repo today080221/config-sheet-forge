@@ -25,6 +25,13 @@ assert(app.includes("debugEnabled && check.executablePath"), "Debug off must hid
 assert(app.includes("className=\"debug-drawer\""), "Debug drawer markup is missing");
 assert(app.includes("lastResult.commandLine"), "Debug mode must expose full command");
 assert(app.includes("lastResult.resultJson"), "Debug mode must expose result JSON");
+assert(app.includes("start_task"), "Lifecycle actions must start backend tasks instead of blocking run_cli");
+assert(app.includes("start_setup_task"), "Setup/auth actions must start backend tasks instead of blocking run_setup_action");
+assert(app.includes("start_tool_check_task"), "Tool doctor checks must run as background tasks");
+assert(app.includes("cancel_task"), "Running tasks must expose cancellation");
+assert(app.includes("取消"), "Running task card must include a cancel button");
+assert(!app.includes("invoke<CliRunResult>(\"run_cli\""), "UI must not invoke blocking run_cli");
+assert(!app.includes("invoke<CliRunResult>(\"run_setup_action\""), "UI must not invoke blocking run_setup_action");
 assert(app.includes("shouldShowBotSecretForm(larkCheck, showBotConfigure)"), "Bot secret form must be hidden when bot is already configured");
 assert(app.includes("ToolActions"), "Tool/auth cards must use the shared action model");
 assert(app.includes("primaryToolAction"), "Tool/auth cards must distinguish primary auth/install actions from secondary actions");

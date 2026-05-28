@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.36
+
+- Desktop lifecycle / setup / doctor 全部改为后台任务模型：按钮点击后 `start_task` 立即返回 taskId，子进程在线程中运行，前端通过 `get_task` 轮询阶段、耗时、stdout/stderr 和 result JSON，不再在 Tauri invoke 中等待长任务结束。
+- 新增 `cancel_task`，Windows 下使用 `taskkill /T /F` 终止 config-sheet-forge、pwsh、lark-cli 等子进程树。取消后 UI 显示“已取消，本次没有继续写入本地 cache、飞书或 ProjectSettings”。
+- Desktop 会 tail CLI `--progress <ndjson>` 文件并把阶段转换成人话，例如读取注册中心、读取在线表、导出 xlsx、三方一致性检查、hash gate；没有 progress 时也会显示当前执行命令和最新日志摘要。
+- `discover_project` 不再同步调用 gh；项目分支和 GitHub remote 优先从 `.git` 文件读取，工具授权检查改为后台 `tool-check` 任务，避免打开 Desktop 或刷新环境页时卡住。
+- 补充 Tauri backend tests：`start_process_task` 必须在长任务结束前返回，`cancel_task` 必须杀掉 Windows 子进程树。CI 现在会运行 `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`。
+- 更新 Desktop Windows icon，多尺寸 `.ico` 不再依赖默认 Windows 应用图标。
+
 ## 0.4.35
 
 - Desktop 环境/授权卡改为统一 Tool/Auth 状态模型：工具安装、授权账号、scope 状态、下一步动作和更多操作分开展示，避免“绿色可用”旁边仍出现醒目授权按钮。

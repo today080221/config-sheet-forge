@@ -36,6 +36,8 @@ Legacy 窗口仍采用任务型 Dashboard：第一次打开会提示“飞书在
 
 从 0.4.35 开始，Desktop 的环境/授权卡使用统一 Tool/Auth 状态：工具是否安装、账号是否已授权、scope 是否满足、下一步该做什么会分开展示。`gh` 已登录时不会再显示醒目的 `GitHub 授权` 主按钮；`lark-cli` bot 已配置时不会默认展开 App Secret 输入框。完整工具路径、raw doctor JSON 和 token 相关诊断仍只在 Debug 里。
 
+从 0.4.36 开始，Desktop 的长任务使用后台 task runner。`sync-cache`、`compare-merge`、`pr-gate`、`doctor`、`gh auth`、`lark-cli doctor` 都不会在 Tauri invoke 里同步等待；窗口应能继续 repaint、切换视图、展开 Debug，并通过 `取消` 终止 Windows 进程树。
+
 Legacy 完整窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。
