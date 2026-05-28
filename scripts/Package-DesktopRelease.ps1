@@ -22,9 +22,12 @@ $tauriRoot = Join-Path $desktopRoot "src-tauri"
 $packageJsonPath = Join-Path $desktopRoot "package.json"
 $tauriConfigPath = Join-Path $tauriRoot "tauri.conf.json"
 $cargoTomlPath = Join-Path $tauriRoot "Cargo.toml"
+$cliProjectPath = Join-Path $repoRoot "src/cli/ConfigSheetForge.Cli/ConfigSheetForge.Cli.csproj"
 $releaseBuildRoot = Join-Path $repoRoot "obj/desktop-release"
 $releaseTauriConfigPath = Join-Path $releaseBuildRoot "tauri.conf.release.json"
 $releaseExe = Join-Path $tauriRoot "target/release/config-sheet-forge-desktop.exe"
+$cliPublishDir = Join-Path $releaseBuildRoot "cli-win-x64"
+$sidecarCliExe = Join-Path $cliPublishDir "config-sheet-forge.exe"
 
 function Invoke-Native([string]$FileName, [string[]]$Arguments, [string]$WorkingDirectory) {
   Push-Location $WorkingDirectory
@@ -49,6 +52,39 @@ function Assert-ContainsVersion([string]$Path, [string]$Needle, [string]$Name) {
 Assert-ContainsVersion $packageJsonPath "`"version`": `"$semver`"" "Desktop package.json"
 Assert-ContainsVersion $tauriConfigPath "`"version`": `"$semver`"" "Tauri config"
 Assert-ContainsVersion $cargoTomlPath "version = `"$semver`"" "Desktop Cargo.toml"
+
+function Publish-SidecarCli {
+  if (Test-Path $cliPublishDir) {
+    Remove-Item -LiteralPath $cliPublishDir -Recurse -Force
+  }
+
+  New-Item -ItemType Directory -Force -Path $cliPublishDir | Out-Null
+  Invoke-Native "dotnet" @(
+    "publish",
+    $cliProjectPath,
+    "-c",
+    "Release",
+    "-r",
+    "win-x64",
+    "--self-contained",
+    "true",
+    "-p:PublishSingleFile=true",
+    "-p:PublishTrimmed=false",
+    "-p:DebugType=None",
+    "-p:DebugSymbols=false",
+    "-o",
+    $cliPublishDir
+  ) $repoRoot
+
+  if (-not (Test-Path $sidecarCliExe)) {
+    throw "Config Sheet Forge sidecar CLI publish did not produce expected executable: $sidecarCliExe"
+  }
+
+  & $sidecarCliExe help | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "Config Sheet Forge sidecar CLI smoke failed: $sidecarCliExe help"
+  }
+}
 
 function New-ReleaseTauriConfig {
   New-Item -ItemType Directory -Force -Path $releaseBuildRoot | Out-Null
@@ -79,6 +115,14 @@ function Invoke-DesktopReleaseSmoke([string]$ExecutablePath) {
   & $ExecutablePath --smoke-release
   if ($LASTEXITCODE -ne 0) {
     throw "Desktop release smoke failed for $ExecutablePath"
+  }
+}
+
+function Invoke-DesktopReleaseSidecarSmoke([string]$ExecutablePath) {
+  Assert-ReleaseDesktopDoesNotContainDevUrl $ExecutablePath
+  & $ExecutablePath --smoke-release --expect-sidecar
+  if ($LASTEXITCODE -ne 0) {
+    throw "Desktop release sidecar smoke failed for $ExecutablePath"
   }
 }
 
@@ -117,6 +161,8 @@ finally {
   Pop-Location
 }
 
+Publish-SidecarCli
+
 if (-not (Test-Path $releaseExe)) {
   throw "Tauri build did not produce expected executable: $releaseExe"
 }
@@ -131,12 +177,14 @@ if (Test-Path $staging) {
 
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
 Copy-Item -LiteralPath $releaseExe -Destination (Join-Path $staging "ConfigSheetForgeDesktop.exe") -Force
+Copy-Item -LiteralPath $cliPublishDir -Destination (Join-Path $staging "cli") -Recurse -Force
 Set-Content -Path (Join-Path $staging "VERSION.txt") -Value $Version -NoNewline -Encoding UTF8
 Set-Content -Path (Join-Path $staging "README.txt") -Value @"
 Config Sheet Forge Desktop $Version
 
 Portable Windows x64 build.
 Launch ConfigSheetForgeDesktop.exe, or install/open it from the Unity UPM bridge.
+Includes cli/config-sheet-forge.exe as a sidecar CLI, so users do not need a global config-sheet-forge install.
 "@ -Encoding UTF8
 
 $zipPath = Join-Path $OutputDirectory $artifactName
@@ -159,6 +207,7 @@ if ($null -eq $extractedExe) {
 }
 
 Invoke-DesktopReleaseSmoke $extractedExe.FullName
+Invoke-DesktopReleaseSidecarSmoke $extractedExe.FullName
 
 $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $shaPath = "$zipPath.sha256"
@@ -171,6 +220,7 @@ $manifest = [ordered]@{
   artifact = $artifactName
   sha256 = $hash
   executable = "ConfigSheetForgeDesktop.exe"
+  sidecarCli = "cli/config-sheet-forge.exe"
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path $manifestPath -Encoding UTF8
 

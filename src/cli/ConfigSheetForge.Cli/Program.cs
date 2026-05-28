@@ -806,7 +806,7 @@ public static class Program
 
     private static async Task<int> SyncCacheLifecycleAsync(ParsedArgs args)
     {
-        if (args.HasFlag("allow-user-fallback"))
+        if (args.HasFlag("allow-user-fallback") && !(args.HasFlag("interactive-desktop") && args.HasFlag("dry-run")))
         {
             throw new CliException("sync-cache 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
         }
@@ -1005,7 +1005,7 @@ public static class Program
 
     private static async Task<int> RegistryStatusAsync(ParsedArgs args, string operation)
     {
-        if (args.HasFlag("allow-user-fallback"))
+        if (args.HasFlag("allow-user-fallback") && !args.HasFlag("interactive-desktop"))
         {
             throw new CliException(operation + " 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
         }
@@ -2750,7 +2750,7 @@ public static class Program
         if (SyncCacheOperationRequested(request.Operation))
         {
             request.SyncCache ??= new SyncCacheContract();
-            if (args.HasFlag("allow-user-fallback"))
+            if (args.HasFlag("allow-user-fallback") && !(args.HasFlag("interactive-desktop") && request.DryRun))
             {
                 throw new CliException("sync-cache 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
             }
@@ -2767,7 +2767,7 @@ public static class Program
         if (BranchStatusOperationRequested(request.Operation))
         {
             request.SyncCache ??= new SyncCacheContract();
-            if (args.HasFlag("allow-user-fallback"))
+            if (args.HasFlag("allow-user-fallback") && !args.HasFlag("interactive-desktop"))
             {
                 throw new CliException(request.Operation + " 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
             }
@@ -2779,6 +2779,11 @@ public static class Program
         {
             request.MergeInputs ??= new MergeInputsContract();
             request.MergePolicy ??= new MergePolicyContract();
+            if (args.HasFlag("allow-user-fallback") && !(args.HasFlag("interactive-desktop") && request.DryRun))
+            {
+                throw new CliException("compare-merge 写入或非交互式 gate 默认使用 strict bot 权限；bot 权限不足时不会 fallback 到 user。请补应用 scope/资源权限后重试。", 2);
+            }
+
             request.MergePolicy.ConfirmWriteMain = request.MergePolicy.ConfirmWriteMain ||
                                                    request.MergeInputs.ConfirmWriteMain ||
                                                    args.HasFlag("yes") ||
@@ -2811,6 +2816,11 @@ public static class Program
 
         if (string.Equals(request.Operation, "pr-gate-report", StringComparison.OrdinalIgnoreCase))
         {
+            if (args.HasFlag("allow-user-fallback"))
+            {
+                throw new CliException("PR hard gate 默认 strict bot；不会用用户身份伪装 CI 通过。请修复 bot 权限，或由项目配置显式允许 user fallback for gate。", 2);
+            }
+
             await HydratePrGateReportFromRegistryAsync(request, args);
         }
 

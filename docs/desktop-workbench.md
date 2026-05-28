@@ -24,6 +24,8 @@ Desktop 是 Config Sheet Forge 的官方主工作台。它负责日常配表 Sou
 
 从 0.4.32 开始，Windows portable zip 使用 Tauri production build。它不需要本机安装 Node、pnpm、Vite、Rust，也不依赖 `CONFIG_SHEET_FORGE_ROOT`。如果 Unity 检测到已安装 exe 仍指向 `127.0.0.1:1420 / localhost:1420`，会把它视为疑似开发构建并要求升级。
 
+从 0.4.33 开始，Windows portable zip 会一起带上 `cli/config-sheet-forge.exe`。Desktop 默认用这个 sidecar CLI，所以新同事只从 Unity 安装 Desktop 也能跑环境检查和项目识别，不需要提前把 `config-sheet-forge` 加进 PATH。`lark-cli` 会自动查找 `%APPDATA%/npm/lark-cli.ps1` 和 `.cmd`，并在环境页显示实际使用路径。
+
 Legacy 只用于没有 Desktop、CI 调试或救急 fallback。普通策划不需要从 Legacy 开始。
 
 ## Desktop v1 页面
@@ -49,6 +51,14 @@ Desktop 会检查：
 - 代理：飞书请求建议不走代理，可设置 `LARK_CLI_NO_PROXY=1` 或 `NO_PROXY=*`。
 
 缺 `gh` 时，合并页仍可手动选择目标分支。缺 `lark-cli` 或 bot 权限不足时，同步和 PR gate 会明确阻断。
+
+环境页提供按钮处理常见前置条件：
+
+- `安装 Git`：Windows 下优先尝试 `winget install Git.Git`。
+- `安装 GitHub CLI`：Windows 下优先尝试 `winget install GitHub.cli`，随后可点 `GitHub 授权`。
+- `安装 lark-cli`：通过 `npm install -g @larksuite/cli` 安装；如果没有 npm，会提示先安装 Node.js LTS。
+- `配置飞书 bot`：App Secret 通过 stdin 传给 `lark-cli config init --app-secret-stdin`，不会写入仓库或日志。
+- `登录飞书用户身份`：用于交互式 Desktop 的本机诊断和安全预览；CI / PR hard gate 仍默认 strict bot。
 
 ### 同步预览
 

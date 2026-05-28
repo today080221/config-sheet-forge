@@ -367,6 +367,12 @@ foreach ($requiredV432Marker in @("tauri", "--no-bundle", "config-sheet-forge-re
   }
 }
 
+foreach ($requiredV433Marker in @("Publish-SidecarCli", "sidecarCli", "--expect-sidecar", "resolve_config_sheet_forge_cli", "Desktop sidecar CLI", "resolve_lark_cli", "%APPDATA%/npm", "install_lark_cli", "configure_lark_bot", "允许用户身份预览", "PR hard gate 默认 strict bot")) {
+  if (($bridgeWindow + "`n" + (Get-Content -Raw packages/unity/Tests/Editor/ConfigSheetForgeEditorUtilityTests.cs) + "`n" + (Get-Content -Raw scripts/Package-DesktopRelease.ps1) + "`n" + (Get-Content -Raw apps/desktop/src-tauri/src/main.rs) + "`n" + (Get-Content -Raw apps/desktop/src/App.tsx) + "`n" + (Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs)) -notlike "*$requiredV433Marker*") {
+    throw "Unity v0.4.33 Desktop sidecar/environment marker is missing: $requiredV433Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."

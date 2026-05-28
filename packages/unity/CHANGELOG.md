@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.33
+
+- Desktop Windows release zip 现在内置 `cli/config-sheet-forge.exe` sidecar。Desktop 默认优先调用 sidecar CLI，不再要求团队成员全局安装 `config-sheet-forge` 或手动配置 PATH。
+- Desktop 新增本机工具解析层：CLI 查找顺序为 sidecar、`CONFIG_SHEET_FORGE_CLI`、`CONFIG_SHEET_FORGE_ROOT + sourceCliProjectRelativePath`、PATH；`lark-cli` 会识别 `CONFIG_SHEET_FORGE_LARK_CLI`、`LARK_CLI_PATH`、项目配置、`.config-sheet-forge/config.json`、`%APPDATA%/npm/lark-cli.ps1` / `.cmd` 和 PATH。
+- Desktop 环境页新增安装/授权按钮：安装 Git、安装 GitHub CLI、安装 lark-cli、GitHub 授权、飞书用户登录、飞书 bot 配置。Secret 通过 stdin 传给 `lark-cli`，不写仓库、不进命令行。
+- 交互式 Desktop 增加 `strict bot / 允许用户身份预览` 切换。安全 dry-run 可经用户确认后 `--allow-user-fallback`，但 PR hard gate 仍 strict bot，不会用本机 user 身份伪装 CI 通过。
+- 状态卡增加外部链接入口：在线注册中心、当前 GitHub 分支、当前 PR 可用系统浏览器打开。
+- Desktop release smoke 现在会解压 zip 后验证 sidecar CLI 存在并可运行，防止再次出现 “program not found”。
+
 ## 0.4.32
 
 - 修复 Desktop Windows portable release 的 P0 打包问题：发布脚本现在先构建前端 dist，再执行 Tauri production build，不再发布仍指向 `127.0.0.1:1420` 的开发构建裸 exe。

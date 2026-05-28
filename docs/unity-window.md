@@ -18,6 +18,8 @@
 
 从 0.4.32 开始，Desktop 安装包必须是生产构建，普通机器不需要启动 Vite dev server。Unity 会在安装和启动前检查 exe 是否仍包含 `127.0.0.1:1420 / localhost:1420`；如果是旧的开发构建包，会提示升级 Desktop，避免只看到 WebView 的连接失败页面。
 
+从 0.4.33 开始，Desktop 安装包内置 `cli/config-sheet-forge.exe`。如果 Unity 能打开 Desktop，Desktop 自己就能找到业务 CLI；缺的是 Git、GitHub CLI、lark-cli 或授权时，Desktop 环境页会给安装/授权按钮。普通用户不需要配置 `CONFIG_SHEET_FORGE_CLI`。
+
 通常你只需要看三件事：
 
 1. 当前状态是不是正常。

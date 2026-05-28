@@ -30,6 +30,8 @@ Legacy 窗口仍采用任务型 Dashboard：第一次打开会提示“飞书在
 
 从 0.4.32 开始，Desktop release 必须是 Tauri production build。Unity 安装和启动前会检查 exe 是否仍指向 `127.0.0.1:1420 / localhost:1420`；如果检测到开发构建，会提示升级 Desktop，而不是让用户看到 WebView 的 `ERR_CONNECTION_REFUSED`。
 
+从 0.4.33 开始，Desktop release zip 内置 `cli/config-sheet-forge.exe` sidecar，普通成员不需要全局安装 `config-sheet-forge`。Desktop 也会在 Windows 上识别 `%APPDATA%/npm/lark-cli.ps1` / `.cmd`，并提供 Git、GitHub CLI、lark-cli、飞书 bot/user 授权的按钮。交互式 Desktop 可以切到“允许用户身份预览”，但 PR hard gate 仍默认 strict bot，不会用本机 user 身份伪装 CI。
+
 Legacy 完整窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。

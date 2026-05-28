@@ -16,6 +16,8 @@ Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本
 
 从 0.4.32 开始，Desktop zip 是生产构建，不依赖本机 Node/Vite dev server。若 Unity 检测到旧包仍指向 `127.0.0.1:1420`，会提示重新安装同版本 Desktop。
 
+从 0.4.33 开始，Desktop zip 自带 `config-sheet-forge` CLI sidecar。团队成员只需要从 Unity 点“安装 Desktop”，不需要再手动安装全局 `config-sheet-forge`。如果本机装过 `lark-cli`，Desktop 会优先识别 `%APPDATA%/npm/lark-cli.ps1` / `.cmd`；缺 Git、gh、lark-cli 或授权时，环境页会给安装/登录按钮。
+
 ## 安装要求
 
 - .NET 8 SDK 或更新版本，用于 CLI。

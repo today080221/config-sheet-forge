@@ -14,7 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
 {
     public sealed class ConfigSheetForgeBridgeWindow : EditorWindow
     {
-        internal const string PackageVersion = "v0.4.32";
+        internal const string PackageVersion = "v0.4.33";
         private const string DesktopPathEnv = "CONFIG_SHEET_FORGE_DESKTOP";
         private const string SourceCheckoutEnv = "CONFIG_SHEET_FORGE_ROOT";
         private const string DesktopInstallPathPrefKey = "ConfigSheetForge.Desktop.InstallPath";

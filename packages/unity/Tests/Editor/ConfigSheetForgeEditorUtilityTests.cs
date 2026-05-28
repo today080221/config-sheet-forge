@@ -175,5 +175,25 @@ namespace ConfigSheetForge.Unity.Editor.Tests
             Assert.That(bridgeSource, Does.Contain("LooksLikeDevDesktopBuild"));
             Assert.That(bridgeSource, Does.Contain("Desktop release 包疑似开发构建"));
         }
+
+        [Test]
+        public void DesktopReleaseRequiresSidecarAndEnvironmentGuidance()
+        {
+            var packageScript = File.ReadAllText("Packages/dev.config-sheet-forge.unity/../../scripts/Package-DesktopRelease.ps1");
+            var desktopMain = File.ReadAllText("Packages/dev.config-sheet-forge.unity/../../apps/desktop/src-tauri/src/main.rs");
+            var desktopApp = File.ReadAllText("Packages/dev.config-sheet-forge.unity/../../apps/desktop/src/App.tsx");
+
+            Assert.That(packageScript, Does.Contain("Publish-SidecarCli"));
+            Assert.That(packageScript, Does.Contain("sidecarCli"));
+            Assert.That(packageScript, Does.Contain("--expect-sidecar"));
+            Assert.That(desktopMain, Does.Contain("resolve_config_sheet_forge_cli"));
+            Assert.That(desktopMain, Does.Contain("Desktop sidecar CLI"));
+            Assert.That(desktopMain, Does.Contain("resolve_lark_cli"));
+            Assert.That(desktopMain, Does.Contain("%APPDATA%/npm"));
+            Assert.That(desktopMain, Does.Contain("LARK_CLI_NO_PROXY"));
+            Assert.That(desktopApp, Does.Contain("安装 lark-cli"));
+            Assert.That(desktopApp, Does.Contain("配置飞书 bot"));
+            Assert.That(desktopApp, Does.Contain("允许用户身份预览"));
+        }
     }
 }
