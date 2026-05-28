@@ -52,7 +52,9 @@
 
 `导入 Unity 配表资产` 做的是下一步：把刚同步好的 cache xlsx 写进 Unity 的 ScriptableObject asset。它不会写飞书，不会改在线表，不会改 registry，也不会写 main。它要求最近一次同步预览通过，并且 cache 已经是最新。它会使用 ExcelToSO 的 `SourceOfTruthCache` profile，不会影响 ExcelToSO 窗口里的 `本地 Excel` profile。
 
-如果窗口提示“缺少 SourceOfTruthCache profile”，先点 `安装/更新 Source of Truth 导入 profile`。这一步只新增或更新给工具/CI 使用的 cache profile，不会把人工 ExcelToSO UI 的本地 Excel profile 改成 `.config-sheet-forge/excel-cache`。如果旧版本曾经把本地 profile 改到 cache，工具也会尽量恢复到 `oldExcelPath` 或 `Excel/<表ID>.xlsx`。
+如果窗口提示“缺少 SourceOfTruthCache profile”，先点 `安装/更新 Source of Truth 导入 profile`。这一步只新增或更新给工具/CI 使用的 cache profile，不会把人工 ExcelToSO UI 的本地 Excel profile 改成 `.config-sheet-forge/excel-cache`。如果旧版本曾经把本地 profile 改到 cache，窗口会提示使用专门迁移/修复入口处理，不会在安装 cache profile 时顺手改动本地 profile。
+
+从 0.4.30 开始，安装/更新 cache profile 时会先镜像本地/default ExcelToSO profile：脚本目录、asset 目录、namespace、导入选项和 slave 表都会保留，只把主表与 slave 的 Excel 路径换成 `.config-sheet-forge/excel-cache`。如果工具发现 cache profile 会把 asset 写到裸 `Assets`，或者 namespace 为空，会直接阻断并提示负责人修配置，不会生成危险 profile。
 
 如果窗口提示“cache 类型需要处理”，也不要手改 `.config-sheet-forge/excel-cache`。这个目录是生成物，下次同步会覆盖。先重新 `预览同步计划`，再由负责人确认 `写入本地 cache`。工具会尽量把 Source of Truth 的 `integer`、`number` 等通用类型写成 ExcelToSO 能导入的 `int`、`float`。如果提示某列还是 `json`，说明工具无法判断它到底应该是 `int[]`、`float[]`、`string[]` 还是 `string`，需要在项目 schema 或 adapter 里声明具体类型后再同步。
 

@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.29";
+        private const string PackageVersion = "v0.4.30";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -1144,8 +1144,9 @@ namespace ConfigSheetForge.Unity.Editor
                     CacheXlsxPath = ResolveExcelCacheXlsxPath(projectRoot, table),
                     OldExcelPath = ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, table.OldExcelPath),
                     LocalExcelPath = ResolveLocalExcelPath(projectRoot, table),
-                    AssetDirectory = table.AssetDirectory,
-                    Namespace = table.Namespace
+                    ScriptDirectory = FirstNonEmpty(table.ScriptDirectory, _projectConfig.UnityExcelToSoScriptDirectory),
+                    AssetDirectory = FirstNonEmpty(table.AssetDirectory, _projectConfig.UnityExcelToSoAssetDirectory),
+                    Namespace = FirstNonEmpty(table.Namespace, _projectConfig.UnityExcelToSoNamespace)
                 });
             }
 
@@ -1242,6 +1243,17 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (missing.Count == 0 && localCache.Count == 0)
             {
+                var safetyErrors = ValidateSourceOfTruthProfile(cacheProfile, projectRoot, importItems);
+                if (safetyErrors.Count > 0)
+                {
+                    preflight.Ready = false;
+                    preflight.CanUpdateToCache = true;
+                    preflight.ShortStatus = "SourceOfTruthCache profile 不安全";
+                    preflight.Message = "SourceOfTruthCache profile 中存在会把资产写到错误位置的配置，请重新安装/更新 profile：" + Environment.NewLine +
+                                        string.Join(Environment.NewLine, safetyErrors);
+                    return preflight;
+                }
+
                 preflight.Ready = true;
                 preflight.ShortStatus = "SourceOfTruthCache profile 已就绪";
                 preflight.Message = "ExcelToSO SourceOfTruthCache profile 已指向 Source of Truth cache，不会影响本地 Excel profile。";
@@ -1265,10 +1277,10 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (localCache.Count > 0)
             {
-                builder.AppendLine("检测到本地 Excel profile 中有表项指向 .config-sheet-forge cache，将在安装/更新 profile 时恢复到 Excel/ 或 oldExcelPath：" + string.Join(", ", localCache));
+                builder.AppendLine("检测到本地 Excel profile 中有表项指向 .config-sheet-forge cache。本次只维护 SourceOfTruthCache profile，不会修改本地 profile；请用专门迁移/修复入口处理本地 profile：" + string.Join(", ", localCache));
             }
 
-            builder.AppendLine("此操作只新增/更新 SourceOfTruthCache profile，不改变本地 Excel 工作流；不会写旧 Excel/。");
+            builder.AppendLine("此操作只新增/更新 SourceOfTruthCache profile，不修改本地 Excel 工作流；不会写旧 Excel/。");
             preflight.Message = builder.ToString().TrimEnd();
             return preflight;
         }
@@ -1289,7 +1301,14 @@ namespace ConfigSheetForge.Unity.Editor
                 return;
             }
 
-            var changed = InstallOrUpdateSourceOfTruthProfile(document, projectRoot, importItems);
+            if (!TryInstallOrUpdateSourceOfTruthProfile(document, projectRoot, importItems, out var changed, out var errors))
+            {
+                SetImmediateOutput(
+                    "无法安装/更新 Source of Truth 导入 profile。",
+                    "为了避免 ExcelToSO 把生成资产写到 Assets 根目录，已阻断本次写入。" + Environment.NewLine +
+                    string.Join(Environment.NewLine, errors));
+                return;
+            }
 
             File.WriteAllText(settingsPath, JsonUtility.ToJson(document, true), Utf8NoBom);
             _confirmExcelToSoSettingsToCache = false;
@@ -1297,15 +1316,18 @@ namespace ConfigSheetForge.Unity.Editor
                 "已安装/更新 Source of Truth 导入 profile。",
                 "更新表数: " + changed.ToString() + Environment.NewLine +
                 "写入文件: " + settingsPath + Environment.NewLine +
-                "只新增/更新 SourceOfTruthCache profile；本地 Excel profile 保持 Excel/ 或 oldExcelPath；没有写飞书、没有导入 asset、没有写旧 Excel/。");
+                "只新增/更新 SourceOfTruthCache profile；没有修改本地 Excel profile；没有写飞书、没有导入 asset、没有写旧 Excel/。");
             RefreshReadonlyStatus(force: true);
         }
 
-        private static int InstallOrUpdateSourceOfTruthProfile(ExcelToSoSettingsDocument document, string projectRoot, List<ExcelToSoImportItem> importItems)
+        private static bool TryInstallOrUpdateSourceOfTruthProfile(ExcelToSoSettingsDocument document, string projectRoot, List<ExcelToSoImportItem> importItems, out int changed, out List<string> errors)
         {
+            changed = 0;
+            errors = new List<string>();
             if (document == null)
             {
-                return 0;
+                errors.Add("ExcelToSO settings 为空。");
+                return false;
             }
 
             if (document.configs == null)
@@ -1334,7 +1356,6 @@ namespace ConfigSheetForge.Unity.Editor
                 profiles.Insert(0, local);
             }
 
-            RestoreLocalProfileEntries(projectRoot, local, importItems);
             document.configs = local.configs ?? new ExcelToSoGlobalConfigs();
             document.excels = local.excels ?? new ExcelToSoSetting[0];
 
@@ -1353,9 +1374,15 @@ namespace ConfigSheetForge.Unity.Editor
             cache.input_root = ".config-sheet-forge/excel-cache/";
             cache.source_of_truth_cache = true;
             cache.configs = CloneConfigs(document.configs);
-            cache.excels = BuildCacheProfileSettings(projectRoot, importItems).ToArray();
+            if (!TryBuildCacheProfileSettings(document, projectRoot, importItems, out var cacheSettings, out errors))
+            {
+                return false;
+            }
+
+            cache.excels = cacheSettings.ToArray();
             document.profiles = profiles.ToArray();
-            return cache.excels.Length;
+            changed = cache.excels.Length;
+            return true;
         }
 
         private static void RestoreLocalProfileEntries(string projectRoot, ExcelToSoProfile local, List<ExcelToSoImportItem> importItems)
@@ -1405,32 +1432,230 @@ namespace ConfigSheetForge.Unity.Editor
             setting.excel_name = ToProjectRelativePath(projectRoot, FirstNonEmpty(matching.LocalExcelPath, matching.OldExcelPath, Path.Combine(projectRoot, "Excel", matching.TableId + ".xlsx")));
         }
 
-        private static List<ExcelToSoSetting> BuildCacheProfileSettings(string projectRoot, List<ExcelToSoImportItem> importItems)
+        private static bool TryBuildCacheProfileSettings(ExcelToSoSettingsDocument document, string projectRoot, List<ExcelToSoImportItem> importItems, out List<ExcelToSoSetting> settings, out List<string> errors)
         {
-            var settings = new List<ExcelToSoSetting>();
+            settings = new List<ExcelToSoSetting>();
+            errors = new List<string>();
             if (importItems == null)
             {
-                return settings;
+                return true;
             }
+
+            var localSettings = GetProfileSettings(document, ExcelToSoDefaultProfileId);
+            var existingCacheSettings = GetProfileSettings(document, ExcelToSoSourceOfTruthProfileId);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            AddCacheSettingsFromTemplates(projectRoot, localSettings, importItems, settings, seen);
+            AddCacheSettingsFromTemplates(projectRoot, existingCacheSettings, importItems, settings, seen);
 
             foreach (var item in importItems)
             {
-                if (item == null || string.IsNullOrWhiteSpace(item.TableId))
+                if (item == null || string.IsNullOrWhiteSpace(item.TableId) || seen.Contains(item.TableId))
                 {
                     continue;
                 }
 
-                settings.Add(new ExcelToSoSetting
+                var template = FindSettingTemplate(projectRoot, localSettings, item) ?? FindSettingTemplate(projectRoot, existingCacheSettings, item);
+                var setting = template != null
+                    ? CloneExcelToSoSettingForCache(projectRoot, template, item, importItems)
+                    : BuildFallbackCacheSetting(projectRoot, item);
+                settings.Add(setting);
+                seen.Add(item.TableId);
+            }
+
+            errors.AddRange(ValidateSourceOfTruthSettings(settings));
+            return errors.Count == 0;
+        }
+
+        private static void AddCacheSettingsFromTemplates(string projectRoot, IEnumerable<ExcelToSoSetting> templates, List<ExcelToSoImportItem> importItems, List<ExcelToSoSetting> settings, HashSet<string> seen)
+        {
+            if (templates == null || importItems == null)
+            {
+                return;
+            }
+
+            foreach (var template in templates)
+            {
+                if (template == null)
                 {
-                    excel_name = ToProjectRelativePath(projectRoot, item.CacheXlsxPath),
-                    script_directory = "Assets",
-                    asset_directory = FirstNonEmpty(item.AssetDirectory, "Assets"),
-                    name_space = item.Namespace ?? "",
-                    slaves = new ExcelToSoSlave[0]
+                    continue;
+                }
+
+                var item = importItems.FirstOrDefault(candidate => candidate != null && !seen.Contains(candidate.TableId) && EntryLooksLikeTable(projectRoot, template.excel_name, candidate));
+                if (item == null)
+                {
+                    continue;
+                }
+
+                settings.Add(CloneExcelToSoSettingForCache(projectRoot, template, item, importItems));
+                seen.Add(item.TableId);
+            }
+        }
+
+        private static ExcelToSoSetting BuildFallbackCacheSetting(string projectRoot, ExcelToSoImportItem item)
+        {
+            return new ExcelToSoSetting
+            {
+                excel_name = ToProjectRelativePath(projectRoot, item.CacheXlsxPath),
+                script_directory = item.ScriptDirectory ?? "",
+                asset_directory = item.AssetDirectory ?? "",
+                name_space = item.Namespace ?? "",
+                slaves = new ExcelToSoSlave[0]
+            };
+        }
+
+        private static ExcelToSoSetting CloneExcelToSoSettingForCache(string projectRoot, ExcelToSoSetting template, ExcelToSoImportItem item, List<ExcelToSoImportItem> importItems)
+        {
+            template = template ?? new ExcelToSoSetting();
+            var clone = new ExcelToSoSetting
+            {
+                excel_name = ToProjectRelativePath(projectRoot, item.CacheXlsxPath),
+                script_directory = template.script_directory,
+                asset_directory = template.asset_directory,
+                name_space = template.name_space,
+                use_hash_string = template.use_hash_string,
+                hide_asset_properties = template.hide_asset_properties,
+                use_public_items_getter = template.use_public_items_getter,
+                compress_color_into_int = template.compress_color_into_int,
+                treat_unknown_types_as_enum = template.treat_unknown_types_as_enum,
+                generate_tostring_method = template.generate_tostring_method,
+                slaves = CloneExcelToSoSlavesForCache(projectRoot, template.slaves, importItems)
+            };
+            return clone;
+        }
+
+        private static ExcelToSoSlave[] CloneExcelToSoSlavesForCache(string projectRoot, ExcelToSoSlave[] slaves, List<ExcelToSoImportItem> importItems)
+        {
+            if (slaves == null || slaves.Length == 0)
+            {
+                return new ExcelToSoSlave[0];
+            }
+
+            var cloned = new List<ExcelToSoSlave>();
+            foreach (var slave in slaves)
+            {
+                if (slave == null)
+                {
+                    continue;
+                }
+
+                var matching = importItems == null ? null : importItems.FirstOrDefault(item => EntryLooksLikeTable(projectRoot, slave.excel_name, item));
+                cloned.Add(new ExcelToSoSlave
+                {
+                    excel_name = matching != null
+                        ? ToProjectRelativePath(projectRoot, matching.CacheXlsxPath)
+                        : RewriteExcelNameToCache(projectRoot, slave.excel_name),
+                    asset_directory = slave.asset_directory
                 });
             }
 
-            return settings;
+            return cloned.ToArray();
+        }
+
+        private static string RewriteExcelNameToCache(string projectRoot, string excelName)
+        {
+            if (string.IsNullOrWhiteSpace(excelName))
+            {
+                return "";
+            }
+
+            if (excelName.IndexOf(".config-sheet-forge", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return ToProjectRelativePath(projectRoot, ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, excelName));
+            }
+
+            var fileName = Path.GetFileName(excelName);
+            return string.IsNullOrWhiteSpace(fileName)
+                ? excelName
+                : ".config-sheet-forge/excel-cache/" + fileName.Replace('\\', '/');
+        }
+
+        private static ExcelToSoSetting FindSettingTemplate(string projectRoot, IEnumerable<ExcelToSoSetting> settings, ExcelToSoImportItem item)
+        {
+            return settings == null ? null : settings.FirstOrDefault(setting => setting != null && EntryLooksLikeTable(projectRoot, setting.excel_name, item));
+        }
+
+        private static List<ExcelToSoSetting> GetProfileSettings(ExcelToSoSettingsDocument document, string profileId)
+        {
+            if (document == null)
+            {
+                return new List<ExcelToSoSetting>();
+            }
+
+            var profile = FindExcelToSoProfile(document, profileId);
+            if (profile != null && profile.excels != null)
+            {
+                return profile.excels.Where(setting => setting != null).ToList();
+            }
+
+            return string.Equals(NormalizeProfileId(profileId), ExcelToSoDefaultProfileId, StringComparison.OrdinalIgnoreCase) && document.excels != null
+                ? document.excels.Where(setting => setting != null).ToList()
+                : new List<ExcelToSoSetting>();
+        }
+
+        private static List<string> ValidateSourceOfTruthProfile(ExcelToSoProfile profile, string projectRoot, List<ExcelToSoImportItem> importItems)
+        {
+            if (profile == null)
+            {
+                return new List<string> { "缺少 SourceOfTruthCache profile。" };
+            }
+
+            return ValidateSourceOfTruthSettings(profile.excels == null ? new List<ExcelToSoSetting>() : profile.excels.Where(setting => setting != null).ToList());
+        }
+
+        private static List<string> ValidateSourceOfTruthSettings(IEnumerable<ExcelToSoSetting> settings)
+        {
+            var errors = new List<string>();
+            foreach (var setting in settings ?? new List<ExcelToSoSetting>())
+            {
+                if (setting == null)
+                {
+                    continue;
+                }
+
+                var tableName = FirstNonEmpty(Path.GetFileNameWithoutExtension(setting.excel_name), "(未知表)");
+                if (IsUnsafeExcelToSoDirectory(setting.script_directory))
+                {
+                    errors.Add(tableName + ": script_directory 不能是空或裸 Assets。请从本地 Excel profile 镜像正确目录，或在项目配置中声明 scriptDirectory。");
+                }
+
+                if (IsUnsafeExcelToSoDirectory(setting.asset_directory))
+                {
+                    errors.Add(tableName + ": asset_directory 不能是空或裸 Assets。请从本地 Excel profile 镜像正确目录，或在项目配置中声明 assetDirectory。");
+                }
+
+                if (string.IsNullOrWhiteSpace(setting.name_space))
+                {
+                    errors.Add(tableName + ": name_space 不能为空。请从本地 Excel profile 镜像 namespace，或在项目配置中声明 namespace。");
+                }
+
+                if (setting.slaves == null)
+                {
+                    continue;
+                }
+
+                foreach (var slave in setting.slaves)
+                {
+                    if (slave == null)
+                    {
+                        continue;
+                    }
+
+                    var slaveName = FirstNonEmpty(Path.GetFileNameWithoutExtension(slave.excel_name), tableName + " slave");
+                    if (IsUnsafeExcelToSoDirectory(slave.asset_directory))
+                    {
+                        errors.Add(slaveName + ": slave.asset_directory 不能是空或裸 Assets。");
+                    }
+                }
+            }
+
+            return errors;
+        }
+
+        private static bool IsUnsafeExcelToSoDirectory(string path)
+        {
+            var normalized = (path ?? "").Replace('\\', '/').Trim().TrimEnd('/');
+            return string.IsNullOrWhiteSpace(normalized) || string.Equals(normalized, "Assets", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool TryUpdateExcelToSoEntry(ExcelToSoSettingsDocument document, string projectRoot, ExcelToSoImportItem item)

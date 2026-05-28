@@ -24,6 +24,8 @@ Legacy 窗口仍采用任务型 Dashboard：第一次打开会提示“飞书在
 
 从 0.4.29 开始，CLI 增加 `repair-cache-dialect`：当 semantic/hash 已经最新，但 cache xlsx 物理类型行仍是 `integer/number/json` 等旧 dialect 时，可以不联网快速预览/修复。它只重写 `.config-sheet-forge/excel-cache/*.xlsx` 的类型行，不改 semantic/hash、不写飞书、不写旧 `Excel/`。无法把 `json` 还原成 `int[]/float[]/string[]/string` 时会中文阻断。
 
+从 0.4.30 开始，`安装/更新 SourceOfTruthCache profile` 会镜像现有本地/default ExcelToSO profile：保留 `script_directory`、`asset_directory`、`name_space`、导入选项和 `slaves`，只把主表与 slave 的 `excel_name` 改到 `.config-sheet-forge/excel-cache`。如果没有可镜像的 setting，才使用项目配置里的 `table.scriptDirectory / assetDirectory / namespace` 或 `unityExcelToSo` 默认值；仍缺关键目录或 namespace 时会阻断，避免把 asset 写到 `Assets` 根目录。
+
 Legacy 完整窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。

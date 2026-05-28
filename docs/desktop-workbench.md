@@ -105,6 +105,8 @@ config-sheet-forge repair-cache-dialect --manifest ProjectSettings/Your.ConfigSh
 
 它不写飞书、不写 registry、不写 main、不改变 ExcelToSO default/local profile。
 
+安装/更新 `SourceOfTruthCache` profile 时，Unity bridge 会镜像现有 default/local ExcelToSO profile：保留脚本目录、asset 目录、namespace、导入选项和 slave 表，只替换 Excel 路径到 `.config-sheet-forge/excel-cache`。如果缺少可用模板，则使用项目配置里的 `unityExcelToSo` 默认值；仍缺目录或 namespace 时会阻断，避免把生成 asset 写到 `Assets` 根目录。
+
 ### 合并和 PR gate
 
 Desktop 会按 PR 心智展示：

@@ -8,7 +8,7 @@ namespace ConfigSheetForge.Unity.Editor
 {
     public sealed class ConfigSheetForgeBridgeWindow : EditorWindow
     {
-        private const string PackageVersion = "v0.4.29";
+        private const string PackageVersion = "v0.4.30";
         private const string DesktopPathEnv = "CONFIG_SHEET_FORGE_DESKTOP";
         private const string SourceCheckoutEnv = "CONFIG_SHEET_FORGE_ROOT";
         private Vector2 _scroll;

@@ -61,6 +61,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("project config probe derives branch workspace names", () => RunSync(ProjectConfigProbeDerivesBranchWorkspaceNames)),
     ("project config probe reads documentation targets", () => RunSync(ProjectConfigProbeReadsDocumentationTargets)),
     ("project config probe reads roles and new table options", () => RunSync(ProjectConfigProbeReadsRolesAndNewTableOptions)),
+    ("project config probe reads unity excel to so defaults", () => RunSync(ProjectConfigProbeReadsUnityExcelToSoDefaults)),
     ("project config probe ignores local state registry", () => RunSync(ProjectConfigProbeIgnoresLocalStateRegistry)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
     ("apply-contract sync-cache apply requires confirmation", ApplyContractSyncCacheApplyRequiresConfirmation),
@@ -2079,6 +2080,43 @@ static void ProjectConfigProbeReadsRolesAndNewTableOptions()
     AssertTrue(summary.NewTableDefaultFields[0].IsPrimary, "primary default field should be read.");
     AssertTrue(!summary.GithubRequiredForPrAutoDetect, "github required flag should be read.");
     AssertEqual("https://cli.github.com/", summary.GithubInstallHelpUrl, "github install help URL should be read.");
+}
+
+static void ProjectConfigProbeReadsUnityExcelToSoDefaults()
+{
+    var json = """
+    {
+      "unityExcelToSo": {
+        "scriptDirectory": "Assets/Scripts/Data",
+        "assetDirectory": "Assets/DataConfig/Auto-generated",
+        "namespace": "Assets.Scripts.Data"
+      },
+      "tables": [
+        {
+          "id": "ProjectileData",
+          "displayName": "投射物数据",
+          "oldExcelPath": "Excel/ProjectileData.xlsx"
+        },
+        {
+          "id": "RoomData",
+          "displayName": "房间数据",
+          "scriptDirectory": "Assets/Scripts/RoomData",
+          "assetDirectory": "Assets/DataConfig/Rooms",
+          "namespace": "Assets.Scripts.RoomData"
+        }
+      ]
+    }
+    """;
+
+    var summary = ProjectConfigProbe.ProbeJson("ProjectSettings/Example.ConfigSheetForge.json", json);
+
+    AssertEqual("Assets/Scripts/Data", summary.UnityExcelToSoScriptDirectory, "project-level ExcelToSO script directory should be read.");
+    AssertEqual("Assets/DataConfig/Auto-generated", summary.UnityExcelToSoAssetDirectory, "project-level ExcelToSO asset directory should be read.");
+    AssertEqual("Assets.Scripts.Data", summary.UnityExcelToSoNamespace, "project-level ExcelToSO namespace should be read.");
+    AssertEqual("", summary.Tables[0].ScriptDirectory, "tables without overrides should keep table-level script dir empty so Unity can apply project defaults.");
+    AssertEqual("Assets/Scripts/RoomData", summary.Tables[1].ScriptDirectory, "table-level script directory override should be read.");
+    AssertEqual("Assets/DataConfig/Rooms", summary.Tables[1].AssetDirectory, "table-level asset directory override should be read.");
+    AssertEqual("Assets.Scripts.RoomData", summary.Tables[1].Namespace, "table-level namespace override should be read.");
 }
 
 static void ProjectConfigProbeIgnoresLocalStateRegistry()

@@ -349,6 +349,12 @@ foreach ($requiredV429Marker in @("ConfigSheetForgeBridgeWindow", "打开 Config
   }
 }
 
+foreach ($requiredV430Marker in @("CloneExcelToSoSettingForCache", "CloneExcelToSoSlavesForCache", "ValidateSourceOfTruthSettings", "SourceOfTruthCache profile 不安全", "script_directory 不能是空或裸 Assets", "use_hash_string = template.use_hash_string", "generate_tostring_method = template.generate_tostring_method", "slaves = CloneExcelToSoSlavesForCache", "UnityExcelToSoScriptDirectory")) {
+  if (($editorSources + "`n" + $window + "`n" + (Get-Content -Raw packages/unity/Runtime/Core/ProjectConfigProbe.cs) + "`n" + (Get-Content -Raw packages/unity/Tests/Editor/ConfigSheetForgeEditorUtilityTests.cs)) -notlike "*$requiredV430Marker*") {
+    throw "Unity v0.4.30 SourceOfTruthCache profile clone marker is missing: $requiredV430Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."

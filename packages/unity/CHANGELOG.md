@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.30
+
+- 修复 Unity thin bridge 的 `安装/更新 SourceOfTruthCache profile`：cache profile 现在优先镜像现有 default/本地 ExcelToSO profile，只把 `excel_name` 改到 `.config-sheet-forge/excel-cache/<TableId>.xlsx`。
+- 保留 ExcelToSO setting 的 `script_directory`、`asset_directory`、`name_space`、导入选项以及 `slaves`；RoomData 这类 slave 表也会把 slave `excel_name` 改到 cache 路径，不再丢失 slave asset 配置。
+- 不再把 SourceOfTruthCache fallback 写成裸 `Assets` 或空 namespace；缺少安全目录/namespace 时会中文阻断，避免后续导入把 asset 写到 Assets 根目录。
+- 安装/更新 SourceOfTruthCache profile 只维护 cache profile，不写旧 `Excel/`、不写飞书、不导入 Unity asset，也不修改 default/本地 Excel profile。
+- ProjectConfigProbe 增加 `unityExcelToSo` / `excelToScriptableObject` 默认目录读取，用于没有现成 ExcelToSO setting 时的安全 fallback。
+- Unity smoke / CI 增加 profile clone、slave 保留、不安全目录阻断和 default profile 不硬依赖 ExcelToSO assembly 的回归断言。
+
 ## 0.4.29
 
 - 新增官方 Tauri Desktop 工作台骨架 `apps/desktop`，用于承载 Source of Truth 主流程：项目识别、环境检查、live registry 状态、sync-cache dry-run、cache dialect repair、compare/PR gate 等长任务入口。Desktop frontend 已纳入 CI build/lint。

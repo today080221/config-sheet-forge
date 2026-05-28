@@ -147,6 +147,14 @@ namespace ConfigSheetForge.Unity.Editor.Tests
             Assert.That(windowSource, Does.Contain("导入 Unity 配表资产"));
             Assert.That(windowSource, Does.Contain("安装/更新 Source of Truth 导入 profile"));
             Assert.That(windowSource, Does.Contain("不改变本地 Excel profile"));
+            Assert.That(windowSource, Does.Contain("CloneExcelToSoSettingForCache"));
+            Assert.That(windowSource, Does.Contain("CloneExcelToSoSlavesForCache"));
+            Assert.That(windowSource, Does.Contain("ValidateSourceOfTruthSettings"));
+            Assert.That(windowSource, Does.Contain("use_hash_string = template.use_hash_string"));
+            Assert.That(windowSource, Does.Contain("generate_tostring_method = template.generate_tostring_method"));
+            Assert.That(windowSource, Does.Contain("slaves = CloneExcelToSoSlavesForCache"));
+            Assert.That(windowSource, Does.Contain("script_directory 不能是空或裸 Assets"));
+            Assert.That(windowSource, Does.Contain("SourceOfTruthCache profile 不安全"));
             Assert.That(windowSource, Does.Contain("不会写旧 Excel/"));
             Assert.That(asmdef, Does.Not.Contain("GreatClock.ExcelToScriptableObject.Editor"));
         }

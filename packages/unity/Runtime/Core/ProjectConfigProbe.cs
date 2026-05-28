@@ -46,6 +46,9 @@ namespace ConfigSheetForge.Core
         public bool GithubRequiredForPrAutoDetect { get; set; }
         public string GithubInstallHelpUrl { get; set; } = "https://cli.github.com/";
         public string NewTableDefaultOwnerRole { get; set; } = "";
+        public string UnityExcelToSoScriptDirectory { get; set; } = "";
+        public string UnityExcelToSoAssetDirectory { get; set; } = "";
+        public string UnityExcelToSoNamespace { get; set; } = "";
         public Dictionary<string, string> DocumentationTargets { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public List<string> ContractArguments { get; set; } = new List<string>();
         public List<ProjectRoleSummary> Roles { get; set; } = new List<ProjectRoleSummary>();
@@ -148,6 +151,7 @@ namespace ConfigSheetForge.Core
         public string CacheXlsxPath { get; set; } = "";
         public string ExcelPath { get; set; } = "";
         public string OldExcelPath { get; set; } = "";
+        public string ScriptDirectory { get; set; } = "";
         public string AssetDirectory { get; set; } = "";
         public string Namespace { get; set; } = "";
         public string SchemaStatus { get; set; } = "";
@@ -310,6 +314,7 @@ namespace ConfigSheetForge.Core
                 "https://cli.github.com/");
             ReadRoles(summary, root);
             ReadNewTableOptions(summary, root, toolkit);
+            ReadUnityExcelToSoDefaults(summary, root, toolkit);
             ReadDocumentationTargets(summary, root, toolkit);
             summary.ContractArguments.AddRange(GetStringArray(root, "contractArgs", "adapterArgs", "lifecycleContractArgs"));
             if (summary.ContractArguments.Count == 0)
@@ -398,6 +403,29 @@ namespace ConfigSheetForge.Core
             {
                 AddDefaultFields(summary, GetValue(toolkitNewTable, "defaultFields", "fields"));
             }
+        }
+
+        private static void ReadUnityExcelToSoDefaults(ProjectConfigSummary summary, SimpleJsonValue root, SimpleJsonValue toolkit)
+        {
+            if (summary == null)
+            {
+                return;
+            }
+
+            var unityExcelToSo = GetObject(root, "unityExcelToSo", "excelToScriptableObject", "excelToSo", "excelToScriptableObjectSettings");
+            var toolkitExcelToSo = GetObject(toolkit, "unityExcelToSo", "excelToScriptableObject", "excelToSo", "excelToScriptableObjectSettings");
+            summary.UnityExcelToSoScriptDirectory = FirstNonEmpty(
+                GetString(unityExcelToSo, "scriptDirectory", "scriptDir", "script_directory", "defaultScriptDirectory"),
+                GetString(toolkitExcelToSo, "scriptDirectory", "scriptDir", "script_directory", "defaultScriptDirectory"),
+                FindStringDeep(root, "defaultScriptDirectory", "unityExcelToSoScriptDirectory"));
+            summary.UnityExcelToSoAssetDirectory = FirstNonEmpty(
+                GetString(unityExcelToSo, "assetDirectory", "assetDir", "asset_directory", "defaultAssetDirectory"),
+                GetString(toolkitExcelToSo, "assetDirectory", "assetDir", "asset_directory", "defaultAssetDirectory"),
+                FindStringDeep(root, "defaultAssetDirectory", "unityExcelToSoAssetDirectory"));
+            summary.UnityExcelToSoNamespace = FirstNonEmpty(
+                GetString(unityExcelToSo, "namespace", "nameSpace", "name_space", "scriptNamespace", "defaultNamespace"),
+                GetString(toolkitExcelToSo, "namespace", "nameSpace", "name_space", "scriptNamespace", "defaultNamespace"),
+                FindStringDeep(root, "defaultNamespace", "unityExcelToSoNamespace"));
         }
 
         private static void AddDefaultFields(ProjectConfigSummary summary, SimpleJsonValue value)
@@ -783,6 +811,7 @@ namespace ConfigSheetForge.Core
             table.ExcelPath = GetString(item, "excelPath", "xlsxPath");
             table.CacheXlsxPath = FirstNonEmpty(GetString(item, "cacheXlsxPath", "cacheExcelPath"), table.ExcelPath);
             table.OldExcelPath = GetString(item, "oldExcelPath", "sourceXlsxPath", "sourceXlsx", "localSourcePath");
+            table.ScriptDirectory = GetString(item, "scriptDirectory", "scriptDir", "scriptableObjectScriptDirectory");
             table.AssetDirectory = GetString(item, "assetDirectory", "assetDir", "scriptableObjectAssetDirectory");
             table.Namespace = GetString(item, "namespace", "nameSpace", "scriptNamespace");
             table.SchemaStatus = ReadSchemaStatus(item);

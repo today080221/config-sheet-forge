@@ -44,6 +44,7 @@ namespace ConfigSheetForge.Unity.Editor
         public string CacheXlsxPath = "";
         public string OldExcelPath = "";
         public string LocalExcelPath = "";
+        public string ScriptDirectory = "";
         public string AssetDirectory = "";
         public string Namespace = "";
     }
