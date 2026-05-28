@@ -43,9 +43,14 @@
 3. 如果显示“无变化”，通常不用写 cache，继续跑 PR 检查或生成合并预览。
 4. 如果显示“需要更新”或“缺少 cache”，再到 `配表` 页勾选确认。
 5. 点 `写入本地 cache`。
-6. 提交 PR，或让主程 / 配置负责人帮你合并。
+6. 如果项目用 ExcelToSO，点 `导入 Unity 配表资产`。
+7. 提交 PR，或让主程 / 配置负责人帮你合并。
 
 这里的 `cache` 可以理解成“Unity 项目里的本地配表缓存”。它不是正式源头，正式源头还是飞书在线表。
+
+`导入 Unity 配表资产` 做的是下一步：把刚同步好的 cache xlsx 写进 Unity 的 ScriptableObject asset。它不会写飞书，不会改在线表，不会改 registry，也不会写 main。它要求最近一次同步预览通过，并且 cache 已经是最新。
+
+如果窗口提示“当前 ExcelToSO 还指向旧 Excel 路径”，不要继续导入旧表。先用窗口里的确认按钮把 ExcelToSO settings 更新到 Source of Truth cache。这个更新只改 `ProjectSettings/ExcelToScriptableObjectSettings.asset` 里的对应路径，不会写旧 `Excel/`。
 
 ## 新建配表流程
 

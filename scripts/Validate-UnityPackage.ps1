@@ -323,6 +323,17 @@ foreach ($requiredV425Marker in @("TryReadXlsxDimensionInfo", "xlsxCellRows", "f
   }
 }
 
+foreach ($requiredV426Marker in @("ConfigSheetForgeExcelToSoImporter", "ExcelToScriptableObjectApi", "导入 Unity 配表资产", "当前 ExcelToSO 还指向旧 Excel 路径", "更新 ExcelToSO settings 到 cache", "ProjectSettings/ExcelToScriptableObjectSettings.asset", "ExcelToSO public API 可用")) {
+  if (($editorSources + "`n" + $window + "`n" + (Get-Content -Raw packages/unity/README.md) + "`n" + (Get-Content -Raw docs/unity-window.md)) -notlike "*$requiredV426Marker*") {
+    throw "Unity v0.4.26 ExcelToSO asset import marker is missing: $requiredV426Marker"
+  }
+}
+
+$editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
+if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
+  throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."
+}
+
 foreach ($retiredViewText in @("new GUIContent(`"高级模式`"", "高级模式：显示 canonical")) {
   if ($window -like "*$retiredViewText*") {
     throw "Unity view mode still contains retired advanced-mode wording: $retiredViewText"

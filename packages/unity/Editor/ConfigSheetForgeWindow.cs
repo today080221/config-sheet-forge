@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.25";
+        private const string PackageVersion = "v0.4.26";
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -133,6 +133,7 @@ namespace ConfigSheetForge.Unity.Editor
         private bool _confirmCurrentBranchRegistryUpsert;
         private bool _confirmCurrentBranchSchemaReviews;
         private bool _confirmSyncApply;
+        private bool _confirmExcelToSoSettingsToCache;
         private bool _confirmNewTableApply;
         private bool _showAdvancedDiagnostics;
         private bool _showSyncSection = true;
@@ -176,6 +177,7 @@ namespace ConfigSheetForge.Unity.Editor
         private GateReportSummaryView _gateReportSummary = GateReportSummaryView.NotFound("");
         private ConfigSheetForgeCliInvocation _cliInvocation = ConfigSheetForgeCliInvocation.Unresolved("config-sheet-forge", "未刷新", "尚未解析 CLI。");
         private ConfigSheetForgeBackgroundJob _activeJob;
+        private ExcelToSoUnityImportSession _excelToSoImportSession;
         private string _activeJobStatus = "";
         private Vector2 _mainScroll;
         private Vector2 _outputScroll;
@@ -260,6 +262,11 @@ namespace ConfigSheetForge.Unity.Editor
             if (IsJobRunning)
             {
                 _activeJob.Cancel("窗口已关闭，已取消，未写本地 cache。");
+            }
+
+            if (IsExcelToSoImportRunning)
+            {
+                _excelToSoImportSession.Cancel("窗口已关闭，已取消后续 Unity asset 导入。");
             }
         }
 
@@ -459,6 +466,12 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void DrawActiveJobStatus()
         {
+            if (IsExcelToSoImportRunning)
+            {
+                DrawExcelToSoImportStatus();
+                return;
+            }
+
             if (!IsJobRunning)
             {
                 return;
@@ -494,6 +507,30 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 EditorGUILayout.HelpBox("任务在后台运行；窗口仍可滚动、复制命令和切换 tab。运行中会禁用相关执行按钮，避免重复点击。", MessageType.Info);
             }
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawExcelToSoImportStatus()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.BeginHorizontal();
+            var spinner = "|/-\\"[(int)(EditorApplication.timeSinceStartup * 4) % 4].ToString();
+            EditorGUILayout.LabelField(spinner + " 正在导入 Unity 配表资产", EditorStyles.boldLabel);
+            if (GUILayout.Button(new GUIContent("取消", "当前表导入完成后停止后续表。"), GUILayout.Width(80)))
+            {
+                if (_excelToSoImportSession != null)
+                {
+                    _excelToSoImportSession.Cancel("已取消，未继续导入后续 Unity asset。");
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+            if (_excelToSoImportSession != null)
+            {
+                DrawReadonlyRow("当前阶段", _excelToSoImportSession.Status, "Unity Editor 本地导入，不访问飞书、不写 registry。");
+                DrawReadonlyRow("进度", _excelToSoImportSession.ProgressText, "按表逐个调用 ExcelToSO public API。");
+                DrawReadonlyRow("已用时间", Math.Floor(_excelToSoImportSession.ElapsedSeconds).ToString("0") + " 秒", "导入 ScriptableObject asset 可能需要等待 Unity 序列化。");
+            }
+            EditorGUILayout.HelpBox("只写 Unity asset；不会写飞书、不会改在线表、不会改 registry、不会写 main。", MessageType.Info);
             EditorGUILayout.EndVertical();
         }
 
@@ -943,6 +980,467 @@ namespace ConfigSheetForge.Unity.Editor
             EditorGUILayout.EndVertical();
         }
 
+        private void DrawUnityAssetImportCard()
+        {
+            var projectRoot = FindProjectRoot();
+            var backend = ConfigSheetForgeExcelToSoImporter.Probe();
+            var importItems = BuildExcelToSoImportItems(projectRoot);
+            var settingsPreflight = InspectExcelToSoSettings(projectRoot, importItems);
+            var syncReady = IsSyncCacheReadyForUnityImport(projectRoot, out var syncReason);
+            var cacheReady = importItems.Count > 0 && importItems.All(item => File.Exists(item.CacheXlsxPath));
+            var ready = backend.Available && syncReady && cacheReady && settingsPreflight.Ready;
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("导入 Unity 配表资产", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("把 Source of Truth cache xlsx 导入到 Unity ScriptableObject asset。只写 Unity asset，不写飞书、不改在线表、不改 registry、不写 main。", EditorStyles.wordWrappedLabel);
+            DrawReadonlyRow("前置条件", BuildUnityAssetImportPreflightText(backend, syncReady, syncReason, cacheReady, settingsPreflight), "必须最近一次 sync-cache 成功且 cache 已是最新。");
+
+            if (!backend.Available)
+            {
+                EditorGUILayout.HelpBox(backend.Message, MessageType.Warning);
+            }
+            else if (!syncReady)
+            {
+                EditorGUILayout.HelpBox(syncReason, MessageType.Warning);
+            }
+            else if (!cacheReady)
+            {
+                EditorGUILayout.HelpBox("还有 cache xlsx 不存在。请先预览同步计划；如有变化或缺 cache，再确认写入本地 cache。", MessageType.Warning);
+            }
+            else if (!settingsPreflight.Ready)
+            {
+                EditorGUILayout.HelpBox(settingsPreflight.Message, settingsPreflight.HasOldExcelReferences ? MessageType.Error : MessageType.Warning);
+                if (settingsPreflight.CanUpdateToCache)
+                {
+                    _confirmExcelToSoSettingsToCache = EditorGUILayout.Toggle(new GUIContent("确认更新 ExcelToSO settings 到 Source of Truth cache", "会写 ProjectSettings/ExcelToScriptableObjectSettings.asset，只把对应表的 excel_name 从旧 Excel/cache 路径改到 .config-sheet-forge/excel-cache。"), _confirmExcelToSoSettingsToCache);
+                    if (DrawJobButton(new GUIContent("更新 ExcelToSO settings 到 cache", "单独写 ProjectSettings/ExcelToScriptableObjectSettings.asset；不写飞书、不导入 asset。"), _confirmExcelToSoSettingsToCache, GUILayout.Height(26)))
+                    {
+                        if (EditorUtility.DisplayDialog("确认更新 ExcelToSO settings", "将把 ExcelToSO settings 中对应配表的 excel_name 改为 Source of Truth cache 路径。\n\n不会写飞书，不会写旧 Excel/，不会导入 asset。", "确认更新", "取消"))
+                        {
+                            UpdateExcelToSoSettingsToCache(projectRoot, importItems);
+                        }
+                    }
+                }
+            }
+
+            if (_programView || _riskModeUnlocked)
+            {
+                DrawReadonlyRow("ExcelToSO API", backend.Available ? backend.ApiTypeName : "未找到", "通过反射发现，可选 peer dependency，不会让未安装项目编译失败。");
+                DrawReadonlyRow("导入表数量", importItems.Count.ToString(), "来自项目配置 tables 和当前分支表列表。");
+            }
+
+            if (DrawJobButton(new GUIContent("导入 Unity 配表资产", "调用 ExcelToSO public API 导入 .config-sheet-forge/excel-cache/*.xlsx 到 ScriptableObject asset。"), ready, GUILayout.Height(28)))
+            {
+                if (EditorUtility.DisplayDialog("确认导入 Unity 配表资产", "将把本地 Source of Truth cache xlsx 导入 Unity ScriptableObject asset。\n\n只写 Unity asset；不会写飞书、不会改在线表、不会改 registry、不会写 main，也不会写旧 Excel/。", "确认导入", "取消"))
+                {
+                    StartExcelToSoUnityAssetImport(importItems);
+                }
+            }
+
+            if (ready)
+            {
+                EditorGUILayout.LabelField("下一步：导入成功后运行 PR 检查，或提交包含 cache 与 asset 的 PR。", EditorStyles.wordWrappedMiniLabel);
+            }
+            EditorGUILayout.EndVertical();
+        }
+
+        private string BuildUnityAssetImportPreflightText(ExcelToSoImportBackendStatus backend, bool syncReady, string syncReason, bool cacheReady, ExcelToSoSettingsPreflight settingsPreflight)
+        {
+            if (!backend.Available)
+            {
+                return "缺少 ExcelToSO API";
+            }
+
+            if (!syncReady)
+            {
+                return syncReason;
+            }
+
+            if (!cacheReady)
+            {
+                return "cache xlsx 不完整";
+            }
+
+            if (!settingsPreflight.Ready)
+            {
+                return settingsPreflight.ShortStatus;
+            }
+
+            return "已就绪：cache 最新，ExcelToSO settings 指向 Source of Truth cache";
+        }
+
+        private bool IsSyncCacheReadyForUnityImport(string projectRoot, out string reason)
+        {
+            var resultPath = GetUnityLifecyclePath(projectRoot, "sync-cache.result.json");
+            if (!File.Exists(resultPath))
+            {
+                reason = "请先生成同步预览；只有最近一次 sync-cache 成功且 cacheStatus=upToDate 后才能导入 Unity asset。";
+                return false;
+            }
+
+            var json = File.ReadAllText(resultPath);
+            var success = ExtractBoolean(json, "success");
+            var cacheStatus = FirstNonEmpty(ExtractString(json, "cacheStatus"), _projectConfig.SyncCacheStatus);
+            var blocked = ExtractStringArray(json, "blockedTables");
+            var triangulationFailed = ExtractInt(json, "triangulationFailedCount") ?? 0;
+            if (success.HasValue && !success.Value)
+            {
+                reason = "最近一次 sync-cache 没有通过，请先修复同步预检问题。";
+                return false;
+            }
+
+            if (!string.Equals(cacheStatus, "upToDate", StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "最近一次同步结论不是“无变化，cache 已是最新”。当前状态：" + HumanizeCacheStatus(cacheStatus);
+                return false;
+            }
+
+            if (blocked.Count > 0)
+            {
+                reason = "同步预检仍有阻断表：" + string.Join(", ", blocked);
+                return false;
+            }
+
+            if (triangulationFailed > 0)
+            {
+                reason = "三方一致性检查仍有失败表：" + triangulationFailed.ToString() + " 张。";
+                return false;
+            }
+
+            reason = "最近一次 sync-cache 成功且 cacheStatus=upToDate。";
+            return true;
+        }
+
+        private List<ExcelToSoImportItem> BuildExcelToSoImportItems(string projectRoot)
+        {
+            var tables = _projectConfig.CurrentBranchTables != null && _projectConfig.CurrentBranchTables.Count > 0
+                ? _projectConfig.CurrentBranchTables
+                : _projectConfig.Tables;
+            var items = new List<ExcelToSoImportItem>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var table in tables)
+            {
+                if (table == null || string.IsNullOrWhiteSpace(table.TableId) || !seen.Add(table.TableId))
+                {
+                    continue;
+                }
+
+                items.Add(new ExcelToSoImportItem
+                {
+                    TableId = table.TableId,
+                    DisplayName = table.DisplayName,
+                    CacheXlsxPath = ResolveExcelCacheXlsxPath(projectRoot, table),
+                    OldExcelPath = ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, table.OldExcelPath),
+                    AssetDirectory = table.AssetDirectory,
+                    Namespace = table.Namespace
+                });
+            }
+
+            return items;
+        }
+
+        private static string ResolveExcelCacheXlsxPath(string projectRoot, ProjectConfigTableSummary table)
+        {
+            if (table != null && !string.IsNullOrWhiteSpace(table.CacheXlsxPath))
+            {
+                return ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, table.CacheXlsxPath);
+            }
+
+            return Path.Combine(projectRoot, ".config-sheet-forge", "excel-cache", (table == null ? "" : table.TableId) + ".xlsx");
+        }
+
+        private ExcelToSoSettingsPreflight InspectExcelToSoSettings(string projectRoot, List<ExcelToSoImportItem> importItems)
+        {
+            var settingsPath = Path.Combine(projectRoot, "ProjectSettings", "ExcelToScriptableObjectSettings.asset");
+            var preflight = new ExcelToSoSettingsPreflight { SettingsPath = settingsPath };
+            if (!File.Exists(settingsPath))
+            {
+                preflight.ShortStatus = "缺少 ExcelToSO settings";
+                preflight.Message = "没有找到 ProjectSettings/ExcelToScriptableObjectSettings.asset。请先在 ExcelToSO 中配置这些表，或由负责人更新 settings 到 Source of Truth cache。";
+                return preflight;
+            }
+
+            ExcelToSoSettingsDocument document;
+            try
+            {
+                document = JsonUtility.FromJson<ExcelToSoSettingsDocument>(File.ReadAllText(settingsPath));
+            }
+            catch (Exception ex)
+            {
+                preflight.ShortStatus = "ExcelToSO settings 无法解析";
+                preflight.Message = "ExcelToSO settings 无法解析：" + ex.Message;
+                return preflight;
+            }
+
+            var entries = FlattenExcelToSoSettings(document);
+            var missing = new List<string>();
+            var old = new List<string>();
+            foreach (var item in importItems)
+            {
+                var cacheKey = NormalizeProjectPathKey(item.CacheXlsxPath);
+                var matchingCache = entries.Any(entry => !string.IsNullOrWhiteSpace(entry.ExcelName) && NormalizeProjectPathKey(ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, entry.ExcelName)) == cacheKey);
+                if (matchingCache)
+                {
+                    continue;
+                }
+
+                var oldKey = NormalizeProjectPathKey(item.OldExcelPath);
+                var matchingOld = entries.Any(entry =>
+                {
+                    if (string.IsNullOrWhiteSpace(entry.ExcelName))
+                    {
+                        return false;
+                    }
+
+                    var resolved = NormalizeProjectPathKey(ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, entry.ExcelName));
+                    return (!string.IsNullOrWhiteSpace(oldKey) && resolved == oldKey) ||
+                           string.Equals(Path.GetFileNameWithoutExtension(entry.ExcelName), item.TableId, StringComparison.OrdinalIgnoreCase);
+                });
+
+                if (matchingOld)
+                {
+                    old.Add(item.TableId);
+                }
+                else
+                {
+                    missing.Add(item.TableId);
+                }
+            }
+
+            if (old.Count == 0 && missing.Count == 0)
+            {
+                preflight.Ready = true;
+                preflight.ShortStatus = "settings 已指向 cache";
+                preflight.Message = "ExcelToSO settings 已指向 Source of Truth cache。";
+                return preflight;
+            }
+
+            preflight.HasOldExcelReferences = old.Count > 0;
+            preflight.CanUpdateToCache = old.Count > 0;
+            preflight.ShortStatus = old.Count > 0 ? "settings 仍指向旧 Excel" : "settings 缺少 cache 条目";
+            var builder = new StringBuilder();
+            if (old.Count > 0)
+            {
+                builder.AppendLine("当前 ExcelToSO 还指向旧 Excel 路径，请先更新到 Source of Truth cache。涉及：" + string.Join(", ", old));
+            }
+
+            if (missing.Count > 0)
+            {
+                builder.AppendLine("ExcelToSO settings 中没有找到这些表的配置：" + string.Join(", ", missing));
+            }
+
+            builder.AppendLine("不会直接导旧表，也不会写旧 Excel/。");
+            preflight.Message = builder.ToString().TrimEnd();
+            return preflight;
+        }
+
+        private void UpdateExcelToSoSettingsToCache(string projectRoot, List<ExcelToSoImportItem> importItems)
+        {
+            var settingsPath = Path.Combine(projectRoot, "ProjectSettings", "ExcelToScriptableObjectSettings.asset");
+            if (!File.Exists(settingsPath))
+            {
+                SetImmediateOutput("无法更新 ExcelToSO settings。", "没有找到 " + settingsPath);
+                return;
+            }
+
+            ExcelToSoSettingsDocument document;
+            try
+            {
+                document = JsonUtility.FromJson<ExcelToSoSettingsDocument>(File.ReadAllText(settingsPath));
+            }
+            catch (Exception ex)
+            {
+                SetImmediateOutput("无法更新 ExcelToSO settings。", ex.Message);
+                return;
+            }
+
+            var changed = 0;
+            foreach (var item in importItems)
+            {
+                if (TryUpdateExcelToSoEntry(document, projectRoot, item))
+                {
+                    changed++;
+                }
+            }
+
+            if (changed <= 0)
+            {
+                SetImmediateOutput("没有更新 ExcelToSO settings。", "未找到可安全改写的既有表项。请让负责人先在 ExcelToSO settings 中登记这些表。");
+                return;
+            }
+
+            File.WriteAllText(settingsPath, JsonUtility.ToJson(document, true), Utf8NoBom);
+            _confirmExcelToSoSettingsToCache = false;
+            SetImmediateOutput(
+                "已更新 ExcelToSO settings 到 Source of Truth cache。",
+                "更新表数: " + changed.ToString() + Environment.NewLine +
+                "写入文件: " + settingsPath + Environment.NewLine +
+                "没有写飞书、没有导入 asset、没有写旧 Excel/。");
+            RefreshReadonlyStatus(force: true);
+        }
+
+        private static bool TryUpdateExcelToSoEntry(ExcelToSoSettingsDocument document, string projectRoot, ExcelToSoImportItem item)
+        {
+            if (document == null || document.excels == null || item == null)
+            {
+                return false;
+            }
+
+            foreach (var setting in document.excels)
+            {
+                if (setting == null)
+                {
+                    continue;
+                }
+
+                if (EntryLooksLikeTable(projectRoot, setting.excel_name, item))
+                {
+                    setting.excel_name = ToProjectRelativePath(projectRoot, item.CacheXlsxPath);
+                    if (!string.IsNullOrWhiteSpace(item.AssetDirectory) && string.IsNullOrWhiteSpace(setting.asset_directory))
+                    {
+                        setting.asset_directory = item.AssetDirectory;
+                    }
+                    if (!string.IsNullOrWhiteSpace(item.Namespace) && string.IsNullOrWhiteSpace(setting.name_space))
+                    {
+                        setting.name_space = item.Namespace;
+                    }
+                    return true;
+                }
+
+                if (setting.slaves == null)
+                {
+                    continue;
+                }
+
+                foreach (var slave in setting.slaves)
+                {
+                    if (slave == null || !EntryLooksLikeTable(projectRoot, slave.excel_name, item))
+                    {
+                        continue;
+                    }
+
+                    slave.excel_name = ToProjectRelativePath(projectRoot, item.CacheXlsxPath);
+                    if (!string.IsNullOrWhiteSpace(item.AssetDirectory) && string.IsNullOrWhiteSpace(slave.asset_directory))
+                    {
+                        slave.asset_directory = item.AssetDirectory;
+                    }
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool EntryLooksLikeTable(string projectRoot, string excelName, ExcelToSoImportItem item)
+        {
+            if (string.IsNullOrWhiteSpace(excelName) || item == null)
+            {
+                return false;
+            }
+
+            var entryPath = NormalizeProjectPathKey(ConfigSheetForgeEditorUtility.ResolveProjectPath(projectRoot, excelName));
+            var oldPath = NormalizeProjectPathKey(item.OldExcelPath);
+            var cachePath = NormalizeProjectPathKey(item.CacheXlsxPath);
+            return entryPath == cachePath ||
+                   (!string.IsNullOrWhiteSpace(oldPath) && entryPath == oldPath) ||
+                   string.Equals(Path.GetFileNameWithoutExtension(excelName), item.TableId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static List<ExcelToSoSettingsEntry> FlattenExcelToSoSettings(ExcelToSoSettingsDocument document)
+        {
+            var entries = new List<ExcelToSoSettingsEntry>();
+            if (document == null || document.excels == null)
+            {
+                return entries;
+            }
+
+            foreach (var setting in document.excels)
+            {
+                if (setting == null)
+                {
+                    continue;
+                }
+
+                entries.Add(new ExcelToSoSettingsEntry { ExcelName = setting.excel_name });
+                if (setting.slaves == null)
+                {
+                    continue;
+                }
+
+                foreach (var slave in setting.slaves)
+                {
+                    if (slave != null)
+                    {
+                        entries.Add(new ExcelToSoSettingsEntry { ExcelName = slave.excel_name });
+                    }
+                }
+            }
+
+            return entries;
+        }
+
+        private void StartExcelToSoUnityAssetImport(List<ExcelToSoImportItem> importItems)
+        {
+            if (IsAnyTaskRunning)
+            {
+                SetImmediateOutput("已有后台任务正在运行。", "请等待完成或先取消。");
+                return;
+            }
+
+            _excelToSoImportSession = new ExcelToSoUnityImportSession(importItems);
+            _lastCommand = "Unity Editor: ExcelToScriptableObjectApi.ImportExcelPaths(.config-sheet-forge/excel-cache/*.xlsx)";
+            _lastResultPath = "";
+            _lastLifecycleDir = "";
+            _outputScroll = Vector2.zero;
+            _resultSummary = _excelToSoImportSession.BuildSummary();
+            SetOutputText("已启动 Unity 本地导入。不会写飞书、不会改 registry、不会写旧 Excel/。" + Environment.NewLine);
+            SetBottomOutputExpanded(false, persist: false);
+            Repaint();
+        }
+
+        private static string NormalizeProjectPathKey(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return "";
+            }
+
+            try
+            {
+                path = Path.GetFullPath(path);
+            }
+            catch
+            {
+                // Keep the original path when it cannot be resolved.
+            }
+
+            return path.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
+        }
+
+        private static string ToProjectRelativePath(string projectRoot, string path)
+        {
+            if (string.IsNullOrWhiteSpace(projectRoot) || string.IsNullOrWhiteSpace(path))
+            {
+                return path ?? "";
+            }
+
+            try
+            {
+                var root = Path.GetFullPath(projectRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                var full = Path.GetFullPath(path);
+                if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                {
+                    return full.Substring(root.Length).Replace('\\', '/');
+                }
+            }
+            catch
+            {
+                // Fall back to the input path.
+            }
+
+            return path.Replace('\\', '/');
+        }
+
         private string BuildRecommendationText(string projectRoot)
         {
             if (LastPreviewPassed("compare-merge"))
@@ -1342,6 +1840,7 @@ namespace ConfigSheetForge.Unity.Editor
                 {
                     DrawCurrentBranchTables(compact: false);
                     DrawSyncCacheModeCard();
+                    DrawUnityAssetImportCard();
                 }
 
                 _showNewTableSection = EditorGUILayout.Foldout(_showNewTableSection, "新建配表", true);
@@ -3104,6 +3603,16 @@ namespace ConfigSheetForge.Unity.Editor
             get { return _activeJob != null && !_activeJob.IsFinished; }
         }
 
+        private bool IsExcelToSoImportRunning
+        {
+            get { return _excelToSoImportSession != null && !_excelToSoImportSession.IsFinished; }
+        }
+
+        private bool IsAnyTaskRunning
+        {
+            get { return IsJobRunning || IsExcelToSoImportRunning; }
+        }
+
         private float CalculateInlineOutputHeight()
         {
             if (!_showBottomOutput)
@@ -3175,9 +3684,10 @@ namespace ConfigSheetForge.Unity.Editor
         private void OnEditorUpdate()
         {
             var mergeChanged = ApplyMergeContextProbeIfDone();
+            var importChanged = TickExcelToSoImportSession();
             if (_activeJob == null)
             {
-                if (mergeChanged)
+                if (mergeChanged || importChanged)
                 {
                     Repaint();
                 }
@@ -3214,10 +3724,41 @@ namespace ConfigSheetForge.Unity.Editor
                 changed = true;
             }
 
-            if (changed || mergeChanged)
+            if (changed || mergeChanged || importChanged)
             {
                 Repaint();
             }
+        }
+
+        private bool TickExcelToSoImportSession()
+        {
+            if (_excelToSoImportSession == null)
+            {
+                return false;
+            }
+
+            var changed = _excelToSoImportSession.Tick();
+            foreach (var line in _excelToSoImportSession.DrainLines())
+            {
+                AppendOutputLine(line);
+                changed = true;
+            }
+
+            _resultSummary = _excelToSoImportSession.BuildSummary();
+            if (_excelToSoImportSession.IsFinished)
+            {
+                _lastCompletedOperation = "import-unity-assets";
+                _lastCompletedDryRun = false;
+                _lastCompletedSuccess = _excelToSoImportSession.Success;
+                _lastCompletedInputFingerprint = BuildOperationFingerprint("import-unity-assets");
+                _resultSummary = _excelToSoImportSession.BuildFinalSummary();
+                _excelToSoImportSession = null;
+                SetBottomOutputExpanded(false, persist: false);
+                _showDetailedLogs = false;
+                changed = true;
+            }
+
+            return changed;
         }
 
         private bool DrainActiveJobOutput()
@@ -3301,7 +3842,7 @@ namespace ConfigSheetForge.Unity.Editor
                 return;
             }
 
-            if (IsJobRunning)
+            if (IsAnyTaskRunning)
             {
                 AppendOutputLine("已有后台任务正在运行，请等待完成或先取消。");
                 Repaint();
@@ -3344,12 +3885,12 @@ namespace ConfigSheetForge.Unity.Editor
         {
             var oldEnabled = GUI.enabled;
             var originalTooltip = content == null ? "" : content.tooltip;
-            if (content != null && IsJobRunning)
+            if (content != null && IsAnyTaskRunning)
             {
                 content = new GUIContent(content.text, FirstNonEmpty(originalTooltip, "") + "\n后台任务运行中，完成后自动恢复。");
             }
 
-            GUI.enabled = oldEnabled && enabled && !IsJobRunning;
+            GUI.enabled = oldEnabled && enabled && !IsAnyTaskRunning;
             var clicked = GUILayout.Button(content, options);
             GUI.enabled = oldEnabled;
             return clicked;
@@ -6021,6 +6562,101 @@ namespace ConfigSheetForge.Unity.Editor
             return workbook;
         }
 
+        private static bool? ExtractBoolean(string json, string propertyName)
+        {
+            var property = "\"" + propertyName + "\"";
+            var propertyIndex = (json ?? "").IndexOf(property, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return null;
+            }
+
+            var colon = json.IndexOf(':', propertyIndex + property.Length);
+            if (colon < 0)
+            {
+                return null;
+            }
+
+            var rest = json.Substring(colon + 1).TrimStart();
+            if (rest.StartsWith("true", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (rest.StartsWith("false", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return null;
+        }
+
+        private static int? ExtractInt(string json, string propertyName)
+        {
+            var property = "\"" + propertyName + "\"";
+            var propertyIndex = (json ?? "").IndexOf(property, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return null;
+            }
+
+            var colon = json.IndexOf(':', propertyIndex + property.Length);
+            if (colon < 0)
+            {
+                return null;
+            }
+
+            var i = colon + 1;
+            while (i < json.Length && char.IsWhiteSpace(json[i]))
+            {
+                i++;
+            }
+
+            var start = i;
+            if (i < json.Length && (json[i] == '-' || json[i] == '+'))
+            {
+                i++;
+            }
+
+            while (i < json.Length && char.IsDigit(json[i]))
+            {
+                i++;
+            }
+
+            int parsed;
+            return int.TryParse(json.Substring(start, i - start), out parsed) ? parsed : (int?)null;
+        }
+
+        private static string ExtractString(string json, string propertyName)
+        {
+            return ExtractJsonString(json, propertyName);
+        }
+
+        private static string HumanizeCacheStatus(string cacheStatus)
+        {
+            if (string.Equals(cacheStatus, "upToDate", StringComparison.OrdinalIgnoreCase))
+            {
+                return "无变化，未重写 cache";
+            }
+
+            if (string.Equals(cacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase))
+            {
+                return "有变化，需要写入本地 cache";
+            }
+
+            if (string.Equals(cacheStatus, "missingCache", StringComparison.OrdinalIgnoreCase))
+            {
+                return "缺少本地 cache";
+            }
+
+            if (string.Equals(cacheStatus, "blocked", StringComparison.OrdinalIgnoreCase))
+            {
+                return "被阻断";
+            }
+
+            return FirstNonEmpty(cacheStatus, "未知");
+        }
+
         private static string FirstNonEmpty(params string[] values)
         {
             foreach (var value in values)
@@ -6503,6 +7139,42 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return null;
+        }
+
+        private static int? ExtractInt(string json, string propertyName)
+        {
+            var property = "\"" + propertyName + "\"";
+            var propertyIndex = (json ?? "").IndexOf(property, StringComparison.OrdinalIgnoreCase);
+            if (propertyIndex < 0)
+            {
+                return null;
+            }
+
+            var colon = json.IndexOf(':', propertyIndex + property.Length);
+            if (colon < 0)
+            {
+                return null;
+            }
+
+            var i = colon + 1;
+            while (i < json.Length && char.IsWhiteSpace(json[i]))
+            {
+                i++;
+            }
+
+            var start = i;
+            if (i < json.Length && (json[i] == '-' || json[i] == '+'))
+            {
+                i++;
+            }
+
+            while (i < json.Length && char.IsDigit(json[i]))
+            {
+                i++;
+            }
+
+            int parsed;
+            return int.TryParse(json.Substring(start, i - start), out parsed) ? parsed : (int?)null;
         }
 
         private static List<string> ExtractStringArray(string json, string propertyName)
@@ -7772,5 +8444,208 @@ namespace ConfigSheetForge.Unity.Editor
         public string HeadBranch { get; set; } = "";
         public string MergeBase { get; set; } = "";
         public string Message { get; set; } = "";
+    }
+
+    internal sealed class ExcelToSoSettingsPreflight
+    {
+        public bool Ready { get; set; }
+        public bool HasOldExcelReferences { get; set; }
+        public bool CanUpdateToCache { get; set; }
+        public string ShortStatus { get; set; } = "";
+        public string Message { get; set; } = "";
+        public string SettingsPath { get; set; } = "";
+    }
+
+    internal sealed class ExcelToSoSettingsEntry
+    {
+        public string ExcelName { get; set; } = "";
+    }
+
+    [Serializable]
+    internal sealed class ExcelToSoSettingsDocument
+    {
+        public ExcelToSoGlobalConfigs configs = new ExcelToSoGlobalConfigs();
+        public ExcelToSoSetting[] excels = new ExcelToSoSetting[0];
+    }
+
+    [Serializable]
+    internal sealed class ExcelToSoGlobalConfigs
+    {
+        public int field_row = 0;
+        public int type_row = 1;
+        public int data_from_row = 2;
+    }
+
+    [Serializable]
+    internal sealed class ExcelToSoSetting
+    {
+        public string excel_name = "";
+        public string script_directory = "Assets";
+        public string asset_directory = "Assets";
+        public string name_space = "";
+        public bool use_hash_string = false;
+        public bool hide_asset_properties = true;
+        public bool use_public_items_getter = false;
+        public bool compress_color_into_int = true;
+        public bool treat_unknown_types_as_enum = false;
+        public bool generate_tostring_method = true;
+        public ExcelToSoSlave[] slaves = new ExcelToSoSlave[0];
+    }
+
+    [Serializable]
+    internal sealed class ExcelToSoSlave
+    {
+        public string excel_name = "";
+        public string asset_directory = "Assets";
+    }
+
+    internal sealed class ExcelToSoUnityImportSession
+    {
+        private readonly List<ExcelToSoImportItem> _items;
+        private readonly Queue<string> _pendingLines = new Queue<string>();
+        private readonly List<ExcelToSoSingleImportResult> _results = new List<ExcelToSoSingleImportResult>();
+        private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+        private int _index;
+        private bool _cancelRequested;
+        private string _cancelReason = "";
+
+        public ExcelToSoUnityImportSession(List<ExcelToSoImportItem> items)
+        {
+            _items = items == null ? new List<ExcelToSoImportItem>() : new List<ExcelToSoImportItem>(items);
+            Status = "准备导入 Unity asset";
+            Append("准备导入 Unity 配表资产，共 " + _items.Count.ToString() + " 张表。");
+        }
+
+        public bool IsFinished { get; private set; }
+        public bool Success { get; private set; }
+        public string Status { get; private set; }
+        public double ElapsedSeconds { get { return _stopwatch.Elapsed.TotalSeconds; } }
+        public string ProgressText { get { return Math.Min(_index + 1, Math.Max(1, _items.Count)).ToString() + " / " + Math.Max(1, _items.Count).ToString(); } }
+
+        public void Cancel(string reason)
+        {
+            _cancelRequested = true;
+            _cancelReason = string.IsNullOrWhiteSpace(reason) ? "已取消。" : reason;
+            Append(_cancelReason);
+        }
+
+        public bool Tick()
+        {
+            if (IsFinished)
+            {
+                return false;
+            }
+
+            if (_cancelRequested)
+            {
+                Finish(false, _cancelReason);
+                return true;
+            }
+
+            if (_items.Count == 0)
+            {
+                Finish(false, "没有可导入的 cache xlsx。");
+                return true;
+            }
+
+            if (_index >= _items.Count)
+            {
+                var failed = _results.Count(result => !result.Success);
+                Finish(failed == 0, failed == 0 ? "Unity 配表资产导入完成。" : "Unity 配表资产导入完成，但有失败表。");
+                return true;
+            }
+
+            var item = _items[_index];
+            Status = "正在导入 " + FirstNonEmpty(item.DisplayName, item.TableId);
+            Append("导入: " + item.TableId + " -> " + item.CacheXlsxPath);
+            var result = ConfigSheetForgeExcelToSoImporter.ImportExcelPath(item.TableId, item.CacheXlsxPath);
+            _results.Add(result);
+            if (result.Success)
+            {
+                Append("成功: " + item.TableId + " -> " + FirstNonEmpty(result.AssetPath, "Unity asset"));
+            }
+            else
+            {
+                Append("失败: " + item.TableId);
+                foreach (var error in result.Errors)
+                {
+                    Append("  " + error);
+                }
+            }
+
+            foreach (var warning in result.Warnings)
+            {
+                Append("警告: " + item.TableId + " - " + warning);
+            }
+
+            _index++;
+            return true;
+        }
+
+        public IEnumerable<string> DrainLines()
+        {
+            while (_pendingLines.Count > 0)
+            {
+                yield return _pendingLines.Dequeue();
+            }
+        }
+
+        public string BuildSummary()
+        {
+            var imported = _results.Count(result => result.Success);
+            var failed = _results.Count(result => !result.Success);
+            return "正在导入 Unity 配表资产" + Environment.NewLine +
+                   "进度: " + Math.Min(_index + 1, Math.Max(1, _items.Count)).ToString() + " / " + Math.Max(1, _items.Count).ToString() + Environment.NewLine +
+                   "已成功: " + imported.ToString() + "，失败: " + failed.ToString() + Environment.NewLine +
+                   "写入边界: 只写 Unity asset，不写飞书/registry/main/旧 Excel。";
+        }
+
+        public string BuildFinalSummary()
+        {
+            var imported = _results.Where(result => result.Success).Select(result => result.TableId).ToList();
+            var failed = _results.Where(result => !result.Success).ToList();
+            var builder = new StringBuilder();
+            builder.AppendLine(failed.Count == 0 ? "Unity 配表资产导入成功" : "Unity 配表资产导入有失败");
+            builder.AppendLine("成功: " + imported.Count.ToString() + " 张" + (imported.Count > 0 ? "（" + string.Join(", ", imported) + "）" : ""));
+            builder.AppendLine("失败: " + failed.Count.ToString() + " 张" + (failed.Count > 0 ? "（" + string.Join(", ", failed.Select(result => result.TableId)) + "）" : ""));
+            builder.AppendLine("写入边界: 只写 Unity asset；没有写飞书、registry、main、ProjectSettings 或旧 Excel。");
+            if (failed.Count > 0)
+            {
+                builder.AppendLine("下一步: 展开结果查看失败表；通常需要检查 ExcelToSO settings 是否指向 cache、生成的 C# 类型是否已编译、字段是否匹配。");
+            }
+            else
+            {
+                builder.AppendLine("下一步: 运行 PR 检查。");
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        private void Finish(bool success, string message)
+        {
+            Success = success;
+            Status = message;
+            IsFinished = true;
+            _stopwatch.Stop();
+            Append(message);
+        }
+
+        private void Append(string line)
+        {
+            _pendingLines.Enqueue(line ?? "");
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return "";
+        }
     }
 }

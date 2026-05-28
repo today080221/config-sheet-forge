@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.26
+
+- Unity 窗口新增 `导入 Unity 配表资产`：在最近一次 `sync-cache` 成功、`cacheStatus=upToDate`、无 blocked/triangulation failed 后，调用 ExcelToSO v1.0.4 public API，把 `.config-sheet-forge/excel-cache/*.xlsx` 导入 ScriptableObject asset。
+- ExcelToSO 被作为可选 peer backend 处理：未安装 `com.greatclock.exceltoscriptableobject` 或版本过旧时，config-sheet-forge 不会编译失败，只在窗口里提示前置条件。
+- 导入前会检查 `ProjectSettings/ExcelToScriptableObjectSettings.asset` 是否指向 Source of Truth cache；若仍指向旧 `Excel/` 路径，会阻断并提示“当前 ExcelToSO 还指向旧 Excel 路径，请先更新到 Source of Truth cache”。
+- 提供单独的 `更新 ExcelToSO settings 到 cache` 确认步骤，只改对应 settings 的 `excel_name`，不会写飞书、不会导入 asset、不会写旧 Excel。
+- ProjectConfigProbe 会从项目 tables 读取 `excelPath`、`oldExcelPath`、`assetDirectory`、`namespace`，并把这些本地导入元数据合并到 live registry 当前分支表列表中。
+- Unity smoke 增加 ExcelToSO optional backend / 不直接 asmdef 依赖 / 旧 Excel 路径阻断 / 导入按钮文案断言，防止项目私有 bridge 回流。
+
 ## 0.4.25
 
 - 修复飞书导出的 xlsx `dimension ref=A1` 但 `sheetData` 实际有多行多列时，`sync-cache` 误用 `A1:A1` 读取在线表的问题；used range 现在会扫描实际 `c/@r` 并与 dimension 取更大范围。

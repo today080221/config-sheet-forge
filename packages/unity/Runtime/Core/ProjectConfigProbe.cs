@@ -146,6 +146,10 @@ namespace ConfigSheetForge.Core
         public string SemanticCachePath { get; set; } = "";
         public string HashCachePath { get; set; } = "";
         public string CacheXlsxPath { get; set; } = "";
+        public string ExcelPath { get; set; } = "";
+        public string OldExcelPath { get; set; } = "";
+        public string AssetDirectory { get; set; } = "";
+        public string Namespace { get; set; } = "";
         public string SchemaStatus { get; set; } = "";
         public string Source { get; set; } = "";
         public string BlockingReason { get; set; } = "";
@@ -622,10 +626,37 @@ namespace ConfigSheetForge.Core
             summary.CurrentBranchTableCount = summary.CurrentBranchTables.Count;
             foreach (var table in summary.CurrentBranchTables)
             {
+                ApplyProjectTableMetadata(summary.Tables, table);
                 if (string.IsNullOrWhiteSpace(table.BlockingReason))
                 {
                     table.BlockingReason = BuildTableBlockingReason(summary, table);
                 }
+            }
+        }
+
+        private static void ApplyProjectTableMetadata(IEnumerable<ProjectConfigTableSummary> projectTables, ProjectConfigTableSummary table)
+        {
+            if (table == null || projectTables == null || string.IsNullOrWhiteSpace(table.TableId))
+            {
+                return;
+            }
+
+            foreach (var projectTable in projectTables)
+            {
+                if (projectTable == null || !string.Equals(projectTable.TableId, table.TableId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                table.DisplayName = FirstNonEmpty(table.DisplayName, projectTable.DisplayName);
+                table.CacheXlsxPath = FirstNonEmpty(table.CacheXlsxPath, projectTable.CacheXlsxPath);
+                table.ExcelPath = FirstNonEmpty(table.ExcelPath, projectTable.ExcelPath);
+                table.OldExcelPath = FirstNonEmpty(table.OldExcelPath, projectTable.OldExcelPath);
+                table.AssetDirectory = FirstNonEmpty(table.AssetDirectory, projectTable.AssetDirectory);
+                table.Namespace = FirstNonEmpty(table.Namespace, projectTable.Namespace);
+                table.SemanticCachePath = FirstNonEmpty(table.SemanticCachePath, projectTable.SemanticCachePath);
+                table.HashCachePath = FirstNonEmpty(table.HashCachePath, projectTable.HashCachePath);
+                return;
             }
         }
 
@@ -749,7 +780,11 @@ namespace ConfigSheetForge.Core
             table.RecordId = FirstNonEmpty(GetString(item, "recordId", "record_id", "registryRecordId"), GetString(feishu, "recordId", "record_id", "registryRecordId"));
             table.SemanticCachePath = GetString(item, "semanticCachePath", "semanticPath");
             table.HashCachePath = GetString(item, "hashCachePath", "sha256Path");
-            table.CacheXlsxPath = GetString(item, "cacheXlsxPath", "excelPath");
+            table.ExcelPath = GetString(item, "excelPath", "xlsxPath");
+            table.CacheXlsxPath = FirstNonEmpty(GetString(item, "cacheXlsxPath", "cacheExcelPath"), table.ExcelPath);
+            table.OldExcelPath = GetString(item, "oldExcelPath", "sourceXlsxPath", "sourceXlsx", "localSourcePath");
+            table.AssetDirectory = GetString(item, "assetDirectory", "assetDir", "scriptableObjectAssetDirectory");
+            table.Namespace = GetString(item, "namespace", "nameSpace", "scriptNamespace");
             table.SchemaStatus = ReadSchemaStatus(item);
             return table;
         }

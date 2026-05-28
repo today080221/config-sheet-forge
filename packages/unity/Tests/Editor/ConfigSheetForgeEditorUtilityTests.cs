@@ -133,5 +133,20 @@ namespace ConfigSheetForge.Unity.Editor.Tests
                 }
             }
         }
+
+        [Test]
+        public void ExcelToSoImporterStaysOptionalAndBlocksOldExcelPaths()
+        {
+            var importerSource = File.ReadAllText("Packages/dev.config-sheet-forge.unity/Editor/ConfigSheetForgeExcelToSoImporter.cs");
+            var windowSource = File.ReadAllText("Packages/dev.config-sheet-forge.unity/Editor/ConfigSheetForgeWindow.cs");
+            var asmdef = File.ReadAllText("Packages/dev.config-sheet-forge.unity/Editor/ConfigSheetForge.Editor.asmdef");
+
+            Assert.That(importerSource, Does.Contain("ExcelToScriptableObjectApi"));
+            Assert.That(importerSource, Does.Contain("ImportExcelPaths"));
+            Assert.That(windowSource, Does.Contain("导入 Unity 配表资产"));
+            Assert.That(windowSource, Does.Contain("当前 ExcelToSO 还指向旧 Excel 路径"));
+            Assert.That(windowSource, Does.Contain("不会写旧 Excel/"));
+            Assert.That(asmdef, Does.Not.Contain("GreatClock.ExcelToScriptableObject.Editor"));
+        }
     }
 }

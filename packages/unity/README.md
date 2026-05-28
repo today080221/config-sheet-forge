@@ -12,6 +12,8 @@
 
 从 0.4.25 开始，`sync-cache` 读取在线 Sheet 时不再依赖 `sheets +read` 的无范围默认读取，也不会盲信飞书导出 xlsx 里的错误 `dimension ref=A1`。Lark provider 会扫描实际 `sheetData` 构造显式 A1 范围，遇到 `90202 wrong startRange` 会自动 retry，并把 attemptedRange、retryRange、finalRange、sheetId、脱敏 token、online rows/cols 和 xlsx rows/cols 写进诊断，避免把范围/形状问题误报成权限问题。
 
+从 0.4.26 开始，Unity 窗口可以继续完成 `本地 cache xlsx -> Unity ScriptableObject asset` 这一步。项目显式安装 ExcelToSO v1.0.4 或更新版本后，`配表` 页会出现 `导入 Unity 配表资产`。它只写 Unity asset，不写飞书、不改在线表、不改 registry、不写 main；如果 ExcelToSO settings 还指向旧 `Excel/` 路径，窗口会先阻断，并提供单独确认的“更新 settings 到 Source of Truth cache”步骤。
+
 窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。
@@ -36,6 +38,8 @@
 | --- | --- | --- |
 | 刷新状态 / 预览同步计划 / 预览新建配表 / 生成合并预览 / 运行 PR 检查 | 安全 | 只读取或生成报告，不写飞书、不改本地 cache |
 | 写入本地 cache | 中风险 | 会更新本地 cache，需要勾选确认 |
+| 导入 Unity 配表资产 | 中风险 | 只写 Unity ScriptableObject asset；要求最近一次同步预览通过且 cache 已最新 |
+| 更新 ExcelToSO settings 到 cache | 中风险 | 只改 `ProjectSettings/ExcelToScriptableObjectSettings.asset` 中对应表的 `excel_name`，不会写旧 Excel |
 | 创建在线表并登记 / 本地 Excel Seed apply / 确认写回 main | 高风险 | 会写飞书、项目状态或目标工作区，需要预览成功 + 勾选 + 二次确认 |
 | 初始化目标分支 | 高风险 | 先 dry-run；apply 必须校验同输入 dry-run result，再拆分确认在线 Sheet、Base 注册、SchemaReviews、本地 cache、ProjectSettings、ExcelToSO |
 | 从目标分支初始化当前分支 | 中/高风险 | 新功能分支缺在线工作区时使用；先 dry-run，apply 前分项确认在线 Sheet、注册中心和 SchemaReviews，默认不写本地 cache / ProjectSettings / ExcelToSO，避免误用历史 Excel Seed |
@@ -207,7 +211,7 @@ inputs JSON 至少包含这些字段：
 ## 安装
 
 ```text
-https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.25
+https://github.com/today080221/config-sheet-forge.git?path=/packages/unity#v0.4.26
 ```
 
 ## 测试
