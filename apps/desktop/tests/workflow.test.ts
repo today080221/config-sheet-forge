@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   decidePrMerge,
   decideSyncImport,
+  ordinaryToolText,
+  primaryToolAction,
+  shouldShowBotSecretForm,
   validateNewTableDraft,
   type LifecycleResultLike,
-  type NewTableDraft
+  type NewTableDraft,
+  type ToolCheckLike
 } from "../src/workflow";
 
 function syncPreview(status: string, patch: Partial<LifecycleResultLike["syncCacheSummary"]> = {}): LifecycleResultLike {
@@ -105,5 +109,53 @@ describe("new table validation", () => {
     expect(errors.join(" ")).toContain("字段 key 不合法");
     expect(errors.join(" ")).toContain("至少需要一个枚举值");
     expect(errors.join(" ")).toContain("至少需要一个唯一 ID 字段");
+  });
+});
+
+describe("tool/auth UX helpers", () => {
+  it("does not show a primary GitHub auth button once gh is authenticated", () => {
+    const check: ToolCheckLike = {
+      name: "gh",
+      status: "ok",
+      installed: true,
+      authenticated: true,
+      accountLabel: "today080221",
+      nextAction: "none"
+    };
+
+    expect(primaryToolAction(check)).toBeNull();
+  });
+
+  it("shows GitHub auth when gh is installed but not authenticated", () => {
+    const check: ToolCheckLike = {
+      name: "gh",
+      status: "needsAuth",
+      installed: true,
+      authenticated: false,
+      nextAction: "gh_auth",
+      nextActionLabel: "GitHub 授权"
+    };
+
+    expect(primaryToolAction(check)?.label).toBe("GitHub 授权");
+  });
+
+  it("turns lark-cli JSON doctor output into human text in ordinary view", () => {
+    const text = ordinaryToolText("{\"ok\":true,\"identity\":\"bot\"}");
+
+    expect(text).toContain("bot");
+    expect(text.startsWith("{")).toBe(false);
+  });
+
+  it("hides the bot secret form when bot is already configured", () => {
+    const check: ToolCheckLike = {
+      name: "lark-cli",
+      status: "ok",
+      installed: true,
+      authenticated: true,
+      botConfigured: true
+    };
+
+    expect(shouldShowBotSecretForm(check, false)).toBe(false);
+    expect(shouldShowBotSecretForm(check, true)).toBe(true);
   });
 });

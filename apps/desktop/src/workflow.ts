@@ -2,13 +2,32 @@ export type ScenarioId = "environment" | "sync-import" | "pr-merge" | "new-table
 
 export type ViewMode = "planner" | "programmer";
 
-export type ToolStatus = "ok" | "warning" | "error";
+export type ToolStatus = "ok" | "warning" | "error" | "needsInstall" | "needsAuth" | "needsScope" | "expired";
+
+export type ToolActionLike = {
+  action: string;
+  label: string;
+  kind?: "primary" | "secondary" | "danger";
+};
 
 export type ToolCheckLike = {
   name: string;
   status: ToolStatus;
   summary?: string;
   detail?: string;
+  installed?: boolean;
+  executablePath?: string;
+  source?: string;
+  authenticated?: boolean;
+  accountLabel?: string;
+  scopesOk?: boolean;
+  nextAction?: string;
+  nextActionLabel?: string;
+  secondaryActions?: ToolActionLike[];
+  botConfigured?: boolean;
+  botLabel?: string;
+  userAuthenticated?: boolean;
+  userLabel?: string;
 };
 
 export type ProjectSnapshotLike = {
@@ -167,7 +186,98 @@ export function normalizeCacheStatus(value: string | undefined): string {
 }
 
 export function hasBlockingToolIssue(checks: ToolCheckLike[] | undefined): boolean {
-  return (checks || []).some((check) => check.status === "error" && check.name !== "gh");
+  return (checks || []).some((check) => {
+    if (check.name === "gh") {
+      return check.status === "needsInstall";
+    }
+
+    return ["error", "needsInstall", "needsAuth", "needsScope", "expired"].includes(check.status);
+  });
+}
+
+export function primaryToolAction(check: ToolCheckLike): ToolActionLike | null {
+  const action = check.nextAction || "";
+  if (!action || action === "none") {
+    return null;
+  }
+
+  if (check.status === "ok" && check.authenticated && (action === "auth" || action === "reauth")) {
+    return null;
+  }
+
+  return {
+    action,
+    label: check.nextActionLabel || action,
+    kind: "primary"
+  };
+}
+
+export function secondaryToolActions(check: ToolCheckLike): ToolActionLike[] {
+  return (check.secondaryActions || []).filter((action) => action.action && action.label);
+}
+
+export function shouldShowBotSecretForm(larkCheck: ToolCheckLike | undefined, forceConfigure: boolean): boolean {
+  if (forceConfigure) {
+    return true;
+  }
+
+  if (!larkCheck) {
+    return true;
+  }
+
+  return !larkCheck.botConfigured || larkCheck.status === "needsAuth" || larkCheck.status === "error";
+}
+
+export function humanToolStatus(check: ToolCheckLike): string {
+  switch (check.status) {
+    case "ok":
+      return check.authenticated ? "可用，已授权" : "可用";
+    case "needsInstall":
+      return "未安装";
+    case "needsAuth":
+      return "需要授权";
+    case "needsScope":
+      return "权限不足";
+    case "expired":
+      return "授权过期";
+    case "warning":
+      return "需要处理";
+    case "error":
+      return "不可用";
+    default:
+      return "需要检查";
+  }
+}
+
+export function ordinaryToolText(text: string | undefined): string {
+  const trimmed = (text || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed && typeof parsed === "object") {
+        const asRecord = parsed as Record<string, unknown>;
+        const ok = asRecord.ok;
+        const identity = asRecord.identity || asRecord.currentIdentity || asRecord.as;
+        if (typeof identity === "string" && identity) {
+          return `已读取结构化诊断，当前身份：${identity}`;
+        }
+
+        if (typeof ok === "boolean") {
+          return ok ? "诊断通过。" : "诊断未通过，请看下一步。";
+        }
+      }
+    } catch {
+      return "已读取结构化诊断。";
+    }
+
+    return "已读取结构化诊断。";
+  }
+
+  return trimmed;
 }
 
 export function decideRecommendedScenario(state: WorkflowState): ScenarioId {

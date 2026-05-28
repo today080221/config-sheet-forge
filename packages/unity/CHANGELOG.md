@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.35
+
+- Desktop 环境/授权卡改为统一 Tool/Auth 状态模型：工具安装、授权账号、scope 状态、下一步动作和更多操作分开展示，避免“绿色可用”旁边仍出现醒目授权按钮。
+- `gh` 状态不再把可执行文件存在等同于已授权：未安装显示“安装 GitHub CLI”，未登录显示“GitHub 授权”，已登录且识别 PR 时显示账号和 PR 自动识别可用；已登录但无 PR 时推荐刷新 PR / 手动目标分支，不再推荐授权。
+- `lark-cli` 状态拆出 bot/user：bot 已配置且 doctor 通过时默认收起 App ID / App Secret 输入框；用户身份已登录时不再显示醒目的登录按钮，只在更多操作中提供重新登录 / 切换账号。
+- 普通视图会把 `lark-cli doctor` JSON 输出转换成人话诊断；完整路径、raw stdout/stderr、attempted paths 和 token 仍只在 Debug 展开后显示。
+- 新增 Desktop workflow/UI smoke 测试，覆盖 gh 已授权不显示主授权按钮、gh 未授权显示授权、bot 成功态隐藏 Secret 输入框、Debug off 不暴露完整路径/raw 诊断。
+
 ## 0.4.34
 
 - Desktop 首页改为“智能场景”向导：环境/授权、同步并导入 Unity、准备 PR 合并、新建配表、从 main/PR base 派生当前分支。每个场景只暴露一个主按钮，普通视图优先显示结论、下一步和安全说明。

@@ -4,7 +4,12 @@ import {
   decideRecommendedScenario,
   decideWorkflow,
   getScenario,
+  humanToolStatus,
+  ordinaryToolText,
+  primaryToolAction,
   scenarios,
+  secondaryToolActions,
+  shouldShowBotSecretForm,
   summarizeLifecycleResult,
   validateNewTableDraft,
   type FieldType,
@@ -32,8 +37,6 @@ type ProjectSnapshot = {
 
 type ToolCheck = ToolCheckLike & {
   detail: string;
-  executablePath?: string;
-  source?: string;
   action?: string;
   actionLabel?: string;
   url?: string;
@@ -113,18 +116,6 @@ function redact(value: string) {
   }
 
   return `${value.slice(0, 4)}...${value.slice(-4)}`;
-}
-
-function statusLabel(status: ToolCheck["status"]) {
-  if (status === "ok") {
-    return "可用";
-  }
-
-  if (status === "warning") {
-    return "需要处理";
-  }
-
-  return "不可用";
 }
 
 function isInteractiveSafeFallbackOperation(operation: string) {
@@ -245,6 +236,7 @@ export function App() {
   });
   const [botAppId, setBotAppId] = useState("");
   const [botSecret, setBotSecret] = useState("");
+  const [showBotConfigure, setShowBotConfigure] = useState(false);
   const [newTable, setNewTable] = useState<NewTableDraft>({
     tableId: "",
     displayName: "",
@@ -469,6 +461,25 @@ export function App() {
       resultPath: path
     });
   }, [projectRoot, runtimeAvailable, snapshot?.projectRoot, startup.bridgeSessionDir]);
+
+  const handleToolAction = useCallback(async (action: string) => {
+    if (!action || action === "none") {
+      return;
+    }
+
+    if (action === "refresh_pr" || action === "refresh_tools") {
+      await discover(snapshot?.projectRoot || projectRoot);
+      return;
+    }
+
+    if (action === "configure_lark_bot") {
+      setShowBotConfigure(true);
+      updateScenario("environment");
+      return;
+    }
+
+    await runSetupAction(action);
+  }, [discover, projectRoot, runSetupAction, snapshot?.projectRoot, updateScenario]);
 
   const runOperation = useCallback(async (operation: string) => {
     setError("");
@@ -713,22 +724,14 @@ export function App() {
             {checks.length === 0 ? <p className="muted">点击“识别项目”或“开始检查”后显示。</p> : checks.map((check) => (
               <div className={`tool-check ${check.status}`} key={check.name}>
                 <div className="tool-check-main">
-                  <strong>{check.name}：{statusLabel(check.status)}</strong>
-                  <span>{check.summary}</span>
+                  <strong>{check.name}：{humanToolStatus(check)}</strong>
+                  <span>{ordinaryToolText(check.summary)}</span>
                 </div>
-                <small>{check.detail}</small>
+                {check.accountLabel ? <small>当前账号：{check.accountLabel}</small> : null}
+                {check.scopesOk === false ? <small className="tool-warning">权限/scope 还不满足当前项目。</small> : null}
+                <small>{ordinaryToolText(check.detail)}</small>
                 {debugEnabled && check.executablePath ? <code title={check.executablePath}>{check.executablePath}</code> : null}
-                <div className="tool-actions">
-                  {check.action ? <button onClick={() => void runSetupAction(check.action || "")}>{check.actionLabel || "处理"}</button> : null}
-                  {check.name === "gh" && check.status !== "error" ? <button onClick={() => void runSetupAction("gh_auth")}>GitHub 授权</button> : null}
-                  {check.name === "lark-cli" && check.status !== "error" ? (
-                    <>
-                      <button onClick={() => void runSetupAction("lark_doctor")}>重新 doctor</button>
-                      <button onClick={() => void runSetupAction("lark_auth_user")}>登录飞书用户身份</button>
-                    </>
-                  ) : null}
-                  {check.url ? <button className="secondary" onClick={() => void openExternal(check.url)}>打开说明</button> : null}
-                </div>
+                <ToolActions check={check} debugEnabled={debugEnabled} onAction={handleToolAction} onOpen={openExternal} />
               </div>
             ))}
           </div>
@@ -739,13 +742,24 @@ export function App() {
         <section className="bot-card">
           <div>
             <h2>配置飞书 bot</h2>
-            <p>App Secret 只通过 stdin 传给 lark-cli，不写仓库、不进命令行、不显示在日志里。</p>
+            {larkCheck?.botConfigured && !showBotConfigure ? (
+              <p>bot 已配置：{larkCheck.botLabel || larkCheck.accountLabel || "已配置"}。App Secret 输入框已收起，需要变更时再重新配置。</p>
+            ) : (
+              <p>App Secret 只通过 stdin 传给 lark-cli，不写仓库、不进命令行、不显示在日志里。</p>
+            )}
           </div>
-          <div className="bot-form">
-            <input value={botAppId} onChange={(event) => setBotAppId(event.target.value)} placeholder="App ID，例如 cli_xxx" />
-            <input value={botSecret} onChange={(event) => setBotSecret(event.target.value)} placeholder="App Secret" type="password" />
-            <button onClick={() => void runSetupAction("configure_lark_bot")}>配置飞书 bot</button>
-          </div>
+          {shouldShowBotSecretForm(larkCheck, showBotConfigure) ? (
+            <div className="bot-form">
+              <input value={botAppId} onChange={(event) => setBotAppId(event.target.value)} placeholder="App ID，例如 cli_xxx" />
+              <input value={botSecret} onChange={(event) => setBotSecret(event.target.value)} placeholder="App Secret" type="password" />
+              <button onClick={() => void runSetupAction("configure_lark_bot")}>配置飞书 bot</button>
+            </div>
+          ) : (
+            <div className="tool-actions">
+              <button className="secondary" onClick={() => setShowBotConfigure(true)}>重新配置 bot</button>
+              <button className="secondary" onClick={() => void runSetupAction("lark_doctor")}>重新 doctor</button>
+            </div>
+          )}
         </section>
       ) : null}
 
@@ -771,6 +785,39 @@ export function App() {
         ) : null}
       </section>
     </main>
+  );
+}
+
+function ToolActions(props: {
+  check: ToolCheck;
+  debugEnabled: boolean;
+  onAction: (action: string) => void | Promise<void>;
+  onOpen: (url?: string) => void | Promise<void>;
+}) {
+  const primary = primaryToolAction(props.check);
+  const secondary = secondaryToolActions(props.check);
+  return (
+    <div className="tool-actions">
+      {primary ? <button onClick={() => void props.onAction(primary.action)}>{primary.label}</button> : null}
+      {secondary.length > 0 || props.check.url ? (
+        <details className="tool-more">
+          <summary>更多操作</summary>
+          <div className="tool-more-actions">
+            {secondary.map((action) => (
+              <button
+                className={action.kind === "danger" ? "danger-button" : "secondary"}
+                key={`${props.check.name}-${action.action}-${action.label}`}
+                onClick={() => void props.onAction(action.action)}
+              >
+                {action.label}
+              </button>
+            ))}
+            {props.check.url ? <button className="secondary" onClick={() => void props.onOpen(props.check.url)}>打开说明</button> : null}
+          </div>
+        </details>
+      ) : null}
+      {!primary && props.check.status === "ok" ? <span className="ready-pill">能用</span> : null}
+    </div>
   );
 }
 

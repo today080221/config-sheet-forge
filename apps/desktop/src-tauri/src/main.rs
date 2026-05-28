@@ -32,13 +32,32 @@ struct StartupContext {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ToolAction {
+    action: String,
+    label: String,
+    kind: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ToolCheck {
     name: String,
     status: String,
     summary: String,
     detail: String,
+    installed: bool,
     executable_path: String,
     source: String,
+    authenticated: bool,
+    account_label: String,
+    scopes_ok: bool,
+    next_action: String,
+    next_action_label: String,
+    secondary_actions: Vec<ToolAction>,
+    bot_configured: bool,
+    bot_label: String,
+    user_authenticated: bool,
+    user_label: String,
     action: String,
     action_label: String,
     url: String,
@@ -145,12 +164,17 @@ fn discover_project(project_root: String) -> Result<ProjectSnapshot, String> {
         git_branch_url: if github_repository.is_empty() || git_branch == "unknown" {
             String::new()
         } else {
-            format!("https://github.com/{}/tree/{}", github_repository, git_branch)
+            format!(
+                "https://github.com/{}/tree/{}",
+                github_repository, git_branch
+            )
         },
         git_branch,
         feishu_profile,
-        registry_base_token: find_string_deep(&config, &["registryBaseToken", "baseToken"]).unwrap_or_default(),
-        registry_base_url: find_string_deep(&config, &["registryBaseUrl", "baseUrl"]).unwrap_or_default(),
+        registry_base_token: find_string_deep(&config, &["registryBaseToken", "baseToken"])
+            .unwrap_or_default(),
+        registry_base_url: find_string_deep(&config, &["registryBaseUrl", "baseUrl"])
+            .unwrap_or_default(),
         github_repository,
         pr_url: pr.1,
         pr_number: pr.0,
@@ -159,7 +183,8 @@ fn discover_project(project_root: String) -> Result<ProjectSnapshot, String> {
 
 #[tauri::command]
 fn doctor_tools(project_root: String) -> Vec<ToolCheck> {
-    let root = resolve_project_root(project_root).unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = resolve_project_root(project_root)
+        .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let config = read_desktop_project_config(&root);
     let mut checks = Vec::new();
 
@@ -185,35 +210,28 @@ fn doctor_tools(project_root: String) -> Vec<ToolCheck> {
         "https://git-scm.com/download/win",
     ));
 
-    checks.push(tool_check_resolved(
-        &root,
-        "lark-cli",
-        resolve_lark_cli(&root, &config),
-        &["doctor"],
-        "lark-cli 必需，用 bot/user 身份读取飞书 Base 和在线 Sheet。Desktop 子进程默认设置 LARK_CLI_NO_PROXY=1，飞书直连。",
-        "安装 lark-cli",
-        "install_lark_cli",
-        "https://github.com/larksuite/cli",
-    ));
+    checks.push(lark_tool_check(&root, &config));
 
-    checks.push(tool_check_resolved(
-        &root,
-        "gh",
-        resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""]),
-        &["auth", "status"],
-        "GitHub CLI 推荐安装，用于自动识别当前 PR 和目标分支；缺失时仍可手动选择目标分支。",
-        "安装 GitHub CLI",
-        "install_gh",
-        "https://cli.github.com/",
-    ));
+    checks.push(github_tool_check(&root));
 
     checks.push(ToolCheck {
         name: "飞书直连".to_string(),
         status: "ok".to_string(),
         summary: "Desktop 子进程会设置 LARK_CLI_NO_PROXY=1".to_string(),
         detail: "飞书导出和 Base 读取默认不走代理；如果公司网络需要特殊代理，请在程序视图里检查本机环境。".to_string(),
+        installed: true,
         executable_path: String::new(),
         source: "desktop-env".to_string(),
+        authenticated: true,
+        account_label: String::new(),
+        scopes_ok: true,
+        next_action: "none".to_string(),
+        next_action_label: String::new(),
+        secondary_actions: Vec::new(),
+        bot_configured: true,
+        bot_label: String::new(),
+        user_authenticated: false,
+        user_label: String::new(),
         action: String::new(),
         action_label: String::new(),
         url: String::new(),
@@ -226,14 +244,19 @@ fn doctor_tools(project_root: String) -> Vec<ToolCheck> {
 fn run_cli(project_root: String, args: Vec<String>) -> Result<CliRunResult, String> {
     let root = resolve_project_root(project_root)?;
     let config = read_desktop_project_config(&root);
-    let resolved = resolve_config_sheet_forge_cli(&root, &config).ok_or_else(|| missing_cli_message(&root, &config))?;
+    let resolved = resolve_config_sheet_forge_cli(&root, &config)
+        .ok_or_else(|| missing_cli_message(&root, &config))?;
     let lark = resolve_lark_cli(&root, &config);
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     run_capture_resolved(&root, &resolved, &arg_refs, lark.as_ref(), None)
 }
 
 #[tauri::command]
-fn write_bridge_command(bridge_session_dir: String, operation: String, payload_json: String) -> Result<String, String> {
+fn write_bridge_command(
+    bridge_session_dir: String,
+    operation: String,
+    payload_json: String,
+) -> Result<String, String> {
     let session = PathBuf::from(bridge_session_dir.trim());
     if session.as_os_str().is_empty() {
         return Err("Desktop 不是从 Unity bridge 启动，不能直接发送 Unity 命令。".to_string());
@@ -242,15 +265,22 @@ fn write_bridge_command(bridge_session_dir: String, operation: String, payload_j
     let commands = session.join("commands");
     fs::create_dir_all(&commands).map_err(|e| format!("无法创建 Unity bridge 命令目录：{}", e))?;
     let timestamp = chrono_like_timestamp();
-    let path = commands.join(format!("{}-{}.json", timestamp, sanitize_file_name(&operation)));
+    let path = commands.join(format!(
+        "{}-{}.json",
+        timestamp,
+        sanitize_file_name(&operation)
+    ));
     let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
     let document = serde_json::json!({
         "operation": operation,
         "createdAt": timestamp,
         "payload": payload
     });
-    fs::write(&path, serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_string()))
-        .map_err(|e| format!("写入 Unity bridge 命令失败：{}", e))?;
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| format!("写入 Unity bridge 命令失败：{}", e))?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -264,19 +294,45 @@ fn run_setup_action(
     let root = resolve_project_root(project_root)?;
     let config = read_desktop_project_config(&root);
     match action.as_str() {
-        "install_git" => run_setup_tool(&root, "winget", &["install", "--id", "Git.Git", "-e", "--source", "winget"], None),
-        "install_gh" => run_setup_tool(&root, "winget", &["install", "--id", "GitHub.cli", "-e", "--source", "winget"], None),
+        "install_git" => run_setup_tool(
+            &root,
+            "winget",
+            &["install", "--id", "Git.Git", "-e", "--source", "winget"],
+            None,
+        ),
+        "install_gh" => run_setup_tool(
+            &root,
+            "winget",
+            &["install", "--id", "GitHub.cli", "-e", "--source", "winget"],
+            None,
+        ),
         "gh_auth" => {
-            let gh = resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""]).ok_or_else(|| "没有找到 gh。请先点击“安装 GitHub CLI”。".to_string())?;
+            let gh = resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""])
+                .ok_or_else(|| "没有找到 gh。请先点击“安装 GitHub CLI”。".to_string())?;
             run_capture_resolved(&root, &gh, &["auth", "login"], None, None)
         }
-        "install_lark_cli" => run_setup_tool(&root, "npm", &["install", "-g", "@larksuite/cli"], None),
+        "gh_logout" => {
+            let gh = resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""])
+                .ok_or_else(|| "没有找到 gh。请先点击“安装 GitHub CLI”。".to_string())?;
+            run_capture_resolved(
+                &root,
+                &gh,
+                &["auth", "logout", "-h", "github.com"],
+                None,
+                None,
+            )
+        }
+        "install_lark_cli" => {
+            run_setup_tool(&root, "npm", &["install", "-g", "@larksuite/cli"], None)
+        }
         "lark_auth_user" => {
-            let lark = resolve_lark_cli(&root, &config).ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?;
+            let lark = resolve_lark_cli(&root, &config)
+                .ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?;
             run_capture_resolved(&root, &lark, &["auth", "login", "--recommend"], None, None)
         }
         "lark_doctor" => {
-            let lark = resolve_lark_cli(&root, &config).ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?;
+            let lark = resolve_lark_cli(&root, &config)
+                .ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?;
             run_capture_resolved(&root, &lark, &["doctor"], None, None)
         }
         "configure_lark_bot" => {
@@ -284,12 +340,21 @@ fn run_setup_action(
                 return Err("请先填写飞书 App ID 和 App Secret。Secret 只会通过 stdin 传给 lark-cli，不写入仓库或日志。".to_string());
             }
 
-            let lark = resolve_lark_cli(&root, &config).ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?;
+            let lark = resolve_lark_cli(&root, &config)
+                .ok_or_else(|| "没有找到 lark-cli。请先点击“安装 lark-cli”。".to_string())?;
             let stdin = format!("{}\n", secret_value);
             run_capture_resolved(
                 &root,
                 &lark,
-                &["config", "init", "--app-id", app_id.trim(), "--app-secret-stdin", "--brand", "feishu"],
+                &[
+                    "config",
+                    "init",
+                    "--app-id",
+                    app_id.trim(),
+                    "--app-secret-stdin",
+                    "--brand",
+                    "feishu",
+                ],
                 None,
                 Some(&stdin),
             )
@@ -326,18 +391,31 @@ fn open_external_url(url: String) -> Result<(), String> {
         cmd
     };
 
-    command.spawn().map_err(|e| format!("无法打开链接：{}", e))?;
+    command
+        .spawn()
+        .map_err(|e| format!("无法打开链接：{}", e))?;
     Ok(())
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.iter().any(|arg| arg == "--smoke-release") {
-        std::process::exit(run_release_smoke(args.iter().any(|arg| arg == "--expect-sidecar")));
+        std::process::exit(run_release_smoke(
+            args.iter().any(|arg| arg == "--expect-sidecar"),
+        ));
     }
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![startup_project_root, startup_context, discover_project, doctor_tools, run_cli, run_setup_action, write_bridge_command, open_external_url])
+        .invoke_handler(tauri::generate_handler![
+            startup_project_root,
+            startup_context,
+            discover_project,
+            doctor_tools,
+            run_cli,
+            run_setup_action,
+            write_bridge_command,
+            open_external_url
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Config Sheet Forge desktop");
 }
@@ -356,7 +434,16 @@ fn run_release_smoke(expect_sidecar: bool) -> i32 {
     let sidecar_cli_found = sidecar.is_some();
     let sidecar_cli_smoke_ok = sidecar
         .as_ref()
-        .and_then(|tool| run_capture_resolved(&env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), tool, &["help"], None, None).ok())
+        .and_then(|tool| {
+            run_capture_resolved(
+                &env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                tool,
+                &["help"],
+                None,
+                None,
+            )
+            .ok()
+        })
         .map(|result| result.exit_code == 0)
         .unwrap_or(false);
     let report = ReleaseSmokeReport {
@@ -395,14 +482,22 @@ fn resolve_config_sheet_forge_cli(root: &Path, config: &Value) -> Option<Resolve
     }
 
     let source_root = env::var("CONFIG_SHEET_FORGE_ROOT").unwrap_or_default();
-    let source_relative = find_string_deep(config, &["sourceCliProjectRelativePath", "cliProjectRelativePath"])
-        .unwrap_or_else(|| "src/cli/ConfigSheetForge.Cli".to_string());
+    let source_relative = find_string_deep(
+        config,
+        &["sourceCliProjectRelativePath", "cliProjectRelativePath"],
+    )
+    .unwrap_or_else(|| "src/cli/ConfigSheetForge.Cli".to_string());
     if !source_root.trim().is_empty() {
         let project = Path::new(source_root.trim()).join(source_relative);
         if project.exists() {
             return Some(ResolvedTool {
                 program: "dotnet".to_string(),
-                prefix_args: vec!["run".to_string(), "--project".to_string(), project.to_string_lossy().to_string(), "--".to_string()],
+                prefix_args: vec![
+                    "run".to_string(),
+                    "--project".to_string(),
+                    project.to_string_lossy().to_string(),
+                    "--".to_string(),
+                ],
                 display_path: format!("dotnet run --project {}", project.display()),
                 source: "CONFIG_SHEET_FORGE_ROOT source checkout".to_string(),
                 attempted_paths: vec![project.to_string_lossy().to_string()],
@@ -411,7 +506,11 @@ fn resolve_config_sheet_forge_cli(root: &Path, config: &Value) -> Option<Resolve
     }
 
     let mut attempted = Vec::new();
-    let mut path_tool = resolve_path_tool_with_attempts("config-sheet-forge", &[".exe", ".cmd", ".bat", ""], &mut attempted);
+    let mut path_tool = resolve_path_tool_with_attempts(
+        "config-sheet-forge",
+        &[".exe", ".cmd", ".bat", ""],
+        &mut attempted,
+    );
     if let Some(tool) = path_tool.as_mut() {
         tool.attempted_paths.extend(attempted);
         return path_tool;
@@ -421,7 +520,12 @@ fn resolve_config_sheet_forge_cli(root: &Path, config: &Value) -> Option<Resolve
     if source_project.exists() {
         return Some(ResolvedTool {
             program: "dotnet".to_string(),
-            prefix_args: vec!["run".to_string(), "--project".to_string(), source_project.to_string_lossy().to_string(), "--".to_string()],
+            prefix_args: vec![
+                "run".to_string(),
+                "--project".to_string(),
+                source_project.to_string_lossy().to_string(),
+                "--".to_string(),
+            ],
             display_path: format!("dotnet run --project {}", source_project.display()),
             source: "project-local source checkout".to_string(),
             attempted_paths: vec![source_project.to_string_lossy().to_string()],
@@ -432,7 +536,9 @@ fn resolve_config_sheet_forge_cli(root: &Path, config: &Value) -> Option<Resolve
 }
 
 fn resolve_sidecar_cli() -> Option<ResolvedTool> {
-    let exe_dir = env::current_exe().ok().and_then(|path| path.parent().map(|p| p.to_path_buf()))?;
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|p| p.to_path_buf()))?;
     let candidates = [
         exe_dir.join("cli").join("config-sheet-forge.exe"),
         exe_dir.join("cli").join("config-sheet-forge"),
@@ -449,13 +555,27 @@ fn resolve_sidecar_cli() -> Option<ResolvedTool> {
 }
 
 fn resolve_lark_cli(root: &Path, config: &Value) -> Option<ResolvedTool> {
-    let local_config = read_json(&root.join(".config-sheet-forge").join("config.json")).unwrap_or(Value::Null);
+    let local_config =
+        read_json(&root.join(".config-sheet-forge").join("config.json")).unwrap_or(Value::Null);
     let mut attempted = Vec::new();
     for (source, value) in [
-        ("env:CONFIG_SHEET_FORGE_LARK_CLI", env::var("CONFIG_SHEET_FORGE_LARK_CLI").unwrap_or_default()),
-        ("env:LARK_CLI_PATH", env::var("LARK_CLI_PATH").unwrap_or_default()),
-        ("project:toolkit.larkCliPath", find_string_deep(config, &["larkCliPath", "larkCliExecutable"]).unwrap_or_default()),
-        ("local:.config-sheet-forge/config.json", find_string_deep(&local_config, &["larkCliPath", "larkCliExecutable"]).unwrap_or_default()),
+        (
+            "env:CONFIG_SHEET_FORGE_LARK_CLI",
+            env::var("CONFIG_SHEET_FORGE_LARK_CLI").unwrap_or_default(),
+        ),
+        (
+            "env:LARK_CLI_PATH",
+            env::var("LARK_CLI_PATH").unwrap_or_default(),
+        ),
+        (
+            "project:toolkit.larkCliPath",
+            find_string_deep(config, &["larkCliPath", "larkCliExecutable"]).unwrap_or_default(),
+        ),
+        (
+            "local:.config-sheet-forge/config.json",
+            find_string_deep(&local_config, &["larkCliPath", "larkCliExecutable"])
+                .unwrap_or_default(),
+        ),
     ] {
         if let Some(tool) = resolve_explicit_tool_with_attempts(&value, source, &mut attempted) {
             return Some(tool);
@@ -474,7 +594,11 @@ fn resolve_lark_cli(root: &Path, config: &Value) -> Option<ResolvedTool> {
         }
     }
 
-    resolve_path_tool_with_attempts("lark-cli", &[".ps1", ".cmd", ".exe", ".bat", ""], &mut attempted)
+    resolve_path_tool_with_attempts(
+        "lark-cli",
+        &[".ps1", ".cmd", ".exe", ".bat", ""],
+        &mut attempted,
+    )
 }
 
 fn resolve_path_tool(name: &str, extensions: &[&str]) -> Option<ResolvedTool> {
@@ -482,7 +606,11 @@ fn resolve_path_tool(name: &str, extensions: &[&str]) -> Option<ResolvedTool> {
     resolve_path_tool_with_attempts(name, extensions, &mut attempted)
 }
 
-fn resolve_path_tool_with_attempts(name: &str, extensions: &[&str], attempted: &mut Vec<String>) -> Option<ResolvedTool> {
+fn resolve_path_tool_with_attempts(
+    name: &str,
+    extensions: &[&str],
+    attempted: &mut Vec<String>,
+) -> Option<ResolvedTool> {
     let path_var = env::var_os("PATH").unwrap_or_default();
     let mut search_paths: Vec<PathBuf> = env::split_paths(&path_var).collect();
     if cfg!(windows) {
@@ -512,7 +640,11 @@ fn resolve_explicit_tool(value: &str, source: &str) -> Option<ResolvedTool> {
     resolve_explicit_tool_with_attempts(value, source, &mut attempted)
 }
 
-fn resolve_explicit_tool_with_attempts(value: &str, source: &str, attempted: &mut Vec<String>) -> Option<ResolvedTool> {
+fn resolve_explicit_tool_with_attempts(
+    value: &str,
+    source: &str,
+    attempted: &mut Vec<String>,
+) -> Option<ResolvedTool> {
     let trimmed = value.trim().trim_matches('"');
     if trimmed.is_empty() {
         return None;
@@ -538,12 +670,22 @@ fn resolve_explicit_tool_with_attempts(value: &str, source: &str, attempted: &mu
 }
 
 fn tool_from_path(path: PathBuf, source: &str) -> ResolvedTool {
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     let display_path = path.to_string_lossy().to_string();
     if cfg!(windows) && extension == "ps1" {
         return ResolvedTool {
             program: "powershell.exe".to_string(),
-            prefix_args: vec!["-NoProfile".to_string(), "-ExecutionPolicy".to_string(), "Bypass".to_string(), "-File".to_string(), display_path.clone()],
+            prefix_args: vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                display_path.clone(),
+            ],
             display_path,
             source: source.to_string(),
             attempted_paths: Vec::new(),
@@ -569,8 +711,14 @@ fn tool_from_path(path: PathBuf, source: &str) -> ResolvedTool {
     }
 }
 
-fn run_setup_tool(root: &Path, name: &str, args: &[&str], stdin: Option<&str>) -> Result<CliRunResult, String> {
-    let tool = resolve_path_tool(name, &[".exe", ".cmd", ".bat", ""]).ok_or_else(|| format!("没有找到 {}，请先安装或手动配置 PATH。", name))?;
+fn run_setup_tool(
+    root: &Path,
+    name: &str,
+    args: &[&str],
+    stdin: Option<&str>,
+) -> Result<CliRunResult, String> {
+    let tool = resolve_path_tool(name, &[".exe", ".cmd", ".bat", ""])
+        .ok_or_else(|| format!("没有找到 {}，请先安装或手动配置 PATH。", name))?;
     run_capture_resolved(root, &tool, args, None, stdin)
 }
 
@@ -590,9 +738,23 @@ fn tool_check_resolved(
                 name: name.to_string(),
                 status: "ok".to_string(),
                 summary: first_line(&result.stdout).unwrap_or_else(|| "可用".to_string()),
-                detail: format!("{} 来源：{}。路径：{}", help, tool.source, tool.display_path),
+                detail: format!(
+                    "{} 来源：{}。路径：{}",
+                    help, tool.source, tool.display_path
+                ),
+                installed: true,
                 executable_path: tool.display_path,
                 source: tool.source,
+                authenticated: true,
+                account_label: String::new(),
+                scopes_ok: true,
+                next_action: "none".to_string(),
+                next_action_label: String::new(),
+                secondary_actions: Vec::new(),
+                bot_configured: true,
+                bot_label: String::new(),
+                user_authenticated: false,
+                user_label: String::new(),
                 action: String::new(),
                 action_label: String::new(),
                 url: url.to_string(),
@@ -603,9 +765,23 @@ fn tool_check_resolved(
                 summary: first_line(&result.stderr)
                     .or_else(|| first_line(&result.stdout))
                     .unwrap_or_else(|| "命令返回非 0。".to_string()),
-                detail: format!("{} 已识别路径：{}。请按提示修复授权或配置。", help, tool.display_path),
+                detail: format!(
+                    "{} 已识别路径：{}。请按提示修复授权或配置。",
+                    help, tool.display_path
+                ),
+                installed: true,
                 executable_path: tool.display_path,
                 source: tool.source,
+                authenticated: false,
+                account_label: String::new(),
+                scopes_ok: false,
+                next_action: action.to_string(),
+                next_action_label: action_label.to_string(),
+                secondary_actions: docs_action(url),
+                bot_configured: false,
+                bot_label: String::new(),
+                user_authenticated: false,
+                user_label: String::new(),
                 action: action.to_string(),
                 action_label: action_label.to_string(),
                 url: url.to_string(),
@@ -615,8 +791,19 @@ fn tool_check_resolved(
                 status: "warning".to_string(),
                 summary: "已找到但无法运行".to_string(),
                 detail: format!("{} 路径：{}。原因：{}", help, tool.display_path, err),
+                installed: true,
                 executable_path: tool.display_path,
                 source: tool.source,
+                authenticated: false,
+                account_label: String::new(),
+                scopes_ok: false,
+                next_action: action.to_string(),
+                next_action_label: action_label.to_string(),
+                secondary_actions: docs_action(url),
+                bot_configured: false,
+                bot_label: String::new(),
+                user_authenticated: false,
+                user_label: String::new(),
                 action: action.to_string(),
                 action_label: action_label.to_string(),
                 url: url.to_string(),
@@ -624,16 +811,630 @@ fn tool_check_resolved(
         },
         None => ToolCheck {
             name: name.to_string(),
-            status: if name == "gh" { "warning" } else { "error" }.to_string(),
+            status: "needsInstall".to_string(),
             summary: format!("未找到 {}", name),
             detail: help.to_string(),
+            installed: false,
             executable_path: String::new(),
             source: "not-found".to_string(),
+            authenticated: false,
+            account_label: String::new(),
+            scopes_ok: false,
+            next_action: action.to_string(),
+            next_action_label: action_label.to_string(),
+            secondary_actions: docs_action(url),
+            bot_configured: false,
+            bot_label: String::new(),
+            user_authenticated: false,
+            user_label: String::new(),
             action: action.to_string(),
             action_label: action_label.to_string(),
             url: url.to_string(),
         },
     }
+}
+
+fn github_tool_check(root: &Path) -> ToolCheck {
+    let help = "GitHub CLI 推荐安装，用于自动识别当前 PR 和目标分支；缺失时仍可手动选择目标分支。";
+    let Some(tool) = resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""]) else {
+        return missing_tool_check(
+            "gh",
+            help,
+            "install_gh",
+            "安装 GitHub CLI",
+            "https://cli.github.com/",
+        );
+    };
+
+    let auth = run_capture_resolved(root, &tool, &["auth", "status"], None, None);
+    let Ok(auth_result) = auth else {
+        return installed_tool_issue(
+            "gh",
+            &tool,
+            "error",
+            "gh 已安装但无法运行 auth status。",
+            help,
+            "gh_auth",
+            "GitHub 授权",
+            "https://cli.github.com/",
+        );
+    };
+
+    if auth_result.exit_code != 0 {
+        return ToolCheck {
+            name: "gh".to_string(),
+            status: "needsAuth".to_string(),
+            summary: "gh 已安装，但还没有完成 GitHub 授权。".to_string(),
+            detail: "PR base 自动识别需要 gh 登录。点击 GitHub 授权后按浏览器提示完成。"
+                .to_string(),
+            installed: true,
+            executable_path: tool.display_path.clone(),
+            source: tool.source.clone(),
+            authenticated: false,
+            account_label: String::new(),
+            scopes_ok: false,
+            next_action: "gh_auth".to_string(),
+            next_action_label: "GitHub 授权".to_string(),
+            secondary_actions: docs_action("https://cli.github.com/"),
+            bot_configured: false,
+            bot_label: String::new(),
+            user_authenticated: false,
+            user_label: String::new(),
+            action: "gh_auth".to_string(),
+            action_label: "GitHub 授权".to_string(),
+            url: "https://cli.github.com/".to_string(),
+        };
+    }
+
+    let user =
+        github_user_label(root, &tool, &auth_result).unwrap_or_else(|| "GitHub 用户".to_string());
+    let pr = run_capture_resolved(
+        root,
+        &tool,
+        &["pr", "view", "--json", "number,url"],
+        None,
+        None,
+    )
+    .ok();
+    let pr_found = pr.as_ref().map(|r| r.exit_code == 0).unwrap_or(false);
+    let (summary, detail, next_action, next_label) = if pr_found {
+        (
+            "已授权，并能识别当前分支 PR。".to_string(),
+            format!("已授权为 {}。PR 自动识别可用。", user),
+            "none".to_string(),
+            String::new(),
+        )
+    } else {
+        ("已授权，但未找到当前分支 PR。".to_string(), format!("已授权为 {}。如果这个分支应该有 PR，请刷新 PR；没有 PR 时可在合并场景手动选择目标分支。", user), "refresh_pr".to_string(), "刷新 PR".to_string())
+    };
+
+    ToolCheck {
+        name: "gh".to_string(),
+        status: "ok".to_string(),
+        summary,
+        detail,
+        installed: true,
+        executable_path: tool.display_path,
+        source: tool.source,
+        authenticated: true,
+        account_label: user,
+        scopes_ok: true,
+        next_action,
+        next_action_label: next_label,
+        secondary_actions: vec![
+            action_item("gh_auth", "重新授权 / 切换账号", "secondary"),
+            action_item("gh_logout", "取消授权", "danger"),
+            action_item("refresh_pr", "刷新 PR", "secondary"),
+        ],
+        bot_configured: false,
+        bot_label: String::new(),
+        user_authenticated: true,
+        user_label: String::new(),
+        action: String::new(),
+        action_label: String::new(),
+        url: "https://cli.github.com/".to_string(),
+    }
+}
+
+fn lark_tool_check(root: &Path, config: &Value) -> ToolCheck {
+    let help = "lark-cli 必需，用 bot/user 身份读取飞书 Base 和在线 Sheet。Desktop 子进程默认设置 LARK_CLI_NO_PROXY=1，飞书直连。";
+    let Some(tool) = resolve_lark_cli(root, config) else {
+        return missing_tool_check(
+            "lark-cli",
+            help,
+            "install_lark_cli",
+            "安装 lark-cli",
+            "https://github.com/larksuite/cli",
+        );
+    };
+
+    let doctor = run_capture_resolved(root, &tool, &["doctor"], None, None);
+    let Ok(result) = doctor else {
+        return installed_tool_issue(
+            "lark-cli",
+            &tool,
+            "error",
+            "lark-cli 已安装但 doctor 无法启动。",
+            help,
+            "lark_doctor",
+            "重新 doctor",
+            "https://github.com/larksuite/cli",
+        );
+    };
+
+    let combined = (result.stdout.clone() + "\n" + &result.stderr)
+        .trim()
+        .to_string();
+    let bot_label = find_lark_bot_label(&combined).unwrap_or_default();
+    let user_label = find_lark_user_label(&combined).unwrap_or_default();
+    let bot_configured = !bot_label.is_empty()
+        || (result.exit_code == 0
+            && !contains_any(
+                &combined,
+                &["not configured", "config init", "app secret", "app id"],
+            ));
+    let user_authenticated = !user_label.is_empty();
+    let scopes_ok = result.exit_code == 0
+        && !contains_any(
+            &combined,
+            &[
+                "missing_scope",
+                "missing scope",
+                "scope",
+                "权限不足",
+                "insufficient",
+            ],
+        );
+
+    if result.exit_code != 0 {
+        let (status, summary, action, label) = if contains_any(
+            &combined,
+            &["missing_scope", "missing scope", "insufficient", "权限不足"],
+        ) {
+            (
+                "needsScope",
+                "lark-cli 可用，但权限/scope 不足。",
+                "lark_doctor",
+                "查看缺失权限 / 重新 doctor",
+            )
+        } else if contains_any(
+            &combined,
+            &[
+                "not configured",
+                "config init",
+                "app secret",
+                "app id",
+                "未配置",
+            ],
+        ) {
+            (
+                "needsAuth",
+                "lark-cli 已安装，但 bot 还没有配置。",
+                "configure_lark_bot",
+                "配置飞书 bot",
+            )
+        } else {
+            (
+                "error",
+                "lark-cli doctor 未通过。",
+                "lark_doctor",
+                "重新 doctor",
+            )
+        };
+
+        return ToolCheck {
+            name: "lark-cli".to_string(),
+            status: status.to_string(),
+            summary: summary.to_string(),
+            detail: humanize_lark_doctor_detail(&combined),
+            installed: true,
+            executable_path: tool.display_path,
+            source: tool.source,
+            authenticated: false,
+            account_label: first_non_empty_rust(&[bot_label.clone(), user_label.clone()]),
+            scopes_ok,
+            next_action: action.to_string(),
+            next_action_label: label.to_string(),
+            secondary_actions: vec![
+                action_item("lark_doctor", "重新 doctor", "secondary"),
+                action_item("lark_auth_user", "登录飞书用户身份", "secondary"),
+            ],
+            bot_configured,
+            bot_label,
+            user_authenticated,
+            user_label,
+            action: action.to_string(),
+            action_label: label.to_string(),
+            url: "https://github.com/larksuite/cli".to_string(),
+        };
+    }
+
+    let account_label = if bot_label.is_empty() && user_label.is_empty() {
+        "bot/user 状态已通过 doctor".to_string()
+    } else {
+        [bot_label.clone(), user_label.clone()]
+            .into_iter()
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+
+    let mut secondary = vec![action_item("lark_doctor", "重新 doctor", "secondary")];
+    if user_authenticated {
+        secondary.push(action_item(
+            "lark_auth_user",
+            "重新登录 / 切换飞书用户",
+            "secondary",
+        ));
+    } else {
+        secondary.push(action_item(
+            "lark_auth_user",
+            "登录飞书用户身份",
+            "secondary",
+        ));
+    }
+    secondary.push(action_item(
+        "configure_lark_bot",
+        "重新配置 bot",
+        "secondary",
+    ));
+
+    ToolCheck {
+        name: "lark-cli".to_string(),
+        status: "ok".to_string(),
+        summary: "lark-cli 可用，飞书直连和 bot doctor 已通过。".to_string(),
+        detail: if user_authenticated {
+            "交互式预览可经确认使用用户身份；PR hard gate 仍 strict bot，不能靠 user 登录通过 CI。"
+                .to_string()
+        } else {
+            "bot 可用。若要在交互式预览中允许 user fallback，可在身份策略里开启后再登录飞书用户身份。".to_string()
+        },
+        installed: true,
+        executable_path: tool.display_path,
+        source: tool.source,
+        authenticated: true,
+        account_label,
+        scopes_ok,
+        next_action: "none".to_string(),
+        next_action_label: String::new(),
+        secondary_actions: secondary,
+        bot_configured,
+        bot_label,
+        user_authenticated,
+        user_label,
+        action: String::new(),
+        action_label: String::new(),
+        url: "https://github.com/larksuite/cli".to_string(),
+    }
+}
+
+fn action_item(action: &str, label: &str, kind: &str) -> ToolAction {
+    ToolAction {
+        action: action.to_string(),
+        label: label.to_string(),
+        kind: kind.to_string(),
+    }
+}
+
+fn docs_action(_url: &str) -> Vec<ToolAction> {
+    // Project docs are rendered as normal links by the frontend. Keeping this
+    // empty avoids showing a button that needs hidden payload data.
+    Vec::new()
+}
+
+fn missing_tool_check(
+    name: &str,
+    help: &str,
+    action: &str,
+    action_label: &str,
+    url: &str,
+) -> ToolCheck {
+    ToolCheck {
+        name: name.to_string(),
+        status: "needsInstall".to_string(),
+        summary: format!("未安装 {}", name),
+        detail: help.to_string(),
+        installed: false,
+        executable_path: String::new(),
+        source: "not-found".to_string(),
+        authenticated: false,
+        account_label: String::new(),
+        scopes_ok: false,
+        next_action: action.to_string(),
+        next_action_label: action_label.to_string(),
+        secondary_actions: docs_action(url),
+        bot_configured: false,
+        bot_label: String::new(),
+        user_authenticated: false,
+        user_label: String::new(),
+        action: action.to_string(),
+        action_label: action_label.to_string(),
+        url: url.to_string(),
+    }
+}
+
+fn installed_tool_issue(
+    name: &str,
+    tool: &ResolvedTool,
+    status: &str,
+    summary: &str,
+    detail: &str,
+    action: &str,
+    action_label: &str,
+    url: &str,
+) -> ToolCheck {
+    ToolCheck {
+        name: name.to_string(),
+        status: status.to_string(),
+        summary: summary.to_string(),
+        detail: detail.to_string(),
+        installed: true,
+        executable_path: tool.display_path.clone(),
+        source: tool.source.clone(),
+        authenticated: false,
+        account_label: String::new(),
+        scopes_ok: false,
+        next_action: action.to_string(),
+        next_action_label: action_label.to_string(),
+        secondary_actions: docs_action(url),
+        bot_configured: false,
+        bot_label: String::new(),
+        user_authenticated: false,
+        user_label: String::new(),
+        action: action.to_string(),
+        action_label: action_label.to_string(),
+        url: url.to_string(),
+    }
+}
+
+fn github_user_label(
+    root: &Path,
+    tool: &ResolvedTool,
+    auth_result: &CliRunResult,
+) -> Option<String> {
+    run_capture_resolved(root, tool, &["api", "user", "--jq", ".login"], None, None)
+        .ok()
+        .filter(|result| result.exit_code == 0)
+        .and_then(|result| first_line(&result.stdout))
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            parse_github_user_from_text(&(auth_result.stdout.clone() + "\n" + &auth_result.stderr))
+        })
+}
+
+fn parse_github_user_from_text(text: &str) -> Option<String> {
+    for line in text.lines().map(|line| line.trim()) {
+        if let Some(after) = line.split_once("account ") {
+            let candidate = after
+                .1
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|ch: char| ch == ':' || ch == ',' || ch == '.' || ch == '"');
+            if !candidate.is_empty() {
+                return Some(candidate.to_string());
+            }
+        }
+
+        if line.starts_with("- Logged in to ") && line.contains(" as ") {
+            if let Some(after) = line.split(" as ").nth(1) {
+                let candidate = after
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(|ch: char| ch == ':' || ch == ',' || ch == '.' || ch == '"');
+                if !candidate.is_empty() {
+                    return Some(candidate.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn find_lark_bot_label(text: &str) -> Option<String> {
+    let value = parse_first_json_value(text);
+    for key in [
+        "appId",
+        "app_id",
+        "appID",
+        "clientId",
+        "client_id",
+        "botAppId",
+    ] {
+        if let Some(found) = value
+            .as_ref()
+            .and_then(|json| find_string_deep(json, &[key]))
+        {
+            if !found.trim().is_empty() {
+                return Some(format!("bot {}", redact_identifier(&found)));
+            }
+        }
+    }
+
+    for word in text.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '"' || ch == '\'') {
+        let trimmed =
+            word.trim_matches(|ch: char| ch == ':' || ch == ';' || ch == ')' || ch == '(');
+        if trimmed.starts_with("cli_") || trimmed.starts_with("cli-") {
+            return Some(format!("bot {}", redact_identifier(trimmed)));
+        }
+    }
+
+    None
+}
+
+fn find_lark_user_label(text: &str) -> Option<String> {
+    let value = parse_first_json_value(text);
+    for key in [
+        "userName",
+        "username",
+        "name",
+        "displayName",
+        "userOpenId",
+        "user_open_id",
+        "openId",
+        "open_id",
+        "userId",
+        "user_id",
+    ] {
+        if let Some(found) = value
+            .as_ref()
+            .and_then(|json| find_string_deep(json, &[key]))
+        {
+            if !found.trim().is_empty() {
+                if found.starts_with("ou_") || found.starts_with("cli_") {
+                    return Some(format!("用户 {}", redact_identifier(&found)));
+                }
+                return Some(found);
+            }
+        }
+    }
+
+    for line in text.lines().map(|line| line.trim()) {
+        let lower = line.to_lowercase();
+        if (lower.contains("user") || line.contains("用户"))
+            && (line.contains("ou_") || line.contains('@'))
+        {
+            return Some(shorten_line(line, 64));
+        }
+    }
+
+    None
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    let lower = text.to_lowercase();
+    needles
+        .iter()
+        .any(|needle| lower.contains(&needle.to_lowercase()))
+}
+
+fn humanize_lark_doctor_detail(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "lark-cli 没有返回诊断详情，请在 Debug 查看完整日志。".to_string();
+    }
+
+    if parse_first_json_value(trimmed).is_some()
+        || trimmed.starts_with('{')
+        || trimmed.starts_with('[')
+    {
+        if contains_any(trimmed, &["missing_scope", "missing scope", "scope"]) {
+            return "doctor 返回结构化诊断：飞书 scope 或权限不足，请查看缺失权限后重新授权。"
+                .to_string();
+        }
+        if contains_any(
+            trimmed,
+            &[
+                "not configured",
+                "config init",
+                "app secret",
+                "app id",
+                "未配置",
+            ],
+        ) {
+            return "doctor 返回结构化诊断：飞书 bot 尚未配置，请配置 App ID 和 App Secret。"
+                .to_string();
+        }
+        return "doctor 返回结构化诊断，普通视图已折叠原始 JSON；需要完整内容请打开 Debug。"
+            .to_string();
+    }
+
+    shorten_line(first_line(trimmed).as_deref().unwrap_or(trimmed), 160)
+}
+
+fn parse_first_json_value(text: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(text.trim()) {
+        return Some(value);
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch != '{' && *ch != '[' {
+            continue;
+        }
+
+        let open = *ch;
+        let close = if open == '{' { '}' } else { ']' };
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escape = false;
+        for (end, current) in chars.iter().enumerate().skip(index) {
+            if escape {
+                escape = false;
+                continue;
+            }
+
+            if *current == '\\' && in_string {
+                escape = true;
+                continue;
+            }
+
+            if *current == '"' {
+                in_string = !in_string;
+                continue;
+            }
+
+            if in_string {
+                continue;
+            }
+
+            if *current == open {
+                depth += 1;
+            } else if *current == close {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let candidate: String = chars[index..=end].iter().collect();
+                    if let Ok(value) = serde_json::from_str::<Value>(&candidate) {
+                        return Some(value);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn first_non_empty_rust(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn redact_identifier(value: &str) -> String {
+    let trimmed = value.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= 10 {
+        return trimmed.to_string();
+    }
+
+    let start: String = chars.iter().take(6).collect();
+    let end: String = chars
+        .iter()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{}...{}", start, end)
+}
+
+fn shorten_line(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    let mut output: String = trimmed.chars().take(max_chars.saturating_sub(1)).collect();
+    output.push('…');
+    output
 }
 
 fn run_capture_resolved(
@@ -652,16 +1453,22 @@ fn run_capture_resolved(
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("无法启动 {}：{}。尝试来源：{}", tool.display_path, e, tool.source))?;
+    let mut child = command.spawn().map_err(|e| {
+        format!(
+            "无法启动 {}：{}。尝试来源：{}",
+            tool.display_path, e, tool.source
+        )
+    })?;
     if let Some(input) = stdin {
         if let Some(mut pipe) = child.stdin.take() {
-            pipe.write_all(input.as_bytes()).map_err(|e| format!("写入 stdin 失败：{}", e))?;
+            pipe.write_all(input.as_bytes())
+                .map_err(|e| format!("写入 stdin 失败：{}", e))?;
         }
     }
 
-    let output = child.wait_with_output().map_err(|e| format!("等待进程结束失败：{}", e))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("等待进程结束失败：{}", e))?;
     let result_path = find_result_path(root, &all_args).unwrap_or_default();
     let result_json = if result_path.is_empty() {
         String::new()
@@ -686,7 +1493,11 @@ fn find_result_path(root: &Path, args: &[String]) -> Option<String> {
     for window in args.windows(2) {
         if window[0] == "--out" {
             let path = PathBuf::from(&window[1]);
-            let full = if path.is_absolute() { path } else { root.join(path) };
+            let full = if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            };
             return Some(full.to_string_lossy().to_string());
         }
     }
@@ -694,7 +1505,11 @@ fn find_result_path(root: &Path, args: &[String]) -> Option<String> {
     None
 }
 
-fn run_simple_capture(root: &Path, executable: &str, args: &[&str]) -> Result<CliRunResult, String> {
+fn run_simple_capture(
+    root: &Path,
+    executable: &str,
+    args: &[&str],
+) -> Result<CliRunResult, String> {
     let tool = ResolvedTool {
         program: executable.to_string(),
         prefix_args: Vec::new(),
@@ -750,8 +1565,14 @@ fn missing_cli_message(root: &Path, config: &Value) -> String {
         "CONFIG_SHEET_FORGE_ROOT + sourceCliProjectRelativePath".to_string(),
         "PATH: config-sheet-forge".to_string(),
     ];
-    if let Some(relative) = find_string_deep(config, &["sourceCliProjectRelativePath", "cliProjectRelativePath"]) {
-        attempts.push(format!("项目配置 sourceCliProjectRelativePath: {}", relative));
+    if let Some(relative) = find_string_deep(
+        config,
+        &["sourceCliProjectRelativePath", "cliProjectRelativePath"],
+    ) {
+        attempts.push(format!(
+            "项目配置 sourceCliProjectRelativePath: {}",
+            relative
+        ));
     }
 
     format!(
@@ -801,7 +1622,10 @@ fn find_string_deep(value: &Value, keys: &[&str]) -> Option<String> {
     match value {
         Value::Object(map) => {
             for (key, item) in map {
-                if keys.iter().any(|candidate| key.eq_ignore_ascii_case(candidate)) {
+                if keys
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                {
                     if let Some(text) = item.as_str() {
                         return Some(text.to_string());
                     }
@@ -818,7 +1642,11 @@ fn find_string_deep(value: &Value, keys: &[&str]) -> Option<String> {
 }
 
 fn github_repo_from_git_remote(root: &Path) -> Option<String> {
-    let remote = run_simple_capture(root, "git", &["remote", "get-url", "origin"]).ok()?.stdout.trim().to_string();
+    let remote = run_simple_capture(root, "git", &["remote", "get-url", "origin"])
+        .ok()?
+        .stdout
+        .trim()
+        .to_string();
     parse_github_repository(&remote)
 }
 
@@ -839,7 +1667,13 @@ fn detect_current_pr(root: &Path) -> (String, String) {
     let Some(gh) = resolve_path_tool("gh", &[".exe", ".cmd", ".bat", ""]) else {
         return (String::new(), String::new());
     };
-    let Ok(result) = run_capture_resolved(root, &gh, &["pr", "view", "--json", "number,url"], None, None) else {
+    let Ok(result) = run_capture_resolved(
+        root,
+        &gh,
+        &["pr", "view", "--json", "number,url"],
+        None,
+        None,
+    ) else {
         return (String::new(), String::new());
     };
     if result.exit_code != 0 {
@@ -847,8 +1681,16 @@ fn detect_current_pr(root: &Path) -> (String, String) {
     }
 
     let json = serde_json::from_str::<Value>(&result.stdout).unwrap_or(Value::Null);
-    let number = json.get("number").and_then(|v| v.as_i64()).map(|v| v.to_string()).unwrap_or_default();
-    let url = json.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let number = json
+        .get("number")
+        .and_then(|v| v.as_i64())
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let url = json
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     (number, url)
 }
 

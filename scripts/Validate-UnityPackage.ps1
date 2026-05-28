@@ -389,6 +389,12 @@ foreach ($requiredV434Marker in @("智能场景", "策划视图", "程序视图"
   }
 }
 
+foreach ($requiredV435Marker in @("needsAuth", "needsScope", "primaryToolAction", "secondaryToolActions", "shouldShowBotSecretForm", "humanToolStatus", "ordinaryToolText", "bot 已配置", "GitHub 授权", "Debug off must hide full executable paths", "does not show a primary GitHub auth button")) {
+  if ($desktopWorkflowSources -notlike "*$requiredV435Marker*") {
+    throw "Unity v0.4.35 Desktop tool/auth UX marker is missing: $requiredV435Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."

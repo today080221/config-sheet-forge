@@ -569,11 +569,15 @@ button.large {
   border-color: #9dccaf;
 }
 
-.tool-check.warning {
+.tool-check.warning,
+.tool-check.needsAuth,
+.tool-check.needsScope,
+.tool-check.expired {
   border-color: #e4be78;
 }
 
-.tool-check.error {
+.tool-check.error,
+.tool-check.needsInstall {
   border-color: #e6a0a0;
 }
 
@@ -602,6 +606,43 @@ button.large {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 6px;
+}
+
+.tool-warning {
+  color: #8a5a12;
+}
+
+.tool-more {
+  min-width: 160px;
+}
+
+.tool-more summary {
+  cursor: pointer;
+  color: #1c5d99;
+  font-weight: 700;
+  padding: 8px 0;
+}
+
+.tool-more-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ready-pill {
+  align-self: center;
+  border-radius: 999px;
+  background: #e9f6ee;
+  color: #2e734c;
+  padding: 7px 11px;
+  font-weight: 800;
+}
+
+.danger-button {
+  border-color: #e6a0a0;
+  background: #fff1f1;
+  color: #8a2020;
 }
 
 .bot-form input {

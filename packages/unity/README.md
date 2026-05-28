@@ -34,6 +34,8 @@ Legacy 窗口仍采用任务型 Dashboard：第一次打开会提示“飞书在
 
 从 0.4.34 开始，Desktop 默认首页是“智能场景”向导，不再是命令按钮面板。五个场景分别是环境/授权、同步并导入 Unity、准备 PR 合并、新建配表、从 main/PR base 派生当前分支；每个场景只展示一个主按钮。普通用户使用 `策划视图`，主程可切到 `程序视图` 看生命周期和读写范围，完整命令/stdout/result JSON 只在 `Debug` 抽屉显示。`sync-cache apply` 现在必须带最近一次同输入 `--preview-result`，cache 已最新时直接推荐导入 Unity，不再循环推荐写 cache。
 
+从 0.4.35 开始，Desktop 的环境/授权卡使用统一 Tool/Auth 状态：工具是否安装、账号是否已授权、scope 是否满足、下一步该做什么会分开展示。`gh` 已登录时不会再显示醒目的 `GitHub 授权` 主按钮；`lark-cli` bot 已配置时不会默认展开 App Secret 输入框。完整工具路径、raw doctor JSON 和 token 相关诊断仍只在 Debug 里。
+
 Legacy 完整窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。

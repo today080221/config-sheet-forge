@@ -21,9 +21,13 @@ for (const marker of ["策划视图", "程序视图", "Debug", "scenario-grid", 
 }
 
 assert(app.includes("debugEnabled && lastResult"), "Debug drawer must gate command/stdout/result JSON rendering");
+assert(app.includes("debugEnabled && check.executablePath"), "Debug off must hide full executable paths");
 assert(app.includes("className=\"debug-drawer\""), "Debug drawer markup is missing");
 assert(app.includes("lastResult.commandLine"), "Debug mode must expose full command");
 assert(app.includes("lastResult.resultJson"), "Debug mode must expose result JSON");
+assert(app.includes("shouldShowBotSecretForm(larkCheck, showBotConfigure)"), "Bot secret form must be hidden when bot is already configured");
+assert(app.includes("ToolActions"), "Tool/auth cards must use the shared action model");
+assert(app.includes("primaryToolAction"), "Tool/auth cards must distinguish primary auth/install actions from secondary actions");
 
 for (const rawLeak of ["完整命令", "raw JSON", "stdout 第一行"]) {
   assert(!app.includes(rawLeak), `ordinary view leaked debug wording: ${rawLeak}`);
