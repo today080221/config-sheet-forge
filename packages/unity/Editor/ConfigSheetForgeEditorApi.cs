@@ -103,8 +103,10 @@ namespace ConfigSheetForge.Unity.Editor
                 return Blocked("SourceOfTruthCache profile 缺失。请先安装/更新 Source of Truth 导入 profile；它不会改变本地 Excel profile。");
             }
 
+            var fieldRow = Math.Max(0, ExtractInt(settingsText, "field_row") ?? 0);
             var typeRow = Math.Max(0, ExtractInt(settingsText, "type_row") ?? 1);
-            var cacheTypePreflight = ConfigSheetForgeExcelToSoImporter.InspectCacheTypes(importItems, typeRow);
+            var dataStartRow = Math.Max(0, ExtractInt(settingsText, "data_from_row") ?? (typeRow + 2));
+            var cacheTypePreflight = ConfigSheetForgeExcelToSoImporter.InspectCacheTypes(importItems, typeRow, dataStartRow, fieldRow);
             if (!cacheTypePreflight.Ready)
             {
                 return Blocked(cacheTypePreflight.Message);

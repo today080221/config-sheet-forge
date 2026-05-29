@@ -157,7 +157,7 @@ namespace ConfigSheetForge.Unity.Editor
             return ConvertResult(tableId, excelPath, resultObject);
         }
 
-        public static ExcelToSoCacheTypePreflight InspectCacheTypes(IEnumerable<ExcelToSoImportItem> items, int typeRow)
+        public static ExcelToSoCacheTypePreflight InspectCacheTypes(IEnumerable<ExcelToSoImportItem> items, int typeRow, int dataStartRow = -1, int fieldRow = 0)
         {
             var preflight = new ExcelToSoCacheTypePreflight { Ready = true, ShortStatus = "cache 类型可导入", Message = "cache xlsx 类型行可被 ExcelToSO 导入。" };
             if (items == null)
@@ -180,6 +180,14 @@ namespace ConfigSheetForge.Unity.Editor
                     {
                         preflight.Ready = false;
                         preflight.BlockingCells.Add(FirstNonEmpty(item.TableId, Path.GetFileNameWithoutExtension(item.CacheXlsxPath)) + ": " + compatibilityError);
+                        continue;
+                    }
+
+                    var templateError = InspectPhysicalTemplateCompatibility(item, Math.Max(0, fieldRow), Math.Max(0, typeRow), dataStartRow < 0 ? Math.Max(0, typeRow) + 2 : dataStartRow);
+                    if (!string.IsNullOrWhiteSpace(templateError))
+                    {
+                        preflight.Ready = false;
+                        preflight.BlockingCells.Add(FirstNonEmpty(item.TableId, Path.GetFileNameWithoutExtension(item.CacheXlsxPath)) + ": " + templateError);
                         continue;
                     }
 
@@ -209,9 +217,9 @@ namespace ConfigSheetForge.Unity.Editor
             if (!preflight.Ready)
             {
                 preflight.ShortStatus = "cache 类型需要处理";
-                preflight.Message = "当前 cache 类型行不适合 ExcelToSO 导入：" + string.Join(", ", preflight.BlockingCells.Take(12)) +
+                preflight.Message = "当前 cache 类型行不适合 ExcelToSO 导入，或 cache xlsx 模板语义与 ExcelToSO 旧模板不一致：" + string.Join(", ", preflight.BlockingCells.Take(12)) +
                                     (preflight.BlockingCells.Count > 12 ? " ..." : "") +
-                                    "\n请先在 Config Sheet Forge Desktop 点击“修复 cache 类型行”。它会根据 project config/adapter schema 的 excelToSoType、seed/import 保存的 originalType，或旧 Excel 类型行，把 json 还原为 int[]、float[]、string[] 或 string。";
+                                    "\n请先在 Config Sheet Forge Desktop 点击“修复 cache 类型行”。它会保留旧 ExcelToSO 模板的工作表名、字段大小写和说明行，并把 json 还原为 int[]、float[]、string[] 或 string。";
             }
 
             return preflight;
@@ -242,6 +250,63 @@ namespace ConfigSheetForge.Unity.Editor
             }
         }
 
+        private static string InspectPhysicalTemplateCompatibility(ExcelToSoImportItem item, int fieldRow, int typeRow, int dataStartRow)
+        {
+            var cacheMatrix = ReadFirstWorksheetMatrix(item.CacheXlsxPath, out var cacheSheetName);
+            if (fieldRow >= cacheMatrix.Count)
+            {
+                return "cache xlsx 缺少字段行，ExcelToSO 无法知道要写哪些字段。";
+            }
+
+            var cacheFields = cacheMatrix[fieldRow];
+            var generated = cacheFields.FirstOrDefault(IsGeneratedColumnName);
+            if (!string.IsNullOrWhiteSpace(generated))
+            {
+                return "字段行包含自动生成字段 “" + generated + "”。这通常来自空列被错误重建，ExcelToSO 脚本里没有对应字段。";
+            }
+
+            if (dataStartRow >= 0 && dataStartRow < cacheMatrix.Count && LooksLikeTypeTokenRow(cacheMatrix[dataStartRow]))
+            {
+                return "data_from_row 第一行看起来仍是 integer/string/json 这类类型行，ExcelToSO 会把它当作真实数据。请修复 cache，确保第一行数据就是配表数据。";
+            }
+
+            var oldPath = FirstNonEmpty(item.LocalExcelPath, item.OldExcelPath);
+            if (string.IsNullOrWhiteSpace(oldPath) || !File.Exists(oldPath))
+            {
+                return "";
+            }
+
+            var oldMatrix = ReadFirstWorksheetMatrix(oldPath, out var oldSheetName);
+            if (!string.IsNullOrWhiteSpace(oldSheetName) &&
+                !string.IsNullOrWhiteSpace(cacheSheetName) &&
+                !string.Equals(cacheSheetName, oldSheetName, StringComparison.Ordinal))
+            {
+                return "cache xlsx 的工作表名为 “" + cacheSheetName + "”，但旧 ExcelToSO 模板工作表名是 “" + oldSheetName + "”。Unity asset 通常只包含 _" + oldSheetName + "Items，工作表名不一致会导致导入失败。";
+            }
+
+            if (fieldRow >= oldMatrix.Count)
+            {
+                return "";
+            }
+
+            var expectedFields = oldMatrix[fieldRow].TakeWhile(field => !string.IsNullOrWhiteSpace(field)).ToList();
+            if (expectedFields.Count == 0)
+            {
+                return "";
+            }
+
+            for (var i = 0; i < expectedFields.Count; i++)
+            {
+                var actual = i < cacheFields.Count ? cacheFields[i] : "";
+                if (!string.Equals(actual, expectedFields[i], StringComparison.Ordinal))
+                {
+                    return "字段行第 " + (i + 1).ToString(CultureInfo.InvariantCulture) + " 列为 “" + actual + "”，但旧 ExcelToSO 模板要求 “" + expectedFields[i] + "”。字段大小写会影响 Unity serialized field，例如 ID 不能写成 id。";
+                }
+            }
+
+            return "";
+        }
+
         private static string SuggestExcelToSoType(string token)
         {
             var normalized = (token ?? "").Trim().ToLowerInvariant();
@@ -266,10 +331,104 @@ namespace ConfigSheetForge.Unity.Editor
             if (ex is NullReferenceException)
             {
                 return "ExcelToSO 读取 cache xlsx 时失败：" + message +
-                       "。这通常表示 xlsx OpenXML 结构不兼容 ExcelToSO。请先在 Config Sheet Forge Desktop 执行“修复 cache 类型行”，然后重试导入。";
+                       "。这通常表示 cache xlsx 的工作表名、字段大小写或数据起始行与 ExcelToSO 旧模板不一致。请先在 Config Sheet Forge Desktop 执行“修复 cache 类型行”，然后重试导入。";
             }
 
             return "ExcelToSO 导入失败：" + message;
+        }
+
+        private static bool IsGeneratedColumnName(string value)
+        {
+            var text = (value ?? "").Trim().ToLowerInvariant();
+            return text.StartsWith("column_", StringComparison.Ordinal) &&
+                   text.Skip("column_".Length).All(char.IsDigit);
+        }
+
+        private static bool LooksLikeTypeTokenRow(IList<string> values)
+        {
+            var nonEmpty = values == null ? new List<string>() : values.Where(value => !string.IsNullOrWhiteSpace(value)).ToList();
+            if (nonEmpty.Count == 0)
+            {
+                return false;
+            }
+
+            var typeLike = nonEmpty.Count(IsExcelToSoOrPortableTypeToken);
+            return typeLike == nonEmpty.Count || (nonEmpty.Count >= 3 && typeLike >= nonEmpty.Count - 1);
+        }
+
+        private static bool IsExcelToSoOrPortableTypeToken(string value)
+        {
+            var normalized = (value ?? "").Trim().ToLowerInvariant();
+            switch (normalized)
+            {
+                case "bool":
+                case "boolean":
+                case "int":
+                case "int32":
+                case "integer":
+                case "ints":
+                case "int[]":
+                case "[int]":
+                case "int32s":
+                case "int32[]":
+                case "[int32]":
+                case "integers":
+                case "integer[]":
+                case "[integer]":
+                case "float":
+                case "double":
+                case "decimal":
+                case "number":
+                case "floats":
+                case "float[]":
+                case "[float]":
+                case "numbers":
+                case "number[]":
+                case "[number]":
+                case "long":
+                case "int64":
+                case "longs":
+                case "long[]":
+                case "[long]":
+                case "int64s":
+                case "int64[]":
+                case "[int64]":
+                case "vector2":
+                case "vector3":
+                case "vector4":
+                case "rect":
+                case "rectangle":
+                case "color":
+                case "colour":
+                case "string":
+                case "str":
+                case "text":
+                case "strings":
+                case "string[]":
+                case "[string]":
+                case "texts":
+                case "text[]":
+                case "[text]":
+                case "lang":
+                case "language":
+                case "langs":
+                case "lang[]":
+                case "[lang]":
+                case "rich":
+                case "richs":
+                case "riches":
+                case "rich[]":
+                case "[rich]":
+                case "json":
+                case "date":
+                case "datetime":
+                case "date_time":
+                case "timestamp":
+                case "enum":
+                    return true;
+                default:
+                    return false;
+            }
         }
 
         private static Type FindApiType()
@@ -388,6 +547,17 @@ namespace ConfigSheetForge.Unity.Editor
             }
         }
 
+        private static List<List<string>> ReadFirstWorksheetMatrix(string xlsxPath, out string sheetName)
+        {
+            using (var archive = ZipFile.OpenRead(xlsxPath))
+            {
+                var sharedStrings = ReadSharedStrings(archive);
+                var sheetInfo = ReadWorkbookSheetInfo(archive);
+                sheetName = sheetInfo.Name;
+                return ReadWorksheetMatrix(archive, sheetInfo.Path, sharedStrings);
+            }
+        }
+
         private static List<string> ReadSharedStrings(ZipArchive archive)
         {
             var values = new List<string>();
@@ -408,10 +578,21 @@ namespace ConfigSheetForge.Unity.Editor
 
         private static string ReadWorkbookSheetPath(ZipArchive archive)
         {
+            return ReadWorkbookSheetInfo(archive).Path;
+        }
+
+        private sealed class WorkbookSheetInfo
+        {
+            public string Name = "";
+            public string Path = "xl/worksheets/sheet1.xml";
+        }
+
+        private static WorkbookSheetInfo ReadWorkbookSheetInfo(ZipArchive archive)
+        {
             var workbookEntry = archive.GetEntry("xl/workbook.xml");
             if (workbookEntry == null)
             {
-                return "xl/worksheets/sheet1.xml";
+                return new WorkbookSheetInfo();
             }
 
             var rels = ReadRelationships(archive, "xl/_rels/workbook.xml.rels");
@@ -419,11 +600,15 @@ namespace ConfigSheetForge.Unity.Editor
             var sheet = workbook.Descendants(SpreadsheetNs + "sheet").FirstOrDefault();
             if (sheet == null)
             {
-                return "xl/worksheets/sheet1.xml";
+                return new WorkbookSheetInfo();
             }
 
             var relationId = (string)sheet.Attribute(RelationshipNs + "id") ?? "";
-            return rels.TryGetValue(relationId, out var target) ? NormalizeWorkbookTarget(target) : "xl/worksheets/sheet1.xml";
+            return new WorkbookSheetInfo
+            {
+                Name = (string)sheet.Attribute("name") ?? "",
+                Path = rels.TryGetValue(relationId, out var target) ? NormalizeWorkbookTarget(target) : "xl/worksheets/sheet1.xml"
+            };
         }
 
         private static Dictionary<string, string> ReadRelationships(ZipArchive archive, string path)

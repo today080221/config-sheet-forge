@@ -988,7 +988,7 @@ namespace ConfigSheetForge.Unity.Editor
             var backend = ConfigSheetForgeExcelToSoImporter.Probe();
             var importItems = BuildExcelToSoImportItems(projectRoot);
             var settingsPreflight = InspectExcelToSoSettings(projectRoot, importItems);
-            var cacheTypePreflight = ConfigSheetForgeExcelToSoImporter.InspectCacheTypes(importItems, settingsPreflight.TypeRow);
+            var cacheTypePreflight = ConfigSheetForgeExcelToSoImporter.InspectCacheTypes(importItems, settingsPreflight.TypeRow, settingsPreflight.DataStartRow, settingsPreflight.FieldRow);
             var syncReady = IsSyncCacheReadyForUnityImport(projectRoot, out var syncReason);
             var cacheReady = importItems.Count > 0 && importItems.All(item => File.Exists(item.CacheXlsxPath));
             var ready = backend.Available && syncReady && cacheReady && settingsPreflight.Ready && cacheTypePreflight.Ready;
@@ -1195,7 +1195,9 @@ namespace ConfigSheetForge.Unity.Editor
             try
             {
                 document = JsonUtility.FromJson<ExcelToSoSettingsDocument>(File.ReadAllText(settingsPath));
+                preflight.FieldRow = document != null && document.configs != null ? document.configs.field_row : 0;
                 preflight.TypeRow = document != null && document.configs != null ? document.configs.type_row : 1;
+                preflight.DataStartRow = document != null && document.configs != null ? document.configs.data_from_row : preflight.TypeRow + 2;
             }
             catch (Exception ex)
             {
@@ -9005,7 +9007,9 @@ namespace ConfigSheetForge.Unity.Editor
         public bool Ready { get; set; }
         public bool HasOldExcelReferences { get; set; }
         public bool CanUpdateToCache { get; set; }
+        public int FieldRow { get; set; } = 0;
         public int TypeRow { get; set; } = 1;
+        public int DataStartRow { get; set; } = 3;
         public string ShortStatus { get; set; } = "";
         public string Message { get; set; } = "";
         public string SettingsPath { get; set; } = "";

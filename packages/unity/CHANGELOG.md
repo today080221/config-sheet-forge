@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.46
+
+- `repair-cache-dialect` / sync-cache cache writer 现在会保留旧 ExcelToSO 物理模板语义：工作表名、字段行大小写、类型行 dialect、说明行和 `data_from_row` 都从旧/default ExcelToSO xlsx 模板继承，不再用 TableId / canonical lowercase schema 重建。
+- 修复 SourceOfTruthCache cache xlsx 中插入 canonical type row 的问题。`data_from_row` 第一行现在必须是真实数据，`integer/string/json` 这类类型 token 若出现在数据起始行会被 postflight 阻断。
+- 修复空列被重建为 `column_4` / `column_N` 的问题；旧 ExcelToSO 模板字段行遇到空字段会停止，避免导入不存在的 Unity serialized field。
+- Unity 导入前 preflight 增加物理模板检查：cache sheet name 必须匹配旧模板 sheet name，字段大小写必须匹配旧模板，坏 cache 会在普通视图给中文阻断原因，不再让 ExcelToSO 在 `FindProperty(_SheetItems)` 处抛 `NullReferenceException`。
+- 增加回归测试覆盖 SkillsData/RoomData 风格 fixture：`Skill`/`Rooms` sheet 名、`ID` 字段大小写、说明行、真实数据起始行，以及不生成 `column_4`。
+
 ## 0.4.45
 
 - 修复 `repair-cache-dialect --yes` 生成的 cache xlsx 仍无法被 ExcelToSO v1.0.6 / ExcelDataReader 读取的问题。cache writer 现在写出 `xl/sharedStrings.xml` 和 `xl/styles.xml`，字符串单元格使用 shared string，并写入完整 worksheet dimension。

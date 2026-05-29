@@ -467,6 +467,12 @@ foreach ($requiredV445Marker in @("BuildSharedStringsXml", "BuildStylesXml", "Va
   }
 }
 
+foreach ($requiredV446Marker in @("ReadExcelToSoPhysicalTemplate", "ValidateExcelToSoPhysicalTemplate", "InspectPhysicalTemplateCompatibility", "字段大小写会影响 Unity serialized field", "data_from_row 第一行看起来仍是", "ExcelToSoCacheWriterPreservesPhysicalTemplateSemantics")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs) + "`n" + (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeExcelToSoImporter.cs) + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV446Marker*") {
+    throw "Unity v0.4.46 ExcelToSO physical template marker is missing: $requiredV446Marker"
+  }
+}
+
 if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
   throw "Unity bridge import-assets must not open the Legacy sync window."
 }

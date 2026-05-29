@@ -678,7 +678,7 @@ public static class Program
         var requiresXlsx = !string.IsNullOrWhiteSpace(tempXlsxPath);
         var missing = string.IsNullOrWhiteSpace(existingHash) || !File.Exists(semanticPath) || (requiresXlsx && !File.Exists(xlsxPath));
         var hashChanged = !missing && !string.Equals(existingHash, hash, StringComparison.Ordinal);
-        var dialectOutdated = !missing && table.UseExcelToSoCacheDialect && CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table);
+        var dialectOutdated = !missing && table.UseExcelToSoCacheDialect && CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table, workspace.Root);
         var changed = hashChanged || dialectOutdated;
 
         return new CacheState { Missing = missing, Changed = changed, Fresh = !missing && !changed, DialectOutdated = dialectOutdated, ExistingHash = existingHash };
@@ -921,7 +921,7 @@ public static class Program
             if (seedTable != null)
             {
                 var cacheTable = ToCacheDialectTableConfig(seedTable);
-                if (cacheTable.UseExcelToSoCacheDialect && CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, cacheTable))
+                if (cacheTable.UseExcelToSoCacheDialect && CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, cacheTable, Directory.GetCurrentDirectory()))
                 {
                     tableStatus.CacheStatus = "dialectOutdated";
                     tableStatus.NeedsWriteCache = false;
@@ -1303,7 +1303,7 @@ public static class Program
             action.Details["semanticHash"] = semanticHash;
             tableStatus.OnlineSemanticHash = semanticHash;
             tableStatus.LocalSemanticHash = semanticHash;
-            if (!CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table))
+            if (!CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table, workspace.Root))
             {
                 action.Status = "skipped";
                 action.Message = table.Id + " cache 类型行已经是 ExcelToSO dialect，无需重写。";
@@ -5190,7 +5190,7 @@ public static class Program
         var xlsxPath = Path.Combine(xlsxRoot, MakeSafeFileName(tableId) + ".xlsx");
         var existingHash = await ReadExistingHashAsync(shaPath);
         var hasRequiredFiles = File.Exists(semanticPath) && (string.IsNullOrWhiteSpace(tempXlsxPath) || File.Exists(xlsxPath));
-        var needsDialectRewrite = table.UseExcelToSoCacheDialect && hasRequiredFiles && CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table);
+        var needsDialectRewrite = table.UseExcelToSoCacheDialect && hasRequiredFiles && CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table, workspace == null ? Directory.GetCurrentDirectory() : workspace.Root);
         if (string.Equals(existingHash, hash, StringComparison.Ordinal) && hasRequiredFiles && !needsDialectRewrite)
         {
             return false;
@@ -5231,6 +5231,30 @@ public static class Program
         public int ColumnIndex { get; set; }
         public string Key { get; set; } = "";
         public string TypeText { get; set; } = "";
+    }
+
+    private sealed class ExcelToSoPhysicalTemplate
+    {
+        public bool Available { get; set; }
+        public string SheetName { get; set; } = "";
+        public List<string> Fields { get; } = new();
+        public List<string> Types { get; } = new();
+        public List<string> Descriptions { get; } = new();
+    }
+
+    private sealed class ExcelToSoPhysicalColumn
+    {
+        public string FieldName { get; set; } = "";
+        public string TypeName { get; set; } = "";
+        public string Description { get; set; } = "";
+        public int SemanticColumnIndex { get; set; } = -1;
+        public string SemanticKey { get; set; } = "";
+    }
+
+    private sealed class XlsxSheetPathInfo
+    {
+        public string Name { get; set; } = "";
+        public string Path { get; set; } = "";
     }
 
     private static ExcelToSoCacheDialectPlan BuildExcelToSoCacheDialectPlan(WorkbookDocument workbook, TableConfig table, string workspaceRoot)
@@ -5502,7 +5526,47 @@ public static class Program
         return hints;
     }
 
-    private static bool CacheXlsxNeedsExcelToSoDialectRewrite(string path, TableConfig table)
+    private static ExcelToSoPhysicalTemplate ReadExcelToSoPhysicalTemplate(TableConfig table, string workspaceRoot)
+    {
+        var template = new ExcelToSoPhysicalTemplate();
+        var sourcePath = ResolvePathAgainstRoot(workspaceRoot, table.LocalSourcePath);
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            return template;
+        }
+
+        try
+        {
+            template.SheetName = ReadFirstWorksheetName(sourcePath);
+            var matrix = ReadFirstWorksheetMatrix(sourcePath);
+            var fieldRow = table.FieldRow >= 0 && table.FieldRow < matrix.Count ? matrix[table.FieldRow] : new List<string>();
+            var typeRowIndex = EffectiveTypeRow(table);
+            var typeRow = typeRowIndex >= 0 && typeRowIndex < matrix.Count ? matrix[typeRowIndex] : new List<string>();
+            var descriptionRowIndex = table.DescriptionRow >= 0 ? table.DescriptionRow : typeRowIndex + 1;
+            var descriptionRow = descriptionRowIndex >= 0 && descriptionRowIndex < matrix.Count ? matrix[descriptionRowIndex] : new List<string>();
+            for (var i = 0; i < fieldRow.Count; i++)
+            {
+                var field = fieldRow[i] ?? "";
+                template.Fields.Add(field);
+                template.Types.Add(i < typeRow.Count ? typeRow[i] : "");
+                template.Descriptions.Add(i < descriptionRow.Count ? descriptionRow[i] : "");
+                if (string.IsNullOrWhiteSpace(field))
+                {
+                    break;
+                }
+            }
+
+            template.Available = template.Fields.Any(field => !string.IsNullOrWhiteSpace(field));
+        }
+        catch (Exception ex) when (ex is IOException || ex is InvalidDataException || ex is UnauthorizedAccessException || ex is XmlException)
+        {
+            // Source xlsx templates are best effort. The import preflight will block if the final cache is not compatible.
+        }
+
+        return template;
+    }
+
+    private static bool CacheXlsxNeedsExcelToSoDialectRewrite(string path, TableConfig table, string workspaceRoot)
     {
         var typeRowIndex = EffectiveTypeRow(table);
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || typeRowIndex < 0)
@@ -5530,6 +5594,11 @@ public static class Program
                     return true;
                 }
             }
+
+            if (CacheXlsxNeedsExcelToSoPhysicalTemplateRewrite(path, table, workspaceRoot))
+            {
+                return true;
+            }
         }
         catch (Exception ex) when (ex is IOException || ex is InvalidDataException || ex is UnauthorizedAccessException)
         {
@@ -5537,6 +5606,64 @@ public static class Program
         }
 
         return false;
+    }
+
+    private static bool CacheXlsxNeedsExcelToSoPhysicalTemplateRewrite(string path, TableConfig table, string workspaceRoot)
+    {
+        var template = ReadExcelToSoPhysicalTemplate(table, workspaceRoot);
+        try
+        {
+            using (var archive = ZipFile.OpenRead(path))
+            {
+                var sharedStrings = ReadSharedStrings(archive);
+                var sheets = ReadWorkbookSheetInfos(archive);
+                if (sheets.Count == 0)
+                {
+                    return true;
+                }
+
+                if (template.Available && !string.IsNullOrWhiteSpace(template.SheetName) &&
+                    !string.Equals(sheets[0].Name, SanitizeSheetName(template.SheetName), StringComparison.Ordinal))
+                {
+                    return true;
+                }
+
+                var matrix = ReadWorksheetMatrix(archive, sheets[0].Path, sharedStrings);
+                var fieldRowIndex = table.FieldRow < 0 ? 0 : table.FieldRow;
+                if (fieldRowIndex >= matrix.Count)
+                {
+                    return template.Available;
+                }
+
+                var fieldRow = matrix[fieldRowIndex];
+                if (fieldRow.Any(IsGeneratedColumnName))
+                {
+                    return true;
+                }
+
+                if (template.Available)
+                {
+                    var expectedFields = template.Fields.TakeWhile(field => !string.IsNullOrWhiteSpace(field)).ToList();
+                    for (var i = 0; i < expectedFields.Count; i++)
+                    {
+                        var actual = i < fieldRow.Count ? fieldRow[i] : "";
+                        if (!string.Equals(actual, expectedFields[i], StringComparison.Ordinal))
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                var dataStartRow = table.DataStartRow < 0
+                    ? Math.Max(fieldRowIndex, Math.Max(EffectiveTypeRow(table), table.DescriptionRow < 0 ? EffectiveTypeRow(table) + 1 : table.DescriptionRow)) + 1
+                    : table.DataStartRow;
+                return dataStartRow >= 0 && dataStartRow < matrix.Count && LooksLikeTypeTokenRow(matrix[dataStartRow]);
+            }
+        }
+        catch (Exception ex) when (ex is IOException || ex is InvalidDataException || ex is UnauthorizedAccessException || ex is XmlException)
+        {
+            return false;
+        }
     }
 
     private static bool CacheXlsxNeedsExcelToSoOpenXmlRewrite(string path)
@@ -5616,7 +5743,8 @@ public static class Program
             throw new CliException("无法写入 ExcelToSO cache xlsx：workbook 没有 sheet。", 2);
         }
 
-        var rows = BuildExcelToSoCacheRows(sheet, table, typeRow);
+        var template = ReadExcelToSoPhysicalTemplate(table, workspaceRoot);
+        var rows = BuildExcelToSoCacheRows(sheet, table, typeRow, template);
         var tempPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
         Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
         if (File.Exists(tempPath))
@@ -5629,14 +5757,14 @@ public static class Program
             var sharedStrings = BuildSharedStringTable(rows);
             WriteZipText(archive, "[Content_Types].xml", BuildContentTypesXml());
             WriteZipText(archive, "_rels/.rels", BuildRootRelsXml());
-            WriteZipText(archive, "xl/workbook.xml", BuildWorkbookXml(SanitizeSheetName(FirstNonEmpty(sheet.Name, table.Name, table.Id))));
+            WriteZipText(archive, "xl/workbook.xml", BuildWorkbookXml(SanitizeSheetName(FirstNonEmpty(template.SheetName, sheet.Name, table.Name, table.Id))));
             WriteZipText(archive, "xl/_rels/workbook.xml.rels", BuildWorkbookRelsXml());
             WriteZipText(archive, "xl/styles.xml", BuildStylesXml());
             WriteZipText(archive, "xl/sharedStrings.xml", BuildSharedStringsXml(sharedStrings.Values));
             WriteZipText(archive, "xl/worksheets/sheet1.xml", BuildWorksheetXml(rows, sharedStrings.Indexes));
         }
 
-        if (!ValidateExcelToSoCompatibleXlsx(tempPath, workspaceRoot, out var validationError))
+        if (!ValidateExcelToSoCompatibleXlsx(tempPath, table, workspaceRoot, out var validationError))
         {
             try
             {
@@ -5658,35 +5786,41 @@ public static class Program
         File.Move(tempPath, path);
     }
 
-    private static List<List<string>> BuildExcelToSoCacheRows(SheetDocument sheet, TableConfig table, IList<string> typeRow)
+    private static List<List<string>> BuildExcelToSoCacheRows(SheetDocument sheet, TableConfig table, IList<string> typeRow, ExcelToSoPhysicalTemplate template)
     {
         var fieldRow = table.FieldRow < 0 ? 0 : table.FieldRow;
         var typeRowIndex = table.TypeRow < 0 ? fieldRow + 1 : table.TypeRow;
         var descriptionRow = table.DescriptionRow < 0 ? typeRowIndex + 1 : table.DescriptionRow;
         var dataStartRow = table.DataStartRow < 0 ? Math.Max(Math.Max(fieldRow, typeRowIndex), descriptionRow) + 1 : table.DataStartRow;
         var totalHeaderRows = Math.Max(dataStartRow, Math.Max(Math.Max(fieldRow, typeRowIndex), descriptionRow) + 1);
+        var columns = BuildExcelToSoPhysicalColumns(sheet, typeRow, template);
         var rows = new List<List<string>>();
         for (var i = 0; i < totalHeaderRows; i++)
         {
-            rows.Add(Enumerable.Repeat("", sheet.Columns.Count).ToList());
+            rows.Add(Enumerable.Repeat("", columns.Count).ToList());
         }
 
-        for (var i = 0; i < sheet.Columns.Count; i++)
+        for (var i = 0; i < columns.Count; i++)
         {
-            var column = sheet.Columns[i];
-            rows[fieldRow][i] = FirstNonEmpty(column.Key, column.DisplayName);
-            rows[typeRowIndex][i] = i < typeRow.Count ? typeRow[i] : "string";
-            rows[descriptionRow][i] = column.Details.TryGetValue("description", out var description) ? description : "";
+            var column = columns[i];
+            rows[fieldRow][i] = column.FieldName;
+            rows[typeRowIndex][i] = column.TypeName;
+            rows[descriptionRow][i] = column.Description;
         }
 
         foreach (var row in sheet.Rows.OrderBy(r => r.SourceIndex <= 0 ? int.MaxValue : r.SourceIndex))
         {
-            var output = new List<string>();
-            foreach (var column in sheet.Columns)
+            if (ShouldSkipExcelToSoCacheDataRow(row, sheet, columns, dataStartRow, rows[typeRowIndex], rows[descriptionRow]))
             {
-                if (row.Cells.TryGetValue(column.Key, out var cell))
+                continue;
+            }
+
+            var output = new List<string>();
+            foreach (var column in columns)
+            {
+                if (!string.IsNullOrWhiteSpace(column.SemanticKey) && row.Cells.TryGetValue(column.SemanticKey, out var cell))
                 {
-                    output.Add(FirstNonEmpty(cell.RawText, cell.NormalizedText, cell.SemanticText));
+                    output.Add(ConvertCellToExcelToSoPhysicalText(cell, column.TypeName));
                 }
                 else
                 {
@@ -5698,6 +5832,248 @@ public static class Program
         }
 
         return rows;
+    }
+
+    private static List<ExcelToSoPhysicalColumn> BuildExcelToSoPhysicalColumns(SheetDocument sheet, IList<string> typeRow, ExcelToSoPhysicalTemplate template)
+    {
+        var semanticByKey = sheet.Columns
+            .Select((column, index) => new { Column = column, Index = index, Key = NormalizeFieldKey(FirstNonEmpty(column.Key, column.DisplayName)) })
+            .Where(item => !string.IsNullOrWhiteSpace(item.Key))
+            .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        var columns = new List<ExcelToSoPhysicalColumn>();
+        if (template.Available && template.Fields.Count > 0)
+        {
+            for (var i = 0; i < template.Fields.Count; i++)
+            {
+                var fieldName = template.Fields[i];
+                if (string.IsNullOrWhiteSpace(fieldName))
+                {
+                    break;
+                }
+
+                if (fieldName.TrimStart().StartsWith("#", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                semanticByKey.TryGetValue(NormalizeFieldKey(fieldName), out var semantic);
+                var semanticIndex = semantic?.Index ?? -1;
+                var plannedType = semanticIndex >= 0 && semanticIndex < typeRow.Count ? typeRow[semanticIndex] : "";
+                var templateType = i < template.Types.Count ? template.Types[i] : "";
+                columns.Add(new ExcelToSoPhysicalColumn
+                {
+                    FieldName = fieldName,
+                    TypeName = ChoosePhysicalTypeName(templateType, plannedType),
+                    Description = i < template.Descriptions.Count ? template.Descriptions[i] : "",
+                    SemanticColumnIndex = semanticIndex,
+                    SemanticKey = semantic?.Column.Key ?? ""
+                });
+            }
+
+            return columns;
+        }
+
+        for (var i = 0; i < sheet.Columns.Count; i++)
+        {
+            var column = sheet.Columns[i];
+            columns.Add(new ExcelToSoPhysicalColumn
+            {
+                FieldName = FirstNonEmpty(column.SourceColumn, column.DisplayName, column.Key),
+                TypeName = i < typeRow.Count ? typeRow[i] : "string",
+                Description = column.Details.TryGetValue("description", out var description) ? description : "",
+                SemanticColumnIndex = i,
+                SemanticKey = column.Key
+            });
+        }
+
+        return columns;
+    }
+
+    private static string ChoosePhysicalTypeName(string templateType, string plannedType)
+    {
+        if (!string.IsNullOrWhiteSpace(templateType) &&
+            TryNormalizeExcelToSoTypeToken(templateType, out var templateNormalized, out _) &&
+            (string.IsNullOrWhiteSpace(plannedType) ||
+             !TryNormalizeExcelToSoTypeToken(plannedType, out var plannedNormalized, out _) ||
+             string.Equals(templateNormalized, plannedNormalized, StringComparison.OrdinalIgnoreCase)))
+        {
+            return templateType;
+        }
+
+        return FirstNonEmpty(plannedType, templateType, "string");
+    }
+
+    private static bool ShouldSkipExcelToSoCacheDataRow(RowDocument row, SheetDocument sheet, IList<ExcelToSoPhysicalColumn> columns, int dataStartRow, IList<string> typeRow, IList<string> descriptionRow)
+    {
+        if (row.SourceIndex > 0 && row.SourceIndex <= dataStartRow)
+        {
+            return true;
+        }
+
+        var values = columns
+            .Select(column => !string.IsNullOrWhiteSpace(column.SemanticKey) && row.Cells.TryGetValue(column.SemanticKey, out var cell)
+                ? FirstNonEmpty(cell.RawText, cell.NormalizedText, cell.SemanticText)
+                : "")
+            .ToList();
+        var nonEmpty = values.Where(v => !string.IsNullOrWhiteSpace(v)).ToList();
+        if (nonEmpty.Count == 0)
+        {
+            return true;
+        }
+
+        if (LooksLikeTypeTokenRow(nonEmpty))
+        {
+            return true;
+        }
+
+        var descriptionMatches = 0;
+        for (var i = 0; i < Math.Min(values.Count, descriptionRow.Count); i++)
+        {
+            if (!string.IsNullOrWhiteSpace(values[i]) &&
+                !string.IsNullOrWhiteSpace(descriptionRow[i]) &&
+                string.Equals(values[i].Trim(), descriptionRow[i].Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                descriptionMatches++;
+            }
+        }
+
+        return descriptionMatches > 0 && descriptionMatches >= Math.Max(1, nonEmpty.Count / 2);
+    }
+
+    private static bool LooksLikeTypeTokenRow(IList<string> values)
+    {
+        var nonEmpty = values.Where(v => !string.IsNullOrWhiteSpace(v)).ToList();
+        if (nonEmpty.Count == 0)
+        {
+            return false;
+        }
+
+        var typeLike = nonEmpty.Count(IsExcelToSoOrPortableTypeToken);
+        return typeLike == nonEmpty.Count || (nonEmpty.Count >= 3 && typeLike >= nonEmpty.Count - 1);
+    }
+
+    private static bool IsExcelToSoOrPortableTypeToken(string value)
+    {
+        if (TryNormalizeExcelToSoTypeToken(value, out _, out _))
+        {
+            return true;
+        }
+
+        return IsPortableOnlyType(value) || IsJsonType(value);
+    }
+
+    private static string ConvertCellToExcelToSoPhysicalText(CellValue cell, string physicalType)
+    {
+        var raw = FirstNonEmpty(cell.RawText, cell.NormalizedText, cell.SemanticText);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return "";
+        }
+
+        var normalizedType = "";
+        TryNormalizeExcelToSoTypeToken(physicalType, out normalizedType, out _);
+        if (!IsExcelToSoArrayType(normalizedType))
+        {
+            return TryUnquoteJsonScalar(raw, out var scalar) ? scalar : raw;
+        }
+
+        if (TryParseJsonArrayAsExcelToSoList(raw, out var listText))
+        {
+            return listText;
+        }
+
+        return raw;
+    }
+
+    private static bool IsExcelToSoArrayType(string type)
+    {
+        switch ((type ?? "").Trim().ToLowerInvariant())
+        {
+            case "int[]":
+            case "float[]":
+            case "string[]":
+            case "bool[]":
+            case "long[]":
+            case "lang[]":
+            case "rich[]":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryUnquoteJsonScalar(string raw, out string scalar)
+    {
+        scalar = "";
+        try
+        {
+            var node = JsonNode.Parse(raw);
+            if (node is JsonValue value)
+            {
+                scalar = value.ToString();
+                return true;
+            }
+        }
+        catch
+        {
+            // Not a JSON scalar; keep original cell text.
+        }
+
+        return false;
+    }
+
+    private static bool TryParseJsonArrayAsExcelToSoList(string raw, out string listText)
+    {
+        listText = "";
+        try
+        {
+            var node = JsonNode.Parse(raw);
+            if (node is not JsonArray array)
+            {
+                return false;
+            }
+
+            listText = string.Join(",", array.Select(JsonArrayItemToExcelToSoText));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string JsonArrayItemToExcelToSoText(JsonNode? item)
+    {
+        if (item == null)
+        {
+            return "";
+        }
+
+        if (item is JsonValue value)
+        {
+            if (value.TryGetValue<string>(out var text))
+            {
+                return text ?? "";
+            }
+
+            if (value.TryGetValue<bool>(out var boolean))
+            {
+                return boolean ? "true" : "false";
+            }
+
+            if (value.TryGetValue<long>(out var integer))
+            {
+                return integer.ToString(CultureInfo.InvariantCulture);
+            }
+
+            if (value.TryGetValue<double>(out var number))
+            {
+                return number.ToString(CultureInfo.InvariantCulture);
+            }
+        }
+
+        return item.ToJsonString();
     }
 
     private sealed class SharedStringTable
@@ -5841,7 +6217,7 @@ public static class Program
                 sheetData)).ToString(SaveOptions.DisableFormatting);
     }
 
-    private static bool ValidateExcelToSoCompatibleXlsx(string path, string workspaceRoot, out string error)
+    private static bool ValidateExcelToSoCompatibleXlsx(string path, TableConfig table, string workspaceRoot, out string error)
     {
         error = "";
         try
@@ -5881,6 +6257,12 @@ public static class Program
                 }
             }
 
+            if (!ValidateExcelToSoPhysicalTemplate(path, table, workspaceRoot, out var physicalError))
+            {
+                error = physicalError;
+                return false;
+            }
+
             if (!TryValidateWithLegacyExcelReader(path, workspaceRoot, out var readerError))
             {
                 error = readerError;
@@ -5894,6 +6276,81 @@ public static class Program
             error = ex is TargetInvocationException target && target.InnerException != null ? target.InnerException.Message : ex.Message;
             return false;
         }
+    }
+
+    private static bool ValidateExcelToSoPhysicalTemplate(string path, TableConfig table, string workspaceRoot, out string error)
+    {
+        error = "";
+        var template = ReadExcelToSoPhysicalTemplate(table, workspaceRoot);
+        using (var archive = ZipFile.OpenRead(path))
+        {
+            var sharedStrings = ReadSharedStrings(archive);
+            var sheets = ReadWorkbookSheetInfos(archive);
+            if (sheets.Count == 0)
+            {
+                error = "cache xlsx 没有 worksheet，ExcelToSO 无法导入。";
+                return false;
+            }
+
+            var sheetName = sheets[0].Name;
+            var matrix = ReadWorksheetMatrix(archive, sheets[0].Path, sharedStrings);
+            if (template.Available && !string.IsNullOrWhiteSpace(template.SheetName) &&
+                !string.Equals(sheetName, SanitizeSheetName(template.SheetName), StringComparison.Ordinal))
+            {
+                error = "cache xlsx 的工作表名为 " + sheetName + "，但 ExcelToSO 模板工作表名是 " + template.SheetName + "。这会导致 Unity 查找 _" + sheetName + "Items 失败。";
+                return false;
+            }
+
+            var fieldRowIndex = table.FieldRow < 0 ? 0 : table.FieldRow;
+            if (fieldRowIndex >= matrix.Count)
+            {
+                error = "cache xlsx 缺少字段行。";
+                return false;
+            }
+
+            var fieldRow = matrix[fieldRowIndex];
+            if (fieldRow.Any(field => IsGeneratedColumnName(field)))
+            {
+                error = "cache xlsx 字段行包含 column_4/column_N 这类自动生成字段，请使用旧 ExcelToSO 模板的真实字段行。";
+                return false;
+            }
+
+            if (template.Available)
+            {
+                var expectedFields = template.Fields.TakeWhile(field => !string.IsNullOrWhiteSpace(field)).ToList();
+                for (var i = 0; i < expectedFields.Count; i++)
+                {
+                    var actual = i < fieldRow.Count ? fieldRow[i] : "";
+                    if (!string.Equals(actual, expectedFields[i], StringComparison.Ordinal))
+                    {
+                        error = "cache xlsx 字段行第 " + (i + 1).ToString(CultureInfo.InvariantCulture) + " 列为 “" + actual + "”，但 ExcelToSO 模板要求 “" + expectedFields[i] + "”。字段大小写会影响 Unity serialized field，例如 ID 不能写成 id。";
+                        return false;
+                    }
+                }
+            }
+
+            var dataStartRow = table.DataStartRow < 0
+                ? Math.Max(fieldRowIndex, Math.Max(EffectiveTypeRow(table), table.DescriptionRow < 0 ? EffectiveTypeRow(table) + 1 : table.DescriptionRow)) + 1
+                : table.DataStartRow;
+            if (dataStartRow >= 0 && dataStartRow < matrix.Count && LooksLikeTypeTokenRow(matrix[dataStartRow]))
+            {
+                error = "cache xlsx 的 data_from_row 第一行看起来仍是 canonical type row（例如 integer/string/json），ExcelToSO 会把它当作真实数据。";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsGeneratedColumnName(string value)
+    {
+        var text = (value ?? "").Trim().ToLowerInvariant();
+        if (!text.StartsWith("column_", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return text.Skip("column_".Length).All(char.IsDigit);
     }
 
     private static bool TryValidateWithLegacyExcelReader(string path, string workspaceRoot, out string error)
@@ -6007,6 +6464,22 @@ public static class Program
         }
     }
 
+    private static string ReadFirstWorksheetName(string path)
+    {
+        using (var archive = ZipFile.OpenRead(path))
+        {
+            var workbookEntry = archive.GetEntry("xl/workbook.xml");
+            if (workbookEntry == null)
+            {
+                return "";
+            }
+
+            var document = ReadXml(workbookEntry);
+            var ns = XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+            return document.Descendants(ns + "sheet").Select(sheet => sheet.Attribute("name")?.Value ?? "").FirstOrDefault(name => !string.IsNullOrWhiteSpace(name)) ?? "";
+        }
+    }
+
     private static IList<string> ReadSharedStrings(ZipArchive archive)
     {
         var strings = new List<string>();
@@ -6028,7 +6501,12 @@ public static class Program
 
     private static List<string> ReadWorkbookSheets(ZipArchive archive)
     {
-        var result = new List<string>();
+        return ReadWorkbookSheetInfos(archive).Select(sheet => sheet.Path).ToList();
+    }
+
+    private static List<XlsxSheetPathInfo> ReadWorkbookSheetInfos(ZipArchive archive)
+    {
+        var result = new List<XlsxSheetPathInfo>();
         var workbookEntry = archive.GetEntry("xl/workbook.xml");
         if (workbookEntry == null)
         {
@@ -6043,7 +6521,11 @@ public static class Program
         {
             var relationId = sheet.Attribute(relNs + "id")?.Value ?? "";
             rels.TryGetValue(relationId, out var target);
-            result.Add(NormalizeWorkbookTarget(target ?? ""));
+            result.Add(new XlsxSheetPathInfo
+            {
+                Name = sheet.Attribute("name")?.Value ?? "",
+                Path = NormalizeWorkbookTarget(target ?? "")
+            });
         }
 
         return result;
@@ -7704,7 +8186,7 @@ public static class Program
                             File.Exists(xlsxPath) &&
                             File.Exists(semanticPath) &&
                             File.Exists(shaPath) &&
-                            (!cacheTable.UseExcelToSoCacheDialect || !CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, cacheTable));
+                            (!cacheTable.UseExcelToSoCacheDialect || !CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, cacheTable, Directory.GetCurrentDirectory()));
             if (!unchanged)
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(xlsxPath) ?? ".");

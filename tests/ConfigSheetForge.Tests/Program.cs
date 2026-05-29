@@ -97,6 +97,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("repair-cache-dialect scans stale dimension right-side columns", RepairCacheDialectScansStaleDimensionRightSideColumns),
     ("repair-cache-dialect writes exceldatareader compatible xlsx", RepairCacheDialectWritesExcelDataReaderCompatibleXlsx),
     ("repair-cache-dialect rewrites already typed legacy xlsx package", RepairCacheDialectRewritesAlreadyTypedLegacyXlsxPackage),
+    ("excel to so cache writer preserves physical template semantics", () => RunSync(ExcelToSoCacheWriterPreservesPhysicalTemplateSemantics)),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
     ("seed lifecycle rejects user fallback", SeedLifecycleRejectsUserFallback),
@@ -3155,7 +3156,7 @@ static void ExcelToSoCacheDialectRestoresJsonArraysFromSourceXlsx()
         var output = Path.Combine(temp, "SkillsData.cache.xlsx");
         WriteExcelToSoCacheXlsxForTest(output, workbook, table, plan.TypeRow);
         var writtenTypes = ReadTypeRowFromXlsx(output, typeRow: 1);
-        AssertEqual("int,string[],float[],int[]", string.Join(",", writtenTypes), "Formal cache xlsx should not contain canonical json/integer/number type tokens.");
+        AssertEqual("Int,string[],float[],int[]", string.Join(",", writtenTypes), "Formal cache xlsx should preserve the legacy ExcelToSO dialect text and avoid canonical json/integer/number type tokens.");
     }
     finally
     {
@@ -3381,7 +3382,7 @@ static async Task RepairCacheDialectScansStaleDimensionRightSideColumns()
 
             var apply = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--yes", "--out", applyResultPath });
             AssertEqual("0", apply.ToString(), "repair-cache-dialect apply should pass.");
-            AssertEqual("int,string[],float[],string[],float[],int[]", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "Apply should rewrite all right-side json cells despite stale dimension=A1.");
+            AssertEqual("Int,String[],float[],string[],float[],int[]", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "Apply should rewrite all right-side json cells despite stale dimension=A1 while preserving legacy dialect casing.");
             var applyResult = JsonSerializer.Deserialize<LifecycleContractResult>(await File.ReadAllTextAsync(applyResultPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             AssertTrue(applyResult != null && applyResult.SyncCacheSummary.CacheStatus == "upToDate", "Apply result should recommend importing Unity assets next.");
             AssertEqual("import-unity", applyResult!.SyncCacheSummary.NextAction, "Apply next action should be import-unity.");
@@ -3464,7 +3465,7 @@ static async Task RepairCacheDialectWritesExcelDataReaderCompatibleXlsx()
             Directory.SetCurrentDirectory(temp);
             var apply = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--yes", "--out", applyResultPath });
             AssertEqual("0", apply.ToString(), "repair-cache-dialect apply should pass for a legacy inlineStr cache xlsx.");
-            AssertEqual("int,int[],string[]", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "Apply should rewrite json columns into ExcelToSO dialect.");
+            AssertEqual("Int,int[],string[]", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "Apply should rewrite json columns into ExcelToSO dialect while preserving legacy dialect casing.");
             AssertTrue(XlsxHasEntry(xlsx, "xl/sharedStrings.xml"), "Repaired xlsx must include sharedStrings.xml for ExcelToSO/ExcelDataReader.");
             AssertTrue(XlsxHasEntry(xlsx, "xl/styles.xml"), "Repaired xlsx must include styles.xml for ExcelToSO/ExcelDataReader.");
             AssertTrue(!WorksheetContainsInlineStrings(xlsx), "Repaired xlsx should use shared strings instead of inlineStr.");
@@ -3562,6 +3563,91 @@ static async Task RepairCacheDialectRewritesAlreadyTypedLegacyXlsxPackage()
         {
             Directory.SetCurrentDirectory(oldDir);
         }
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static void ExcelToSoCacheWriterPreservesPhysicalTemplateSemantics()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-cache-physical-template-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var skillsSource = Path.Combine(temp, "Excel", "SkillsData.xlsx");
+        Directory.CreateDirectory(Path.GetDirectoryName(skillsSource)!);
+        CreateTypeHintXlsx(skillsSource,
+            new[] { "ID", "Name", "Tag" },
+            new[] { "int", "String", "String" },
+            sheetName: "Skill",
+            descriptionRow: new[] { "唯一 ID", "名称", "标签" });
+
+        var skillsWorkbook = SampleWorkbookWithColumns(("id", "integer"), ("name", "string"), ("tag", "string"));
+        skillsWorkbook.Sheets[0].Name = "SkillsData";
+        skillsWorkbook.Sheets[0].Rows.Clear();
+        var canonicalTypeRow = new RowDocument { StableId = "header-type", SourceIndex = 4 };
+        canonicalTypeRow.Cells["id"] = new CellValue { RawText = "integer", NormalizedText = "integer" };
+        canonicalTypeRow.Cells["name"] = new CellValue { RawText = "string", NormalizedText = "string" };
+        canonicalTypeRow.Cells["tag"] = new CellValue { RawText = "string", NormalizedText = "string" };
+        skillsWorkbook.Sheets[0].Rows.Add(canonicalTypeRow);
+        var dataRow = new RowDocument { StableId = "1001", SourceIndex = 5 };
+        dataRow.Cells["id"] = new CellValue { RawText = "1001", NormalizedText = "1001" };
+        dataRow.Cells["name"] = new CellValue { RawText = "Fireball", NormalizedText = "Fireball" };
+        dataRow.Cells["tag"] = new CellValue { RawText = "Skill", NormalizedText = "Skill" };
+        skillsWorkbook.Sheets[0].Rows.Add(dataRow);
+
+        var skillsTable = new TableConfig
+        {
+            Id = "SkillsData",
+            Name = "SkillsData",
+            LocalSourcePath = skillsSource,
+            UseExcelToSoCacheDialect = true,
+            FieldRow = 0,
+            TypeRow = 1,
+            DescriptionRow = 2,
+            DataStartRow = 3
+        };
+        var skillsPlan = BuildExcelToSoDialectPlanForTest(skillsWorkbook, skillsTable, temp);
+        var skillsOutput = Path.Combine(temp, "SkillsData.cache.xlsx");
+        WriteExcelToSoCacheXlsxForTest(skillsOutput, skillsWorkbook, skillsTable, skillsPlan.TypeRow);
+
+        AssertEqual("Skill", ReadFirstSheetNameFromXlsx(skillsOutput), "Cache xlsx should preserve the old ExcelToSO sheet/item class name.");
+        AssertEqual("ID,Name,Tag", string.Join(",", ReadTypeRowFromXlsx(skillsOutput, 0)), "Field row should preserve old ExcelToSO casing.");
+        AssertEqual("int,String,String", string.Join(",", ReadTypeRowFromXlsx(skillsOutput, 1)), "Type row should preserve old ExcelToSO dialect text where available.");
+        AssertEqual("唯一 ID,名称,标签", string.Join(",", ReadTypeRowFromXlsx(skillsOutput, 2)), "Description row should preserve the old template.");
+        AssertEqual("1001,Fireball,Skill", string.Join(",", ReadTypeRowFromXlsx(skillsOutput, 3)), "data_from_row first row must be real data, not canonical type tokens.");
+
+        var roomSource = Path.Combine(temp, "Excel", "RoomData.xlsx");
+        CreateTypeHintXlsx(roomSource,
+            new[] { "ID", "RoomType", "Prefab", "", "ShouldNotAppear" },
+            new[] { "int", "String", "String", "", "String" },
+            sheetName: "Rooms");
+        var roomWorkbook = SampleWorkbookWithColumns(("id", "integer"), ("roomtype", "string"), ("prefab", "json"), ("column_4", "string"));
+        var roomTable = new TableConfig
+        {
+            Id = "RoomData",
+            Name = "RoomData",
+            LocalSourcePath = roomSource,
+            UseExcelToSoCacheDialect = true,
+            FieldRow = 0,
+            TypeRow = 1,
+            DescriptionRow = 2,
+            DataStartRow = 3
+        };
+        roomTable.Fields.Add(new ContractFieldSpec { Key = "prefab", ExcelToSoType = "String[]" });
+        var roomPlan = BuildExcelToSoDialectPlanForTest(roomWorkbook, roomTable, temp);
+        var roomOutput = Path.Combine(temp, "RoomData.cache.xlsx");
+        WriteExcelToSoCacheXlsxForTest(roomOutput, roomWorkbook, roomTable, roomPlan.TypeRow);
+
+        AssertEqual("Rooms", ReadFirstSheetNameFromXlsx(roomOutput), "RoomData cache should preserve the old Rooms sheet name.");
+        AssertEqual("ID,RoomType,Prefab", string.Join(",", ReadTypeRowFromXlsx(roomOutput, 0)), "Blank trailing template columns should stop the field list.");
+        AssertTrue(!ReadTypeRowFromXlsx(roomOutput, 0).Any(field => string.Equals(field, "column_4", StringComparison.OrdinalIgnoreCase)), "Cache writer must not generate column_4 fields.");
+        AssertEqual("1,2", ReadTypeRowFromXlsx(roomOutput, 3)[2], "Json array values should be restored to ExcelToSO list cell text.");
     }
     finally
     {
@@ -3949,7 +4035,7 @@ static void CreateMinimalXlsx(string path, bool withMergedCells, string dimensio
         """ + merge + "</worksheet>");
 }
 
-static void CreateTypeHintXlsx(string path, IReadOnlyList<string> fieldRow, IReadOnlyList<string> typeRow, string dimensionRef = "")
+static void CreateTypeHintXlsx(string path, IReadOnlyList<string> fieldRow, IReadOnlyList<string> typeRow, string dimensionRef = "", string sheetName = "Data", IReadOnlyList<string>? descriptionRow = null)
 {
     using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
     AddZipText(archive, "[Content_Types].xml",
@@ -3970,12 +4056,10 @@ static void CreateTypeHintXlsx(string path, IReadOnlyList<string> fieldRow, IRea
         </Relationships>
         """);
     AddZipText(archive, "xl/workbook.xml",
-        """
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-          <sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets>
-        </workbook>
-        """);
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+        "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">" +
+        "<sheets><sheet name=\"" + System.Security.SecurityElement.Escape(sheetName) + "\" sheetId=\"1\" r:id=\"rId1\"/></sheets>" +
+        "</workbook>");
     AddZipText(archive, "xl/_rels/workbook.xml.rels",
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -3994,6 +4078,7 @@ static void CreateTypeHintXlsx(string path, IReadOnlyList<string> fieldRow, IRea
         """ +
         BuildInlineStringRow(1, fieldRow) +
         BuildInlineStringRow(2, typeRow) +
+        (descriptionRow == null ? "" : BuildInlineStringRow(3, descriptionRow)) +
         """
           </sheetData>
         </worksheet>
@@ -4072,6 +4157,19 @@ static void WriteExcelToSoCacheXlsxForTest(string path, WorkbookDocument workboo
     var method = typeof(ConfigSheetForge.Cli.Program).GetMethod("WriteExcelToSoCacheXlsx", BindingFlags.NonPublic | BindingFlags.Static);
     AssertTrue(method != null, "WriteExcelToSoCacheXlsx should exist.");
     method!.Invoke(null, new object[] { path, workbook, table, typeRow, Directory.GetCurrentDirectory() });
+}
+
+static string ReadFirstSheetNameFromXlsx(string path)
+{
+    using var archive = ZipFile.OpenRead(path);
+    var entry = archive.GetEntry("xl/workbook.xml");
+    AssertTrue(entry != null, "Generated xlsx should contain workbook.xml.");
+    using var stream = entry!.Open();
+    var document = System.Xml.Linq.XDocument.Load(stream);
+    var ns = System.Xml.Linq.XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+    return document.Descendants(ns + "sheet")
+        .Select(sheet => sheet.Attribute("name")?.Value ?? "")
+        .FirstOrDefault() ?? "";
 }
 
 static List<string> ReadTypeRowFromXlsx(string path, int typeRow)
