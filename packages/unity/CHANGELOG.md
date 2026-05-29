@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.42
+
+- CLI machine-readable JSON outputs now use UTF-8 without BOM, including lifecycle result JSON, PR gate reports, progress NDJSON and generated contracts. This prevents Desktop/Node JSON parsing from choking on a leading `U+FEFF`.
+- Desktop JSON parsing is defensive for historical files: cached lifecycle results and Tauri result snapshots strip a leading BOM before `JSON.parse`, so old `sync-cache.result.json` files can still restore the “写入本地 cache” step.
+- Added regression coverage for BOM-prefixed sync-cache result fixtures, no-BOM CLI result files, Rust-side BOM stripping and UI smoke markers for the shared parser.
+
 ## 0.4.41
 
 - Desktop now consumes the `--out` result file immediately after a background `sync-cache` task completes. If the task snapshot misses `resultJson`, the UI rereads `Temp/ConfigSheetForge/desktop/sync-cache.result.json`, normalizes it, and advances to “写入本地 cache” without requiring a restart.

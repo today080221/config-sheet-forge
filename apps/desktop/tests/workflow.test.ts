@@ -8,6 +8,7 @@ import {
   desktopResultNameForOperation,
   normalizeSyncCacheResult,
   ordinaryToolText,
+  parseLifecycleResultJson,
   primaryToolAction,
   shouldReadDesktopResultAfterTask,
   shouldShowBotSecretForm,
@@ -93,6 +94,21 @@ describe("Desktop workflow state machine", () => {
     expect(normalized?.tables).toHaveLength(16);
   });
 
+  it("parses BOM-prefixed sync-cache result and routes to write-cache", () => {
+    const parsed = parseLifecycleResultJson("\uFEFF" + JSON.stringify(projectNeedsUpdateFixture()));
+    const normalized = normalizeSyncCacheResult(parsed);
+    const decision = decideSyncImport({ lastSyncPreview: parsed || undefined });
+
+    expect(parsed).not.toBeNull();
+    expect(normalized?.cacheStatus).toBe("needsUpdate");
+    expect(normalized?.nextAction).toBe("write-cache");
+    expect(normalized?.canApplyCache).toBe(true);
+    expect(normalized?.changedTables).toHaveLength(16);
+    expect(decision.primaryOperation).toBe("sync-cache-apply");
+    expect(decision.primaryLabel).toContain("写入本地 cache");
+    expect(summarizeLifecycleResult(parsed)).toBe("预览通过，16 张表需要写入 cache，下一步：写入本地 cache。");
+  });
+
   it("routes needsUpdate fixture to write-cache with a planner summary", () => {
     const fixture = projectNeedsUpdateFixture();
     const decision = decideSyncImport({ lastSyncPreview: fixture });
@@ -109,9 +125,9 @@ describe("Desktop workflow state machine", () => {
     const resultDir = join(root, "Temp", "ConfigSheetForge", "desktop");
     mkdirSync(resultDir, { recursive: true });
     const resultPath = join(resultDir, "sync-cache.result.json");
-    writeFileSync(resultPath, JSON.stringify(projectNeedsUpdateFixture(), null, 2), "utf8");
+    writeFileSync(resultPath, "\uFEFF" + JSON.stringify(projectNeedsUpdateFixture(), null, 2), "utf8");
 
-    const restored = JSON.parse(readFileSync(resultPath, "utf8")) as LifecycleResultLike;
+    const restored = parseLifecycleResultJson(readFileSync(resultPath, "utf8")) as LifecycleResultLike;
     const decision = decideSyncImport({ lastSyncPreview: restored });
     const normalized = normalizeSyncCacheResult(restored);
 

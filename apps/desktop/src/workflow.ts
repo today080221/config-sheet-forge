@@ -102,6 +102,24 @@ export type LifecycleResultLike = {
   prGateReport?: PrGateReportLike;
 };
 
+export function stripJsonBom(text: string | undefined): string {
+  return (text || "").replace(/^\uFEFF/, "");
+}
+
+export function parseLifecycleResultJson(text: string | undefined): LifecycleResultLike | null {
+  const cleaned = stripJsonBom(text);
+  if (!cleaned.trim()) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(cleaned) as unknown;
+    return parsed && typeof parsed === "object" ? parsed as LifecycleResultLike : null;
+  } catch {
+    return null;
+  }
+}
+
 export type NormalizedSyncCacheStatus = "upToDate" | "needsUpdate" | "missingCache" | "blocked" | "unknown";
 
 export type NormalizedSyncCacheNextAction = "write-cache" | "import-unity" | "fix-blocker" | "run-pr-gate" | "preview-sync";
@@ -533,9 +551,10 @@ export function ordinaryToolText(text: string | undefined): string {
     return "";
   }
 
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+  const jsonText = stripJsonBom(trimmed);
+  if (jsonText.startsWith("{") || jsonText.startsWith("[")) {
     try {
-      const parsed = JSON.parse(trimmed) as unknown;
+      const parsed = JSON.parse(jsonText) as unknown;
       if (parsed && typeof parsed === "object") {
         const asRecord = parsed as Record<string, unknown>;
         const ok = asRecord.ok;

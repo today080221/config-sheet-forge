@@ -13,6 +13,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
     private static readonly XNamespace SpreadsheetNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     private static readonly XNamespace RelationshipNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private static readonly XNamespace PackageRelationshipNs = "http://schemas.openxmlformats.org/package/2006/relationships";
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
     public string Id => "lark";
 
@@ -193,7 +194,7 @@ public sealed class LarkCliWorkbookProvider : IWorkbookProvider
         if (string.IsNullOrWhiteSpace(result.CachePath))
         {
             var semanticPath = Path.Combine(request.CacheDirectory, safeName + ".semantic.json");
-            await File.WriteAllTextAsync(semanticPath, CombinedOutput(read.Result), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(semanticPath, CombinedOutput(read.Result), Utf8NoBom, cancellationToken).ConfigureAwait(false);
             result.CachePath = semanticPath;
         }
 

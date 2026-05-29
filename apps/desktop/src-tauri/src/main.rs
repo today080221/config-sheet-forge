@@ -423,6 +423,10 @@ fn cancel_task(task_id: String) -> Result<TaskSnapshot, String> {
     Ok(snapshot_task(&state))
 }
 
+fn strip_utf8_bom(text: String) -> String {
+    text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()
+}
+
 #[tauri::command]
 fn read_desktop_result(project_root: String, name: String) -> Result<CliRunResult, String> {
     let root = resolve_project_root(project_root)?;
@@ -439,7 +443,9 @@ fn read_desktop_result(project_root: String, name: String) -> Result<CliRunResul
         .join("ConfigSheetForge")
         .join("desktop")
         .join(format!("{}.result.json", safe_name));
-    let result_json = fs::read_to_string(&result_path).unwrap_or_default();
+    let result_json = fs::read_to_string(&result_path)
+        .map(strip_utf8_bom)
+        .unwrap_or_default();
     Ok(CliRunResult {
         command_line: String::new(),
         exit_code: if result_json.is_empty() { -1 } else { 0 },
@@ -1763,7 +1769,9 @@ fn run_process_task_thread(task_state: Arc<Mutex<TaskState>>, spec: TaskSpec) {
     let result_json = if spec.result_path.is_empty() {
         String::new()
     } else {
-        fs::read_to_string(&spec.result_path).unwrap_or_default()
+        fs::read_to_string(&spec.result_path)
+            .map(strip_utf8_bom)
+            .unwrap_or_default()
     };
 
     update_task(&task_state, |state| {
@@ -1847,7 +1855,7 @@ fn tail_progress_file(task_state: Arc<Mutex<TaskState>>, progress_path: String) 
 }
 
 fn apply_progress_line(task_state: &Arc<Mutex<TaskState>>, line: &str) {
-    let trimmed = line.trim();
+    let trimmed = line.trim().trim_start_matches('\u{feff}');
     if trimmed.is_empty() {
         return;
     }
@@ -2101,7 +2109,9 @@ fn run_capture_resolved(
     let result_json = if result_path.is_empty() {
         String::new()
     } else {
-        fs::read_to_string(&result_path).unwrap_or_default()
+        fs::read_to_string(&result_path)
+            .map(strip_utf8_bom)
+            .unwrap_or_default()
     };
 
     Ok(CliRunResult {
@@ -2348,7 +2358,8 @@ fn find_project_config(root: &Path) -> Option<PathBuf> {
 
 fn read_json(path: &Path) -> Result<Value, String> {
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    serde_json::from_str(text).map_err(|e| e.to_string())
 }
 
 fn find_string_deep(value: &Value, keys: &[&str]) -> Option<String> {
@@ -2642,5 +2653,13 @@ mod tests {
             "progress message should be written"
         );
         let _ = fs::remove_file(progress_path);
+    }
+
+    #[test]
+    fn rust_result_reading_strips_utf8_bom() {
+        let text = strip_utf8_bom("\u{feff}{\"ok\":true}".to_string());
+        assert_eq!(text, "{\"ok\":true}");
+        let parsed: Value = serde_json::from_str(&text).expect("BOM-stripped JSON should parse");
+        assert_eq!(parsed["ok"], true);
     }
 }

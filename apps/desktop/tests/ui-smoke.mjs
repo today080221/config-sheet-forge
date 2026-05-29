@@ -31,8 +31,10 @@ assert(app.includes("read_desktop_result"), "Desktop must restore workflow state
 assert(app.includes("readResultAfterTaskCompletion"), "Desktop must consume result JSON immediately after a background task completes");
 assert(app.includes("shouldReadDesktopResultAfterTask"), "Desktop must reread --out result files when TaskSnapshot misses resultJson");
 assert(app.includes("normalizeSyncCacheResult"), "Desktop must normalize sync-cache results before driving workflow state");
+assert(app.includes("parseLifecycleResultJson"), "Desktop must parse lifecycle JSON through the BOM-safe parser");
 assert(workflow.includes("syncResultSummaryLine"), "Planner result summary must come from normalized sync-cache result");
 assert(workflow.includes("normalizeSyncCacheResult"), "Workflow state must expose one sync-cache normalize layer");
+assert(workflow.includes("stripJsonBom"), "Workflow JSON parsing must strip UTF-8 BOM from old result files");
 assert(app.includes("SyncTableSummary"), "Result details must show structured table summaries instead of raw JSON");
 assert(app.includes("resultNextAction"), "Result panel must offer the next workflow action directly");
 assert(app.includes("start_task"), "Lifecycle actions must start backend tasks instead of blocking run_cli");

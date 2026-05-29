@@ -31,6 +31,8 @@ public static class Program
         PropertyNameCaseInsensitive = true
     };
 
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
     public static async Task<int> Main(string[] args)
     {
         if (args.Length > 0 && args[0] is "--version" or "-v" or "version")
@@ -953,7 +955,7 @@ public static class Program
             if (!string.Equals(previousHash, fileCacheHash, StringComparison.Ordinal) || !File.Exists(destination))
             {
                 File.Copy(input, destination, overwrite: true);
-                await File.WriteAllTextAsync(Path.Combine(workspace.Paths.CacheDirectory, tableId + ".sha256"), fileCacheHash + Environment.NewLine, Encoding.UTF8);
+                await File.WriteAllTextAsync(Path.Combine(workspace.Paths.CacheDirectory, tableId + ".sha256"), fileCacheHash + Environment.NewLine, Utf8NoBom);
             }
 
             Console.WriteLine(tableId + ": file:" + fileHash);
@@ -2731,7 +2733,7 @@ public static class Program
             throw new CliException("The seed manifest does not exist.", 2, manifestPath);
         }
 
-        var json = await File.ReadAllTextAsync(manifestPath, Encoding.UTF8);
+        var json = StripUtf8Bom(await File.ReadAllTextAsync(manifestPath, Utf8NoBom));
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
         var operation = GetJsonString(root, "operation");
@@ -2931,7 +2933,7 @@ public static class Program
                     Directory.CreateDirectory(directory);
                 }
 
-                await File.AppendAllTextAsync(normalizedProgressPath, line + Environment.NewLine, Encoding.UTF8);
+                await File.AppendAllTextAsync(normalizedProgressPath, line + Environment.NewLine, Utf8NoBom);
             }
             catch (Exception ex) when (IsPathFailure(ex))
             {
@@ -2964,7 +2966,7 @@ public static class Program
 
         var reportPath = args.Get("out", "merge-report.md");
         var mergedPath = args.Get("merged", "merged.semantic.json");
-        await File.WriteAllTextAsync(reportPath, RenderMergeReport(report), Encoding.UTF8);
+        await File.WriteAllTextAsync(reportPath, RenderMergeReport(report), Utf8NoBom);
         await WriteJsonAsync(mergedPath, report.MergedWorkbook);
 
         Console.WriteLine("Merge report: " + Path.GetFullPath(reportPath));
@@ -4990,12 +4992,19 @@ public static class Program
             .Replace(",", "%2C");
     }
 
+    private static string StripUtf8Bom(string value)
+    {
+        return !string.IsNullOrEmpty(value) && value[0] == '\uFEFF'
+            ? value.Substring(1)
+            : value;
+    }
+
     private static async Task<T> ReadJsonAsync<T>(string path)
     {
         try
         {
             var normalizedPath = NormalizeFilePathArgument(path);
-            var json = await File.ReadAllTextAsync(normalizedPath, Encoding.UTF8);
+            var json = StripUtf8Bom(await File.ReadAllTextAsync(normalizedPath, Utf8NoBom));
             var value = JsonSerializer.Deserialize<T>(json, JsonOptions);
             if (value == null)
             {
@@ -5026,7 +5035,7 @@ public static class Program
             }
 
             var json = JsonSerializer.Serialize(value, JsonOptions) + Environment.NewLine;
-            await File.WriteAllTextAsync(normalizedPath, json, Encoding.UTF8);
+            await File.WriteAllTextAsync(normalizedPath, json, Utf8NoBom);
         }
         catch (Exception ex) when (IsPathFailure(ex))
         {
@@ -5094,7 +5103,7 @@ public static class Program
         }
 
         await WriteJsonAsync(semanticPath, workbook);
-        await File.WriteAllTextAsync(shaPath, hash + Environment.NewLine, Encoding.UTF8);
+        await File.WriteAllTextAsync(shaPath, hash + Environment.NewLine, Utf8NoBom);
         if (!string.IsNullOrWhiteSpace(tempXlsxPath) && File.Exists(tempXlsxPath))
         {
             if (table.UseExcelToSoCacheDialect)
@@ -5855,7 +5864,7 @@ public static class Program
             return "";
         }
 
-        var text = await File.ReadAllTextAsync(path, Encoding.UTF8);
+        var text = await File.ReadAllTextAsync(path, Utf8NoBom);
         return text.Trim();
     }
 
@@ -7335,7 +7344,7 @@ public static class Program
                 }
 
                 await WriteJsonAsync(semanticPath, localWorkbook);
-                await File.WriteAllTextAsync(shaPath, semanticHash + Environment.NewLine, Encoding.UTF8, cancellationToken);
+                await File.WriteAllTextAsync(shaPath, semanticHash + Environment.NewLine, Utf8NoBom, cancellationToken);
             }
 
             var action = new LifecycleActionResult
@@ -7370,7 +7379,7 @@ public static class Program
                 return action;
             }
 
-            var json = await File.ReadAllTextAsync(path, Encoding.UTF8, cancellationToken);
+            var json = StripUtf8Bom(await File.ReadAllTextAsync(path, Utf8NoBom, cancellationToken));
             var node = JsonNode.Parse(json);
             if (node == null)
             {
@@ -7382,7 +7391,7 @@ public static class Program
             var changed = UpsertProjectConfigSheet(node, table, sheet, _request.BranchWorkspace);
             if (changed)
             {
-                await File.WriteAllTextAsync(path, node.ToJsonString(JsonOptions) + Environment.NewLine, Encoding.UTF8, cancellationToken);
+                await File.WriteAllTextAsync(path, node.ToJsonString(JsonOptions) + Environment.NewLine, Utf8NoBom, cancellationToken);
             }
 
             action.Status = changed ? "done" : "unchanged";
@@ -7715,7 +7724,7 @@ public static class Program
 
             try
             {
-                var node = JsonNode.Parse(File.ReadAllText(path, Encoding.UTF8));
+                var node = JsonNode.Parse(StripUtf8Bom(File.ReadAllText(path, Utf8NoBom)));
                 var target = FindProjectConfigTableNode(node, table.TableId, FirstNonEmpty(table.Branch, table.Profile));
                 if (target == null)
                 {

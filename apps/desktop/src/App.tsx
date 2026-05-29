@@ -8,6 +8,7 @@ import {
   humanToolStatus,
   normalizeSyncCacheResult,
   ordinaryToolText,
+  parseLifecycleResultJson,
   primaryToolAction,
   scenarios,
   secondaryToolActions,
@@ -148,21 +149,8 @@ function isInteractiveSafeFallbackOperation(operation: string) {
     || operation === "compare-merge";
 }
 
-function isStructuredLifecycle(value: unknown): value is LifecycleResultLike {
-  return Boolean(value) && typeof value === "object";
-}
-
 function parseResultJson(text: string | undefined): LifecycleResultLike | null {
-  if (!text?.trim()) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    return isStructuredLifecycle(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
+  return parseLifecycleResultJson(text);
 }
 
 function projectPath(root: string | undefined, ...parts: string[]) {
@@ -504,7 +492,7 @@ export function App() {
     const finalTask = await waitForTask(initial);
     if (finalTask.status === "succeeded" && finalTask.resultJson) {
       try {
-        setChecks(JSON.parse(finalTask.resultJson) as ToolCheck[]);
+        setChecks(JSON.parse(finalTask.resultJson.replace(/^\uFEFF/, "")) as ToolCheck[]);
       } catch {
         setError("工具检查完成，但结果解析失败。请打开 Debug 查看诊断。");
       }

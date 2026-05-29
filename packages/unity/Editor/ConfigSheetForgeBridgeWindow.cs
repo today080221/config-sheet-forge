@@ -23,6 +23,7 @@ namespace ConfigSheetForge.Unity.Editor
         private const string DesktopArtifactNamePrefix = "config-sheet-forge-desktop-windows-x64-";
         internal const string DesktopExecutableName = "ConfigSheetForgeDesktop.exe";
         private const string ReleaseBaseUrl = "https://github.com/today080221/config-sheet-forge/releases/download/";
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
         private Vector2 _scroll;
         private string _projectRoot = "";
         private string _projectConfigPath = "";
@@ -387,7 +388,7 @@ namespace ConfigSheetForge.Unity.Editor
             var root = Directory.GetParent(Application.dataPath)?.FullName ?? Directory.GetCurrentDirectory();
             _bridgeSessionDirectory = Path.Combine(root, "Library", "ConfigSheetForge", "DesktopBridge", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Path.Combine(_bridgeSessionDirectory, "commands"));
-            File.WriteAllText(Path.Combine(_bridgeSessionDirectory, "session.json"), "{\"projectRoot\":\"" + EscapeJson(root) + "\",\"version\":\"" + PackageVersion + "\"}", Encoding.UTF8);
+            File.WriteAllText(Path.Combine(_bridgeSessionDirectory, "session.json"), "{\"projectRoot\":\"" + EscapeJson(root) + "\",\"version\":\"" + PackageVersion + "\"}", Utf8NoBom);
         }
 
         private void ProcessBridgeSessionCommands()
@@ -838,7 +839,7 @@ namespace ConfigSheetForge.Unity.Editor
                     return DesktopInstallResult.Fail(ConfigSheetForgeBridgeWindow.BuildDevDesktopBuildMessage(executable));
                 }
 
-                File.WriteAllText(Path.Combine(Path.GetDirectoryName(executable) ?? resolvedInstallDir, "VERSION.txt"), version, Encoding.UTF8);
+                File.WriteAllText(Path.Combine(Path.GetDirectoryName(executable) ?? resolvedInstallDir, "VERSION.txt"), version, new UTF8Encoding(false));
                 return new DesktopInstallResult
                 {
                     Success = true,

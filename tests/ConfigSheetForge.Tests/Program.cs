@@ -66,6 +66,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("project config probe reads unity excel to so defaults", () => RunSync(ProjectConfigProbeReadsUnityExcelToSoDefaults)),
     ("project config probe ignores local state registry", () => RunSync(ProjectConfigProbeIgnoresLocalStateRegistry)),
     ("apply-contract pr-gate-report writes standard report", ApplyContractPrGateReportWritesStandardReport),
+    ("cli machine json outputs are utf8 without bom", CliMachineJsonOutputsAreUtf8WithoutBom),
     ("cli normalizes verbatim out and request paths", CliNormalizesVerbatimOutAndRequestPaths),
     ("apply-contract sync-cache apply requires confirmation", ApplyContractSyncCacheApplyRequiresConfirmation),
     ("sync-cache apply requires preview result", SyncCacheApplyRequiresPreviewResult),
@@ -2269,13 +2270,64 @@ static async Task ApplyContractPrGateReportWritesStandardReport()
 
         var finalGateReport = Path.Combine(root, gateReportPath);
         AssertTrue(File.Exists(finalGateReport), "apply-contract should write the standard gate report path.");
+        AssertNoUtf8Bom(finalGateReport, "standard gate report");
         var gateJson = File.ReadAllText(finalGateReport);
         AssertTrue(gateJson.Contains("\"gitHead\""), "standard gate report should be a PrGateReport JSON object.");
         AssertTrue(!gateJson.Contains("\"prGateReport\""), "standard gate report should not wrap LifecycleContractResult.");
 
+        AssertNoUtf8Bom(resultPath, "lifecycle result");
         var resultJson = File.ReadAllText(resultPath);
         AssertTrue(resultJson.Contains("\"prGateReport\""), "lifecycle result should still contain the nested report.");
         AssertTrue(resultJson.Contains("\"gateReportPath\""), "lifecycle result should record the final report path.");
+    }
+    finally
+    {
+        Directory.SetCurrentDirectory(old);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, true);
+        }
+    }
+}
+
+static async Task CliMachineJsonOutputsAreUtf8WithoutBom()
+{
+    var root = Path.Combine(Path.GetTempPath(), "csforge-json-encoding-" + Guid.NewGuid().ToString("N"));
+    var old = Directory.GetCurrentDirectory();
+    try
+    {
+        Directory.CreateDirectory(root);
+        Directory.SetCurrentDirectory(root);
+        var requestPath = Path.Combine(root, "request.json");
+        var resultPath = Path.Combine(root, "Temp", "ConfigSheetForge", "desktop", "sync-cache.result.json");
+        var request = new LifecycleContractRequest
+        {
+            Operation = "pr-gate-report",
+            GateReportPath = Path.Combine("Temp", "ConfigSheetForge", "pr-gate-report.json"),
+            GateReport = new PrGateReport
+            {
+                Branch = "feature/config",
+                GitHead = "abc123",
+                MergeReview = new GateReviewState { Status = "approved" },
+                PortableSubset = new GateCheckState { Passed = true },
+                Triangulation = new GateCheckState { Passed = true },
+                SchemaReview = new GateReviewState { Status = "approved" }
+            }
+        };
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request));
+
+        var exitCode = await ConfigSheetForge.Cli.Program.Main(new[]
+        {
+            "apply-contract",
+            "--request",
+            requestPath,
+            "--out",
+            resultPath
+        });
+
+        AssertEqual("0", exitCode.ToString(), "CLI JSON encoding fixture should pass.");
+        AssertNoUtf8Bom(resultPath, "desktop lifecycle result");
+        AssertNoUtf8Bom(Path.Combine(root, "Temp", "ConfigSheetForge", "pr-gate-report.json"), "standard PR gate report");
     }
     finally
     {
@@ -3742,6 +3794,14 @@ static void AssertTrue(bool condition, string message)
     {
         throw new InvalidOperationException(message);
     }
+}
+
+static void AssertNoUtf8Bom(string path, string message)
+{
+    AssertTrue(File.Exists(path), message + " should exist.");
+    var bytes = File.ReadAllBytes(path);
+    var hasBom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+    AssertTrue(!hasBom, message + " must be UTF-8 without BOM.");
 }
 
 static void AssertEqual(string expected, string actual, string message)
