@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.41
+
+- Desktop now consumes the `--out` result file immediately after a background `sync-cache` task completes. If the task snapshot misses `resultJson`, the UI rereads `Temp/ConfigSheetForge/desktop/sync-cache.result.json`, normalizes it, and advances to “写入本地 cache” without requiring a restart.
+- Sync result parsing failures now surface as Chinese UI errors instead of silently falling back to “还没有同步预览”.
+- Added regression tests for completed task result rereads and UI smoke markers so the sync-cache task completion path cannot bypass `normalizeSyncCacheResult` again.
+
 ## 0.4.40
 
 - Unity thin bridge / Legacy window no longer hardcode the UPM version in C# source. Version display, Desktop install URLs, compatibility checks and bridge session metadata now read Unity PackageManager package metadata at runtime.

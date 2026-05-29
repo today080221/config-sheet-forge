@@ -5,9 +5,11 @@ import { describe, expect, it } from "vitest";
 import {
   decidePrMerge,
   decideSyncImport,
+  desktopResultNameForOperation,
   normalizeSyncCacheResult,
   ordinaryToolText,
   primaryToolAction,
+  shouldReadDesktopResultAfterTask,
   shouldShowBotSecretForm,
   summarizeLifecycleResult,
   syncResultSummaryLine,
@@ -128,6 +130,13 @@ describe("Desktop workflow state machine", () => {
     for (const leak of ["{", "}", "task-", "PID", "stack trace", "System.IO", "config-sheet-forge sync-cache"]) {
       expect(summary).not.toContain(leak);
     }
+  });
+
+  it("completed sync-cache task rereads desktop result when task snapshot has no result json", () => {
+    expect(desktopResultNameForOperation("sync-cache-dry-run")).toBe("sync-cache");
+    expect(shouldReadDesktopResultAfterTask("sync-cache-dry-run", 0, "")).toBe(true);
+    expect(shouldReadDesktopResultAfterTask("sync-cache-dry-run", 1, "")).toBe(false);
+    expect(shouldReadDesktopResultAfterTask("sync-cache-dry-run", 0, JSON.stringify(projectNeedsUpdateFixture()))).toBe(false);
   });
 
   it("routes upToDate sync preview to Unity import instead of writing cache", () => {

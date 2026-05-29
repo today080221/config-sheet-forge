@@ -294,6 +294,37 @@ export function syncPreviewFingerprint(result: LifecycleResultLike | null | unde
     || "";
 }
 
+export function desktopResultNameForOperation(operation: string): string {
+  switch (operation) {
+    case "registry-status":
+      return "registry-status";
+    case "sync-status":
+      return "sync-status";
+    case "sync-cache-dry-run":
+      return "sync-cache";
+    case "sync-cache-apply":
+      return "sync-cache-apply";
+    case "repair-cache-dialect":
+      return "repair-cache-dialect";
+    case "compare-merge":
+      return "compare-merge";
+    case "submit-merge-review":
+      return "submit-merge-review";
+    case "pr-gate-report":
+      return "pr-gate-report";
+    case "bootstrap-current-branch-from-target-dry-run":
+      return "bootstrap-current-branch-from-target";
+    case "new-table-dry-run":
+      return "new-table";
+    default:
+      return "";
+  }
+}
+
+export function shouldReadDesktopResultAfterTask(operation: string, exitCode: number, resultJson: string | undefined): boolean {
+  return exitCode === 0 && !resultJson?.trim() && Boolean(desktopResultNameForOperation(operation));
+}
+
 export function normalizeSyncCacheResult(result: LifecycleResultLike | null | undefined): NormalizedSyncCacheResult | null {
   if (!result) {
     return null;

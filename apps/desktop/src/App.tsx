@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   decideRecommendedScenario,
   decideWorkflow,
+  desktopResultNameForOperation,
   getScenario,
   humanToolStatus,
   normalizeSyncCacheResult,
@@ -11,6 +12,7 @@ import {
   scenarios,
   secondaryToolActions,
   shouldShowBotSecretForm,
+  shouldReadDesktopResultAfterTask,
   summarizeLifecycleResult,
   syncPreviewFingerprint,
   syncWritableTableCount,
@@ -618,11 +620,41 @@ export function App() {
     }
   }, [activeTask, botAppId, botSecret, projectRoot, runtimeAvailable, snapshot?.projectRoot, startToolCheckTask, waitForTask]);
 
+  const readResultAfterTaskCompletion = useCallback(async (operation: string, result: CliRunResult): Promise<CliRunResult> => {
+    if (!runtimeAvailable || !shouldReadDesktopResultAfterTask(operation, result.exitCode, result.resultJson)) {
+      return result;
+    }
+
+    const name = desktopResultNameForOperation(operation);
+    try {
+      const cached = await invoke<CliRunResult>("read_desktop_result", {
+        projectRoot: snapshot?.projectRoot || projectRoot,
+        name
+      });
+      if (cached.resultJson?.trim()) {
+        return {
+          ...result,
+          resultPath: cached.resultPath || result.resultPath,
+          resultJson: cached.resultJson
+        };
+      }
+
+      setError(`任务已完成，但没有读取到 result JSON：${cached.resultPath || result.resultPath || name}。请打开 Debug 查看日志，或重新运行预览。`);
+    } catch (ex) {
+      setError(`任务已完成，但读取 result 文件失败：${ordinaryErrorText(ex)}。请打开 Debug 查看日志，或重新运行预览。`);
+    }
+
+    return result;
+  }, [projectRoot, runtimeAvailable, snapshot?.projectRoot]);
+
   const applyResult = useCallback((operation: string, result: CliRunResult) => {
     setLastResult(result);
     const parsed = parseResultJson(result.resultJson);
     setLastResultParsed(parsed);
     if (!parsed) {
+      if (result.exitCode === 0 && desktopResultNameForOperation(operation)) {
+        setError(`任务已完成，但结果文件没有成功解析：${result.resultPath || desktopResultNameForOperation(operation)}。请打开 Debug 查看日志，或重新运行预览。`);
+      }
       return;
     }
 
@@ -630,6 +662,11 @@ export function App() {
     if (operation === "sync-status" || operation === "registry-status") {
       setLastQuickStatus(parsed);
     } else if (operation === "sync-cache-dry-run" || (parsed.operation === "sync-cache" && syncResult?.dryRun)) {
+      if (!syncResult) {
+        setError("同步预览完成，但 result 不是有效的 sync-cache 结果。请打开 Debug 查看 result JSON。");
+        return;
+      }
+
       setLastSyncPreview(parsed);
       setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "sync-cache"));
     } else if (operation === "sync-cache-apply" || (parsed.operation === "sync-cache" && !syncResult?.dryRun)) {
@@ -808,13 +845,14 @@ export function App() {
         args
       });
       const task = await waitForTask(initial);
-      const result = taskToCliResult(task);
+      let result = taskToCliResult(task);
       if (task.status === "canceled") {
         setLastResult(result);
         setLastResultParsed(null);
         return;
       }
 
+      result = await readResultAfterTaskCompletion(operation, result);
       applyResult(operation, result);
     } catch (ex) {
       setError(ordinaryErrorText(ex));
@@ -829,6 +867,7 @@ export function App() {
     lastSyncPreviewPath,
     newTable,
     projectRoot,
+    readResultAfterTaskCompletion,
     runtimeAvailable,
     sendUnityBridgeCommand,
     snapshot,

@@ -28,6 +28,8 @@ assert(app.includes("visibleResult.commandLine"), "Debug mode must expose full c
 assert(app.includes("visibleResult.resultJson"), "Debug mode must expose result JSON");
 assert(app.includes("activeTask?.progressLog"), "Debug mode must tail progress ndjson while a task is running");
 assert(app.includes("read_desktop_result"), "Desktop must restore workflow state from previous result files");
+assert(app.includes("readResultAfterTaskCompletion"), "Desktop must consume result JSON immediately after a background task completes");
+assert(app.includes("shouldReadDesktopResultAfterTask"), "Desktop must reread --out result files when TaskSnapshot misses resultJson");
 assert(app.includes("normalizeSyncCacheResult"), "Desktop must normalize sync-cache results before driving workflow state");
 assert(workflow.includes("syncResultSummaryLine"), "Planner result summary must come from normalized sync-cache result");
 assert(workflow.includes("normalizeSyncCacheResult"), "Workflow state must expose one sync-cache normalize layer");
