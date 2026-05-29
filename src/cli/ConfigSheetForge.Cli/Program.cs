@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO.Compression;
+using System.Reflection;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -32,6 +33,12 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (args.Length > 0 && args[0] is "--version" or "-v" or "version")
+        {
+            Console.WriteLine(GetCliVersion());
+            return 0;
+        }
+
         if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
         {
             PrintHelp();
@@ -88,6 +95,14 @@ public static class Program
 
             return 1;
         }
+    }
+
+    private static string GetCliVersion()
+    {
+        var assembly = Assembly.GetExecutingAssembly();
+        return assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? assembly.GetName().Version?.ToString()
+            ?? "0.0.0-dev";
     }
 
     private static async Task<int> InitAsync(ParsedArgs args)
@@ -2836,6 +2851,7 @@ public static class Program
 
     private static async Task EmitLifecycleResultAsync(ParsedArgs args, LifecycleContractResult result)
     {
+        PrepareLifecycleResultForOutput(result);
         var outPath = args.Get("out", "");
         if (!string.IsNullOrWhiteSpace(outPath))
         {
@@ -2844,6 +2860,39 @@ public static class Program
         else
         {
             Console.WriteLine(JsonSerializer.Serialize(result, JsonOptions));
+        }
+    }
+
+    private static void PrepareLifecycleResultForOutput(LifecycleContractResult result)
+    {
+        if (result == null)
+        {
+            return;
+        }
+
+        var summary = result.SyncCacheSummary;
+        var hasMeaningfulSyncSummary =
+            summary != null &&
+            (summary.Tables.Count > 0 ||
+             summary.ChangedTables.Count > 0 ||
+             summary.MissingCacheTables.Count > 0 ||
+             summary.UpToDateTables.Count > 0 ||
+             summary.BlockedTables.Count > 0 ||
+             summary.ResolvedOnlineTables.Count > 0 ||
+             !string.IsNullOrWhiteSpace(summary.NextAction) ||
+             !string.IsNullOrWhiteSpace(summary.PreviewFingerprint) ||
+             (!string.IsNullOrWhiteSpace(summary.CacheStatus) && !string.Equals(summary.CacheStatus, "unknown", StringComparison.OrdinalIgnoreCase)));
+
+        if (SyncCacheOperationRequested(result.Operation) ||
+            string.Equals(result.Operation, "sync-status", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(result.Operation, "repair-cache-dialect", StringComparison.OrdinalIgnoreCase) ||
+            hasMeaningfulSyncSummary)
+        {
+            result.SyncCacheSummary ??= new SyncCacheSummary();
+            var previewFingerprint = FirstNonEmpty(result.SyncCacheSummary.PreviewFingerprint, result.PreviewFingerprint, result.RequestFingerprint);
+            result.SyncCacheSummary.PreviewFingerprint = previewFingerprint;
+            result.PreviewFingerprint = previewFingerprint;
+            MirrorSyncCacheSummary(result);
         }
     }
 

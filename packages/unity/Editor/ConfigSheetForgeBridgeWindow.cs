@@ -14,7 +14,7 @@ namespace ConfigSheetForge.Unity.Editor
 {
     public sealed class ConfigSheetForgeBridgeWindow : EditorWindow
     {
-        internal const string PackageVersion = "v0.4.36";
+        internal static string PackageVersion => ConfigSheetForgePackageVersion.TagVersion;
         private const string DesktopPathEnv = "CONFIG_SHEET_FORGE_DESKTOP";
         private const string SourceCheckoutEnv = "CONFIG_SHEET_FORGE_ROOT";
         private const string DesktopInstallPathPrefKey = "ConfigSheetForge.Desktop.InstallPath";
@@ -358,14 +358,23 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void OpenLifecycleDirectory()
         {
-            var dir = Path.Combine(_projectRoot, "Temp", "ConfigSheetForge");
-            if (Directory.Exists(dir))
+            if (string.IsNullOrWhiteSpace(_projectRoot) || !Directory.Exists(_projectRoot))
             {
-                EditorUtility.RevealInFinder(dir);
+                _recentSummary = "还没有识别到项目目录，暂时不能打开结果目录。";
                 return;
             }
 
-            _recentSummary = "还没有找到 Temp/ConfigSheetForge。请先在 Desktop 或 Legacy 中运行一次流程。";
+            var dir = Path.Combine(_projectRoot, "Temp", "ConfigSheetForge", "desktop");
+            try
+            {
+                Directory.CreateDirectory(dir);
+                EditorUtility.RevealInFinder(dir);
+                _recentSummary = "已打开 Desktop 结果目录：" + dir;
+            }
+            catch (Exception ex)
+            {
+                _recentSummary = "无法创建或打开 Desktop 结果目录：" + ex.Message;
+            }
         }
 
         private void EnsureBridgeSessionDirectory()

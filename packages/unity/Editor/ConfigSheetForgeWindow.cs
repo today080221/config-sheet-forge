@@ -15,7 +15,7 @@ namespace ConfigSheetForge.Unity.Editor
     public sealed class ConfigSheetForgeWindow : EditorWindow
     {
         private static readonly string[] Tabs = { "状态", "配表", "合并", "PR 检查", "输出" };
-        private const string PackageVersion = "v0.4.36";
+        private static string PackageVersion => ConfigSheetForgePackageVersion.TagVersion;
         private const int StatusTab = 0;
         private const int TablesTab = 1;
         private const int MergeTab = 2;
@@ -3842,17 +3842,17 @@ namespace ConfigSheetForge.Unity.Editor
                 EditorGUIUtility.systemCopyBuffer = BuildCopyOutput();
             }
 
-            GUI.enabled = File.Exists(_lastResultPath);
+            GUI.enabled = !string.IsNullOrWhiteSpace(_lastResultPath);
             if (GUILayout.Button(new GUIContent("打开 result", "在文件浏览器中显示最近一次 lifecycle result。"), GUILayout.Width(82), GUILayout.Height(22)))
             {
-                EditorUtility.RevealInFinder(_lastResultPath);
+                RevealResultOrDirectory(_lastResultPath);
             }
             GUI.enabled = true;
 
-            GUI.enabled = Directory.Exists(_lastLifecycleDir);
+            GUI.enabled = true;
             if (GUILayout.Button(new GUIContent("打开目录", "打开 Temp/ConfigSheetForge/unity-lifecycle。"), GUILayout.Width(76), GUILayout.Height(22)))
             {
-                EditorUtility.RevealInFinder(_lastLifecycleDir);
+                RevealLifecycleDirectory(_lastLifecycleDir);
             }
             GUI.enabled = true;
 
@@ -3887,17 +3887,17 @@ namespace ConfigSheetForge.Unity.Editor
                 EditorGUIUtility.systemCopyBuffer = BuildCopyOutput();
             }
 
-            GUI.enabled = File.Exists(_lastResultPath);
+            GUI.enabled = !string.IsNullOrWhiteSpace(_lastResultPath);
             if (GUILayout.Button(new GUIContent("打开 result 文件", "在文件浏览器中显示最近一次 lifecycle result。"), GUILayout.Width(116)))
             {
-                EditorUtility.RevealInFinder(_lastResultPath);
+                RevealResultOrDirectory(_lastResultPath);
             }
             GUI.enabled = true;
 
-            GUI.enabled = Directory.Exists(_lastLifecycleDir);
+            GUI.enabled = true;
             if (GUILayout.Button(new GUIContent("打开 lifecycle 目录", "打开 Temp/ConfigSheetForge/unity-lifecycle。"), GUILayout.Width(136)))
             {
-                EditorUtility.RevealInFinder(_lastLifecycleDir);
+                RevealLifecycleDirectory(_lastLifecycleDir);
             }
             GUI.enabled = true;
 
@@ -6994,6 +6994,64 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return path;
+        }
+
+        private void RevealResultOrDirectory(string resultPath)
+        {
+            if (!string.IsNullOrWhiteSpace(resultPath) && File.Exists(resultPath))
+            {
+                EditorUtility.RevealInFinder(resultPath);
+                return;
+            }
+
+            var directory = string.IsNullOrWhiteSpace(resultPath)
+                ? ""
+                : Path.GetDirectoryName(resultPath);
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                directory = FirstNonEmpty(_lastLifecycleDir, GetUnityLifecycleDirectory(FindProjectRoot()));
+            }
+
+            if (TryRevealDirectory(directory, "还没有生成 result 文件，请先运行预览。"))
+            {
+                _resultSummary = "还没有生成 result 文件，请先运行预览。已打开结果目录。";
+            }
+        }
+
+        private void RevealLifecycleDirectory(string lifecycleDirectory)
+        {
+            var directory = FirstNonEmpty(lifecycleDirectory, GetUnityLifecycleDirectory(FindProjectRoot()));
+            TryRevealDirectory(directory, "还没有生成结果目录，已为下一次预览创建临时目录。");
+        }
+
+        private bool TryRevealDirectory(string directory, string successMessage)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(directory))
+                {
+                    _resultSummary = "还没有识别到可打开的目录。请先运行预览。";
+                    Repaint();
+                    return false;
+                }
+
+                Directory.CreateDirectory(directory);
+                EditorUtility.RevealInFinder(directory);
+                if (!string.IsNullOrWhiteSpace(successMessage))
+                {
+                    _resultSummary = successMessage;
+                }
+
+                Repaint();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _resultSummary = "无法创建或打开结果目录：" + ex.Message;
+                AppendOutputLine(_resultSummary);
+                Repaint();
+                return false;
+            }
         }
 
         private static void RevealPath(string path)

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.40
+
+- Unity thin bridge / Legacy window no longer hardcode the UPM version in C# source. Version display, Desktop install URLs, compatibility checks and bridge session metadata now read Unity PackageManager package metadata at runtime.
+- Added release guards so Unity package.json, Desktop package.json, Tauri config, Cargo.toml and Desktop release tag stay aligned, and so stale C# `PackageVersion = "vX.Y.Z"` strings cannot ship again.
+- CLI now mirrors `syncCacheSummary` to top-level lifecycle result fields at the final output boundary, covering `apply-contract` paths as well as direct `sync-cache` commands.
+- “Open result / lifecycle directory” actions now create safe `Temp/ConfigSheetForge/...` directories before opening and report Chinese in-window errors instead of surfacing native Windows “Location is not available” dialogs.
+
 ## 0.4.39
 
 - Desktop 新增唯一的 `normalizeSyncCacheResult` 状态层，所有同步向导按钮、最近结果摘要和重启恢复都从同一份 normalized result 驱动，不再散读 raw JSON。

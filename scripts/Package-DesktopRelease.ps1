@@ -22,6 +22,7 @@ $tauriRoot = Join-Path $desktopRoot "src-tauri"
 $packageJsonPath = Join-Path $desktopRoot "package.json"
 $tauriConfigPath = Join-Path $tauriRoot "tauri.conf.json"
 $cargoTomlPath = Join-Path $tauriRoot "Cargo.toml"
+$unityPackageJsonPath = Join-Path $repoRoot "packages/unity/package.json"
 $cliProjectPath = Join-Path $repoRoot "src/cli/ConfigSheetForge.Cli/ConfigSheetForge.Cli.csproj"
 $releaseBuildRoot = Join-Path $repoRoot "obj/desktop-release"
 $releaseTauriConfigPath = Join-Path $releaseBuildRoot "tauri.conf.release.json"
@@ -54,6 +55,14 @@ function Assert-ContainsVersion([string]$Path, [string]$Needle, [string]$Name) {
 Assert-ContainsVersion $packageJsonPath "`"version`": `"$semver`"" "Desktop package.json"
 Assert-ContainsVersion $tauriConfigPath "`"version`": `"$semver`"" "Tauri config"
 Assert-ContainsVersion $cargoTomlPath "version = `"$semver`"" "Desktop Cargo.toml"
+Assert-ContainsVersion $unityPackageJsonPath "`"version`": `"$semver`"" "Unity package.json"
+$unityEditorSources = (Get-ChildItem (Join-Path $repoRoot "packages/unity/Editor") -Recurse -Filter *.cs | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n"
+if ($unityEditorSources -match "PackageVersion\s*=\s*`"v?\d+\.\d+\.\d+") {
+  throw "Unity C# must not hardcode PackageVersion. Read package metadata at runtime before releasing $Version."
+}
+if ($unityEditorSources -notlike "*FindForAssembly*" -or $unityEditorSources -notlike "*UnityEditor.PackageManager.PackageInfo*") {
+  throw "Unity C# release build must read PackageManager metadata for version display."
+}
 if (-not (Test-Path $desktopIcon)) {
   throw "Desktop Windows icon resource is missing: $desktopIcon"
 }
@@ -81,6 +90,11 @@ function Publish-SidecarCli {
     "-p:PublishTrimmed=false",
     "-p:DebugType=None",
     "-p:DebugSymbols=false",
+    "-p:Version=$semver",
+    "-p:AssemblyVersion=$semver.0",
+    "-p:FileVersion=$semver.0",
+    "-p:InformationalVersion=$semver",
+    "-p:IncludeSourceRevisionInInformationalVersion=false",
     "-o",
     $cliPublishDir
   ) $repoRoot
@@ -92,6 +106,11 @@ function Publish-SidecarCli {
   & $sidecarCliExe help | Out-Null
   if ($LASTEXITCODE -ne 0) {
     throw "Config Sheet Forge sidecar CLI smoke failed: $sidecarCliExe help"
+  }
+
+  $cliVersion = (& $sidecarCliExe --version).Trim()
+  if ($LASTEXITCODE -ne 0 -or $cliVersion -ne $semver) {
+    throw "Config Sheet Forge sidecar CLI version '$cliVersion' must match release $semver."
   }
 }
 

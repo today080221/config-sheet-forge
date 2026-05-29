@@ -39,6 +39,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("project config probe trusts live registry locators over empty project settings", () => RunSync(ProjectConfigProbeTrustsLiveRegistryLocatorsOverEmptyProjectSettings)),
     ("sync-cache dry-run summary drives next action", () => RunSync(SyncCacheDryRunSummaryDrivesNextAction)),
     ("sync-cache lifecycle result mirrors summary to top level", () => RunSync(SyncCacheLifecycleResultMirrorsSummaryToTopLevel)),
+    ("sync-cache emit output mirrors summary to top level", () => RunSync(SyncCacheEmitOutputMirrorsSummaryToTopLevel)),
     ("sync-status inspects local cache without online reads", SyncStatusInspectsLocalCacheWithoutOnlineReads),
     ("current branch bootstrap from target plans instead of seed", CurrentBranchBootstrapFromTargetPlansInsteadOfSeed),
     ("compare-merge dry-run hydrates workspaces and table scope", CompareMergeDryRunHydratesWorkspacesAndTableScope),
@@ -1040,6 +1041,43 @@ static void SyncCacheLifecycleResultMirrorsSummaryToTopLevel()
     AssertEqual("write-cache", result.NextAction, "Top-level nextAction should mirror syncCacheSummary.");
     AssertEqual("2", result.ChangedTables.Count.ToString(), "Top-level changedTables should mirror syncCacheSummary.");
     AssertEqual("2", result.Tables.Count.ToString(), "Top-level tables should mirror syncCacheSummary.");
+}
+
+static void SyncCacheEmitOutputMirrorsSummaryToTopLevel()
+{
+    var result = new LifecycleContractResult
+    {
+        Operation = "sync-cache",
+        DryRun = true,
+        Success = true,
+        RequestFingerprint = "fp-emit",
+        SyncCacheSummary = new SyncCacheSummary
+        {
+            CacheStatus = "needsUpdate",
+            CanApplyCache = true,
+            NextAction = "write-cache",
+            TableCount = 1
+        }
+    };
+    result.SyncCacheSummary.ChangedTables.Add("ItemsData");
+    result.SyncCacheSummary.Tables.Add(new SyncTableCacheStatus
+    {
+        TableId = "ItemsData",
+        DisplayName = "Items",
+        CacheStatus = "needsUpdate",
+        NeedsWriteCache = true
+    });
+
+    var method = typeof(ConfigSheetForge.Cli.Program).GetMethod("PrepareLifecycleResultForOutput", BindingFlags.NonPublic | BindingFlags.Static);
+    AssertTrue(method != null, "PrepareLifecycleResultForOutput should mirror syncCacheSummary before writing JSON.");
+    method!.Invoke(null, new object[] { result });
+
+    AssertEqual("fp-emit", result.PreviewFingerprint, "Emit preparation should preserve preview fingerprint fallback.");
+    AssertEqual("needsUpdate", result.CacheStatus, "Emit preparation should mirror cacheStatus.");
+    AssertEqual("true", result.CanApplyCache.ToString().ToLowerInvariant(), "Emit preparation should mirror canApplyCache.");
+    AssertEqual("write-cache", result.NextAction, "Emit preparation should mirror nextAction.");
+    AssertEqual("1", result.ChangedTables.Count.ToString(), "Emit preparation should mirror changedTables.");
+    AssertEqual("1", result.Tables.Count.ToString(), "Emit preparation should mirror tables.");
 }
 
 static async Task SyncStatusInspectsLocalCacheWithoutOnlineReads()

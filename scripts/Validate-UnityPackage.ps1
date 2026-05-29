@@ -141,6 +141,19 @@ if ($package.license -ne "Apache-2.0") {
   throw "Unity package license must be Apache-2.0"
 }
 
+$desktopPackage = Get-Content -Raw apps/desktop/package.json | ConvertFrom-Json
+$tauriConfig = Get-Content -Raw apps/desktop/src-tauri/tauri.conf.json | ConvertFrom-Json
+$cargoToml = Get-Content -Raw apps/desktop/src-tauri/Cargo.toml
+if ($package.version -ne $desktopPackage.version) {
+  throw "Unity package version '$($package.version)' must match Desktop package version '$($desktopPackage.version)'."
+}
+if ($package.version -ne $tauriConfig.version) {
+  throw "Unity package version '$($package.version)' must match Tauri version '$($tauriConfig.version)'."
+}
+if ($cargoToml -notmatch "version\s*=\s*`"$([regex]::Escape($package.version))`"") {
+  throw "Unity package version '$($package.version)' must match Desktop Cargo.toml."
+}
+
 $asmdefs = @(
   "packages/unity/Runtime/Core/ConfigSheetForge.Core.asmdef",
   "packages/unity/Editor/ConfigSheetForge.Editor.asmdef",
@@ -181,6 +194,15 @@ if ($portableStructures -notmatch "#if !UNITY_5_3_OR_NEWER") {
 $window = Get-Content -Raw packages/unity/Editor/ConfigSheetForgeWindow.cs
 $bridgeWindow = Get-Content -Raw packages/unity/Editor/ConfigSheetForgeBridgeWindow.cs
 $editorSources = (Get-ChildItem packages/unity/Editor -Recurse -Filter *.cs | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n"
+if ($editorSources -match "PackageVersion\s*=\s*`"v?\d+\.\d+\.\d+") {
+  throw "Unity C# must not hardcode a package version string. Read PackageManager metadata through ConfigSheetForgePackageVersion instead."
+}
+if ($editorSources -notlike "*FindForAssembly*" -or $editorSources -notlike "*UnityEditor.PackageManager.PackageInfo*") {
+  throw "Unity C# version display must read Unity PackageManager metadata at runtime."
+}
+if ($editorSources -match "v0\.4\.3[0-9]") {
+  throw "Unity C# source contains a stale release tag string; package version must not be hardcoded in Editor sources."
+}
 $requiredMenus = @(
   'MenuItem("Tools/Config Sheet Forge"',
   'MenuItem("Tools/Config Sheet Forge/打开同步窗口"',
