@@ -1,6 +1,6 @@
 [package]
 name = "config-sheet-forge-desktop"
-version = "0.4.43"
+version = "0.4.44"
 description = "Official Config Sheet Forge desktop workbench"
 authors = ["Config Sheet Forge contributors"]
 edition = "2021"

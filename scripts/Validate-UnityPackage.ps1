@@ -455,6 +455,12 @@ foreach ($requiredV443Marker in @("ConfigSheetForgeEditorApi.ImportUnityAssetsFr
   }
 }
 
+foreach ($requiredV444Marker in @("dialectOutdated", "repair-cache-dialect-apply", "当前 cache 类型行不适合 ExcelToSO 导入", "ExcelToSoCacheDialectRestoresJsonWithInferredTypeRow", "RepairCacheDialectScansStaleDimensionRightSideColumns")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeExcelToSoImporter.cs) + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV444Marker*") {
+    throw "Unity v0.4.44 cache dialect repair marker is missing: $requiredV444Marker"
+  }
+}
+
 if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
   throw "Unity bridge import-assets must not open the Legacy sync window."
 }

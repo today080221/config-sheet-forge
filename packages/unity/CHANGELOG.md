@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.44
+
+- 修复 `repair-cache-dialect` 漏检问题：项目未显式声明 `typeRow` 时，现在会按 ExcelToSO 常规布局推导“字段行下一行”为类型行；即使 xlsx 的 `dimension ref=A1` 失真，也会扫描实际 `sheetData` 单元格，能发现 `SkillsData!E2=json` 这类右侧类型列。
+- `sync-status` / `sync-cache dry-run` 现在区分 `dialectOutdated`：当 semantic/hash 已最新但 cache xlsx 类型行仍不能被 ExcelToSO 导入时，Desktop 推荐“修复 cache 类型行”，不会直接推荐“导入 Unity asset”。
+- `repair-cache-dialect --yes` 离线重写 `.config-sheet-forge/excel-cache/*.xlsx` 类型行后，会把下一步设为 `import-unity`；该操作不联网、不写飞书、不改旧 `Excel/`、不改 ProjectSettings。
+- Unity 导入前 preflight 文案改为“当前 cache 类型行不适合 ExcelToSO 导入”，并引导用户先在 Desktop 修复 cache 类型行。
+- 增加回归测试覆盖：`typeRow=-1`、`dimension=A1` 但右侧有 `json` 类型列、项目旧表风格 `string[]/float[]/int[]` 还原，以及 Desktop `dialectOutdated` 状态机。
+
 ## 0.4.43
 
 - Unity thin bridge 的“导入 Unity 配表资产”现在直接在 Unity Editor 进程内校验最新 sync-cache 状态，并调用 ExcelToSO `ImportByProfile(SourceOfTruthCache)`；Desktop `import-assets` bridge 命令不再打开 Legacy 完整窗口。

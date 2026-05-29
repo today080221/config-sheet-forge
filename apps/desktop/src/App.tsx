@@ -97,6 +97,7 @@ const operationLabels: Record<string, string> = {
   "sync-cache-dry-run": "完整同步预览",
   "sync-cache-apply": "写入本地 cache",
   "repair-cache-dialect": "修复 cache 类型行",
+  "repair-cache-dialect-apply": "修复 cache 类型行",
   "compare-merge": "生成合并预览",
   "submit-merge-review": "提交合并审查记录",
   "pr-gate-report": "运行 PR 检查",
@@ -204,6 +205,8 @@ function buildCommandArgs(
       return ["sync-cache", ...manifestArgs, "--yes", "--details", "--preview-result", previewResultPath, ...out("sync-cache-apply")];
     case "repair-cache-dialect":
       return ["repair-cache-dialect", ...manifestArgs, "--dry-run", "--details", ...out("repair-cache-dialect")];
+    case "repair-cache-dialect-apply":
+      return ["repair-cache-dialect", ...manifestArgs, "--yes", "--details", ...out("repair-cache-dialect")];
     case "compare-merge":
       return ["apply-contract", "--operation", "compare-merge", "--dry-run", "--details", ...out("compare-merge"), ...fallbackArgs];
     case "submit-merge-review":
@@ -240,6 +243,10 @@ function operationStage(operation: string) {
 
   if (operation.includes("sync-cache")) {
     return "读取注册中心 / 读取在线表 / 导出 xlsx / 三方一致性检查";
+  }
+
+  if (operation.includes("repair-cache-dialect")) {
+    return "读取 semantic cache / 推导 ExcelToSO 类型 / 重写 cache 类型行";
   }
 
   if (operation.includes("merge")) {
@@ -328,6 +335,10 @@ function taskSafetyText(operation: string, fallback: string) {
 
   if (operation === "sync-status" || operation === "registry-status") {
     return "快速状态检查只读取 registry 和本地 cache/hash/mtime，不导出 16 张 xlsx。";
+  }
+
+  if (operation === "repair-cache-dialect" || operation === "repair-cache-dialect-apply") {
+    return "只修复 .config-sheet-forge/excel-cache 的类型行，不联网、不写飞书、不改旧 Excel/ 或 ProjectSettings。";
   }
 
   if (operation.includes("dry-run") || operation.includes("preview")) {
@@ -672,6 +683,9 @@ export function App() {
     } else if (operation === "sync-cache-apply" || (parsed.operation === "sync-cache" && !syncResult?.dryRun)) {
       setLastSyncPreview(parsed);
       setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "sync-cache-apply"));
+    } else if (operation === "repair-cache-dialect" || operation === "repair-cache-dialect-apply" || parsed.operation === "repair-cache-dialect") {
+      setLastSyncPreview(parsed);
+      setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "repair-cache-dialect"));
     } else if (operation === "compare-merge") {
       setLastComparePreview(parsed);
       setLastComparePreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "compare-merge"));
@@ -690,6 +704,7 @@ export function App() {
       const entries: Array<[string, string]> = [
         ["sync-cache", "sync-cache-dry-run"],
         ["sync-cache-apply", "sync-cache-apply"],
+        ["repair-cache-dialect", "repair-cache-dialect"],
         ["compare-merge", "compare-merge"],
         ["pr-gate-report", "pr-gate-report"]
       ];
@@ -848,6 +863,13 @@ export function App() {
       }
 
       const confirmed = window.confirm("写入本地 cache 会更新 .config-sheet-forge/excel-cache 和 .config-sheet-forge/cache。\n\n不会写旧 Excel/，不会写飞书，不改 ProjectSettings。\n\nDesktop 会把最近一次 dry-run result 交给 CLI 校验，同输入通过后才写入。");
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    if (operation === "repair-cache-dialect-apply") {
+      const confirmed = window.confirm("修复 cache 类型行只会重写 .config-sheet-forge/excel-cache/*.xlsx 的第 2 行类型声明。\n\n不会联网，不写飞书，不改旧 Excel/，不改 ProjectSettings，也不改 semantic/hash。");
       if (!confirmed) {
         return;
       }
@@ -1223,6 +1245,11 @@ function resultNextAction(result: LifecycleResultLike | null, bridgeSessionDir: 
     return null;
   }
 
+  if (normalized.nextAction === "repair-cache-dialect" || normalized.cacheStatus === "dialectOutdated") {
+    const count = Math.max(1, syncWritableTableCount(normalized) || normalized.tableCount);
+    return { operation: "repair-cache-dialect-apply", label: `修复 cache 类型行（${count} 张）` };
+  }
+
   if (result?.operation === "sync-status" || result?.operation === "registry-status") {
     return { operation: "sync-cache-dry-run", label: "完整同步预览" };
   }
@@ -1248,10 +1275,11 @@ function SyncTableSummary(props: { result: LifecycleResultLike }) {
   }
 
   const tables = summary.tables || [];
-  const changed = syncWritableTableCount(summary);
+  const dialect = summary.tables.filter((table) => (table.cacheStatus || "").toLowerCase() === "dialectoutdated").length;
+  const changed = summary.cacheStatus === "dialectOutdated" ? 0 : syncWritableTableCount(summary);
   return (
     <div className="sync-table-summary">
-      <p>{summary.tableCount || tables.length || 0} 张表，{changed} 张需要更新 / {(summary.upToDateTables || []).length} 张已最新 / {(summary.blockedTables || []).length} 张阻断。</p>
+      <p>{summary.tableCount || tables.length || 0} 张表，{changed} 张需要更新 / {dialect} 张需修复类型行 / {(summary.upToDateTables || []).length} 张已最新 / {(summary.blockedTables || []).length} 张阻断。</p>
       {tables.length > 0 ? (
         <div className="mini-table">
           {tables.slice(0, 24).map((table) => (
@@ -1275,6 +1303,8 @@ function humanCacheStatus(status?: string) {
       return "需写 cache";
     case "missingcache":
       return "缺 cache";
+    case "dialectoutdated":
+      return "需修复类型行";
     case "blocked":
       return "阻断";
     default:

@@ -83,6 +83,39 @@ function projectNeedsUpdateFixture(): LifecycleResultLike {
   };
 }
 
+function dialectOutdatedFixture(): LifecycleResultLike {
+  return {
+    schemaVersion: "config-sheet-forge.lifecycle/v1",
+    operation: "sync-status",
+    dryRun: true,
+    success: true,
+    requestFingerprint: "fp-dialect",
+    previewFingerprint: "fp-dialect",
+    cacheStatus: "dialectOutdated",
+    nextAction: "repair-cache-dialect",
+    canApplyCache: false,
+    syncCacheSummary: {
+      cacheStatus: "dialectOutdated",
+      canApplyCache: false,
+      nextAction: "repair-cache-dialect",
+      previewFingerprint: "fp-dialect",
+      tableCount: 16,
+      changedTables: ["SkillsData"],
+      missingCacheTables: [],
+      upToDateTables: tableIds.slice(1),
+      blockedTables: [],
+      triangulationFailedCount: 0,
+      tables: tableIds.map((tableId, index) => ({
+        tableId,
+        displayName: tableId,
+        cacheStatus: index === 0 ? "dialectOutdated" : "upToDate",
+        needsWriteCache: false,
+        blockers: index === 0 ? ["cache 类型行需要修复"] : []
+      }))
+    }
+  };
+}
+
 describe("Desktop workflow state machine", () => {
   it("normalizes sync-cache result from syncCacheSummary when top-level cacheStatus is null", () => {
     const normalized = normalizeSyncCacheResult(projectNeedsUpdateFixture());
@@ -150,6 +183,7 @@ describe("Desktop workflow state machine", () => {
 
   it("completed sync-cache task rereads desktop result when task snapshot has no result json", () => {
     expect(desktopResultNameForOperation("sync-cache-dry-run")).toBe("sync-cache");
+    expect(desktopResultNameForOperation("repair-cache-dialect-apply")).toBe("repair-cache-dialect");
     expect(shouldReadDesktopResultAfterTask("sync-cache-dry-run", 0, "")).toBe(true);
     expect(shouldReadDesktopResultAfterTask("sync-cache-dry-run", 1, "")).toBe(false);
     expect(shouldReadDesktopResultAfterTask("sync-cache-dry-run", 0, JSON.stringify(projectNeedsUpdateFixture()))).toBe(false);
@@ -164,6 +198,20 @@ describe("Desktop workflow state machine", () => {
     expect(decision.primaryOperation).toBe("unity-import");
     expect(decision.primaryLabel).toBe("导入 Unity 配表资产");
     expect(decision.programSummary).toContain("SourceOfTruthCache");
+  });
+
+  it("routes dialectOutdated cache to offline repair instead of Unity import", () => {
+    const fixture = dialectOutdatedFixture();
+    const normalized = normalizeSyncCacheResult(fixture);
+    const decision = decideSyncImport({ lastSyncPreview: fixture, bridgeSessionDir: "Library/ConfigSheetForge/DesktopBridge/session" });
+
+    expect(normalized?.cacheStatus).toBe("dialectOutdated");
+    expect(normalized?.nextAction).toBe("repair-cache-dialect");
+    expect(normalized?.canApplyCache).toBe(false);
+    expect(decision.primaryOperation).toBe("repair-cache-dialect-apply");
+    expect(decision.primaryLabel).toContain("修复 cache 类型行");
+    expect(decision.primaryLabel).not.toContain("导入 Unity");
+    expect(summarizeLifecycleResult(fixture)).toContain("修复 cache 类型行");
   });
 
   it("summarizes direct Unity import result for planner view", () => {

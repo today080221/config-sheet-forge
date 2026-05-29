@@ -38,6 +38,8 @@ Legacy 窗口仍采用任务型 Dashboard：第一次打开会提示“飞书在
 
 从 0.4.36 开始，Desktop 的长任务使用后台 task runner。`sync-cache`、`compare-merge`、`pr-gate`、`doctor`、`gh auth`、`lark-cli doctor` 都不会在 Tauri invoke 里同步等待；窗口应能继续 repaint、切换视图、展开 Debug，并通过 `取消` 终止 Windows 进程树。
 
+从 0.4.44 开始，导入 Unity asset 前会额外确认 cache xlsx 类型行是否真能被 ExcelToSO 导入。若 semantic/hash 已最新但 `.config-sheet-forge/excel-cache` 里仍有 `json/integer/number` 等 canonical 类型，Desktop 会推荐 `修复 cache 类型行`；Unity preflight 会用中文提示“当前 cache 类型行不适合 ExcelToSO 导入”，不会直接弹 ExcelToSO 英文错误。
+
 Legacy 完整窗口包含：
 
 - `状态`：任务型首页，展示推荐下一步、策划改表/新建配表/合并 PR 流程卡、当前状态卡和安全说明；doctor、CLI、adapter、复制命令等放在“高级诊断”。

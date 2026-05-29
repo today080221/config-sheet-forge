@@ -128,9 +128,9 @@ export function parseLifecycleResultJson(text: string | undefined): LifecycleRes
   }
 }
 
-export type NormalizedSyncCacheStatus = "upToDate" | "needsUpdate" | "missingCache" | "blocked" | "unknown";
+export type NormalizedSyncCacheStatus = "upToDate" | "needsUpdate" | "missingCache" | "dialectOutdated" | "blocked" | "unknown";
 
-export type NormalizedSyncCacheNextAction = "write-cache" | "import-unity" | "fix-blocker" | "run-pr-gate" | "preview-sync";
+export type NormalizedSyncCacheNextAction = "write-cache" | "repair-cache-dialect" | "import-unity" | "fix-blocker" | "run-pr-gate" | "preview-sync";
 
 export type NormalizedSyncCacheResult = {
   success: boolean;
@@ -265,6 +265,9 @@ function canonicalCacheStatus(value: unknown): NormalizedSyncCacheStatus {
       return "needsUpdate";
     case "missingcache":
       return "missingCache";
+    case "dialectoutdated":
+    case "cachedialectoutdated":
+      return "dialectOutdated";
     case "blocked":
       return "blocked";
     default:
@@ -281,6 +284,11 @@ function normalizeSyncNextAction(value: unknown): NormalizedSyncCacheNextAction 
     case "import-unity":
     case "importunity":
       return "import-unity";
+    case "repair-cache-dialect":
+    case "repaircachedialect":
+    case "repair-dialect":
+    case "repairdialect":
+      return "repair-cache-dialect";
     case "fix-blocker":
     case "fixblocker":
       return "fix-blocker";
@@ -331,6 +339,7 @@ export function desktopResultNameForOperation(operation: string): string {
     case "sync-cache-apply":
       return "sync-cache-apply";
     case "repair-cache-dialect":
+    case "repair-cache-dialect-apply":
       return "repair-cache-dialect";
     case "compare-merge":
       return "compare-merge";
@@ -396,6 +405,10 @@ export function normalizeSyncCacheResult(result: LifecycleResultLike | null | un
     if (tableStatus === "blocked" && !blockedTables.includes(table.tableId)) {
       blockedTables.push(table.tableId);
     }
+
+    if (tableStatus === "dialectOutdated" && !changedTables.includes(table.tableId)) {
+      changedTables.push(table.tableId);
+    }
   }
 
   const explicitNextAction = normalizeSyncNextAction(result.nextAction || summary.nextAction);
@@ -418,6 +431,8 @@ export function normalizeSyncCacheResult(result: LifecycleResultLike | null | un
   } else if (nextAction === "preview-sync") {
     if (cacheStatus === "needsUpdate" || cacheStatus === "missingCache") {
       nextAction = "write-cache";
+    } else if (cacheStatus === "dialectOutdated") {
+      nextAction = "repair-cache-dialect";
     } else if (cacheStatus === "upToDate") {
       nextAction = "import-unity";
     }
@@ -425,6 +440,7 @@ export function normalizeSyncCacheResult(result: LifecycleResultLike | null | un
 
   const canApplyFromResult = Boolean(result.canApplyCache ?? summary.canApplyCache);
   const canApplyCache = cacheStatus !== "blocked"
+    && cacheStatus !== "dialectOutdated"
     && (canApplyFromResult || nextAction === "write-cache" || cacheStatus === "needsUpdate" || cacheStatus === "missingCache");
 
   if (canApplyCache && nextAction !== "write-cache" && (cacheStatus === "needsUpdate" || cacheStatus === "missingCache")) {
@@ -480,6 +496,10 @@ export function syncResultSummaryLine(result: LifecycleResultLike | null | undef
 
   if (normalized.nextAction === "write-cache") {
     return `预览通过，${syncWritableTableCount(normalized) || normalized.tableCount || "若干"} 张表需要写入 cache，下一步：写入本地 cache。`;
+  }
+
+  if (normalized.nextAction === "repair-cache-dialect" || normalized.cacheStatus === "dialectOutdated") {
+    return `cache 内容已最新，但 ${syncWritableTableCount(normalized) || normalized.tableCount || "若干"} 张表的类型行需要修复，下一步：修复 cache 类型行。`;
   }
 
   if (normalized.nextAction === "import-unity" || normalized.cacheStatus === "upToDate") {
@@ -674,6 +694,22 @@ export function decideSyncImport(state: WorkflowState): WorkflowDecision {
         ...(normalized?.humanReadableFailures ?? [])
       ],
       debugHints: ["blockedTables", "attemptedRange", "finalRange", "syncCacheSummary"]
+    };
+  }
+
+  if (status === "dialectOutdated" || normalized.nextAction === "repair-cache-dialect") {
+    const count = Math.max(1, changedCount || tableCount);
+    return {
+      ...base,
+      conclusion: "cache 内容已最新，但类型行需要修复",
+      nextStep: "先离线修复 cache xlsx 的 ExcelToSO 类型行，再导入 Unity。",
+      primaryLabel: `修复 cache 类型行（${count} 张）`,
+      primaryOperation: "repair-cache-dialect-apply",
+      primaryDisabled: false,
+      safety: "只重写 .config-sheet-forge/excel-cache/*.xlsx 的类型行，不联网、不写飞书、不改旧 Excel/ 或 ProjectSettings。",
+      programSummary: "调用 repair-cache-dialect --yes；根据 semantic cache、project schema/originalType 和旧 Excel 类型行把 json/integer/number 转成 ExcelToSO dialect。",
+      steps: syncSteps("apply"),
+      warnings: ["cache semantic/hash 已最新，但物理 xlsx 类型行仍含 json/integer/number 等 ExcelToSO 不能导入的 token。"]
     };
   }
 

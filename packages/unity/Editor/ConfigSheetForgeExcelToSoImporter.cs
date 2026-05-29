@@ -194,19 +194,37 @@ namespace ConfigSheetForge.Unity.Editor
 
                     var cell = ToColumnName(i) + (Math.Max(0, typeRow) + 1).ToString(CultureInfo.InvariantCulture);
                     preflight.Ready = false;
-                    preflight.BlockingCells.Add(FirstNonEmpty(item.TableId, Path.GetFileNameWithoutExtension(item.CacheXlsxPath)) + "!" + cell + "=" + token);
+                    preflight.BlockingCells.Add(FirstNonEmpty(item.TableId, Path.GetFileNameWithoutExtension(item.CacheXlsxPath)) + "!" + cell + "=" + token + SuggestExcelToSoType(token));
                 }
             }
 
             if (!preflight.Ready)
             {
                 preflight.ShortStatus = "cache 类型需要处理";
-                preflight.Message = "当前 cache xlsx 中还有 ExcelToSO 不能直接导入的字段类型：" + string.Join(", ", preflight.BlockingCells.Take(12)) +
+                preflight.Message = "当前 cache 类型行不适合 ExcelToSO 导入：" + string.Join(", ", preflight.BlockingCells.Take(12)) +
                                     (preflight.BlockingCells.Count > 12 ? " ..." : "") +
-                                    "\n请先重新运行 sync-cache apply 生成新版 cache；如果字段类型是 json，请在 project config 或 adapter schema 中明确声明 excelToSoType/originalType，例如 int[]、float[]、string[] 或 string。";
+                                    "\n请先在 Config Sheet Forge Desktop 点击“修复 cache 类型行”。它会根据 project config/adapter schema 的 excelToSoType、seed/import 保存的 originalType，或旧 Excel 类型行，把 json 还原为 int[]、float[]、string[] 或 string。";
             }
 
             return preflight;
+        }
+
+        private static string SuggestExcelToSoType(string token)
+        {
+            var normalized = (token ?? "").Trim().ToLowerInvariant();
+            switch (normalized)
+            {
+                case "json":
+                    return "（建议：先用 Desktop 修复为 int[] / float[] / string[] / string）";
+                case "date":
+                case "datetime":
+                case "date_time":
+                case "timestamp":
+                case "enum":
+                    return "（建议：在 schema 中明确 ExcelToSO 可导入类型，例如 string）";
+                default:
+                    return "（建议：修复为 ExcelToSO 支持的类型）";
+            }
         }
 
         private static Type FindApiType()

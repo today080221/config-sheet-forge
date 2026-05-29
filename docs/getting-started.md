@@ -24,6 +24,8 @@ Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本
 
 从 0.4.38 开始，完整同步预览成功后 Desktop 会自动进入正确下一步：本地 cache 需要更新时显示“写入本地 cache”，cache 已最新时显示“导入 Unity asset”，被阻断时只显示修复建议。结果文件会被 Desktop 自动恢复，重开应用也不会回到“还没有同步预览”。
 
+从 0.4.44 开始，如果 cache 的 semantic/hash 已最新，但 xlsx 第 2 行仍有 `json/integer/number` 等 ExcelToSO 不能直接导入的类型，Desktop 不会让你继续导入 Unity，而是提示“修复 cache 类型行”。这一步只改 `.config-sheet-forge/excel-cache` 里的生成 cache，不联网、不写飞书、不改旧 `Excel/`。
+
 ## 安装要求
 
 - .NET 8 SDK 或更新版本，用于 CLI。

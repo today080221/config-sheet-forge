@@ -611,8 +611,17 @@ public static class Program
                 else if (cacheState.Changed)
                 {
                     summary.ChangedTables.Add(table.Id);
-                    tableStatus.CacheStatus = writeFormalCache ? "upToDate" : "needsUpdate";
-                    tableStatus.NeedsWriteCache = !writeFormalCache;
+                    if (!writeFormalCache && cacheState.DialectOutdated && string.Equals(cacheState.ExistingHash, hash, StringComparison.Ordinal))
+                    {
+                        tableStatus.CacheStatus = "dialectOutdated";
+                        tableStatus.NeedsWriteCache = false;
+                        tableStatus.Blockers.Add("cache xlsx 类型行仍是 portable/canonical dialect，导入 Unity 前需要先修复为 ExcelToSO dialect。");
+                    }
+                    else
+                    {
+                        tableStatus.CacheStatus = writeFormalCache ? "upToDate" : "needsUpdate";
+                        tableStatus.NeedsWriteCache = !writeFormalCache;
+                    }
                 }
                 else
                 {
@@ -667,13 +676,11 @@ public static class Program
         var existingHash = await ReadExistingHashAsync(shaPath);
         var requiresXlsx = !string.IsNullOrWhiteSpace(tempXlsxPath);
         var missing = string.IsNullOrWhiteSpace(existingHash) || !File.Exists(semanticPath) || (requiresXlsx && !File.Exists(xlsxPath));
-        var changed = !missing && !string.Equals(existingHash, hash, StringComparison.Ordinal);
-        if (!missing && !changed && table.UseExcelToSoCacheDialect && CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table))
-        {
-            changed = true;
-        }
+        var hashChanged = !missing && !string.Equals(existingHash, hash, StringComparison.Ordinal);
+        var dialectOutdated = !missing && table.UseExcelToSoCacheDialect && CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table);
+        var changed = hashChanged || dialectOutdated;
 
-        return new CacheState { Missing = missing, Changed = changed, Fresh = !missing && !changed, ExistingHash = existingHash };
+        return new CacheState { Missing = missing, Changed = changed, Fresh = !missing && !changed, DialectOutdated = dialectOutdated, ExistingHash = existingHash };
     }
 
     private static List<string> BuildCacheFilePaths(string cacheDirectory, string excelCacheDirectory, string tableId)
@@ -707,6 +714,13 @@ public static class Program
         if (summary.MissingCacheTables.Count > 0)
         {
             return "missingCache";
+        }
+
+        var hasDialectOutdated = summary.Tables.Any(t => string.Equals(t.CacheStatus, "dialectOutdated", StringComparison.OrdinalIgnoreCase));
+        var hasWriteCacheChanges = summary.Tables.Any(t => string.Equals(t.CacheStatus, "needsUpdate", StringComparison.OrdinalIgnoreCase));
+        if (hasDialectOutdated && !hasWriteCacheChanges)
+        {
+            return "dialectOutdated";
         }
 
         if (summary.ChangedTables.Count > 0)
@@ -778,6 +792,11 @@ public static class Program
             string.Equals(status, "missingCache", StringComparison.OrdinalIgnoreCase))
         {
             return "write-cache";
+        }
+
+        if (string.Equals(status, "dialectOutdated", StringComparison.OrdinalIgnoreCase))
+        {
+            return "repair-cache-dialect";
         }
 
         if (string.Equals(status, "upToDate", StringComparison.OrdinalIgnoreCase))
@@ -896,6 +915,21 @@ public static class Program
                 continue;
             }
 
+            var seedTable = (request.SeedFromLocalXlsx ?? new SeedFromLocalXlsxContract()).Tables
+                .FirstOrDefault(t => string.Equals(t.TableId, table.TableId, StringComparison.OrdinalIgnoreCase));
+            if (seedTable != null)
+            {
+                var cacheTable = ToCacheDialectTableConfig(seedTable);
+                if (cacheTable.UseExcelToSoCacheDialect && CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, cacheTable))
+                {
+                    tableStatus.CacheStatus = "dialectOutdated";
+                    tableStatus.NeedsWriteCache = false;
+                    tableStatus.Blockers.Add("cache xlsx 类型行仍是 portable/canonical dialect，导入 Unity 前需要先修复为 ExcelToSO dialect。");
+                    summary.PortableSubsetFindings.Add(table.TableId + ": cache 类型行需要修复为 ExcelToSO dialect。");
+                    continue;
+                }
+            }
+
             summary.UpToDateTables.Add(table.TableId);
             tableStatus.CacheStatus = "upToDate";
             if (string.IsNullOrWhiteSpace(table.SemanticHash))
@@ -923,6 +957,7 @@ public static class Program
         public bool Missing { get; set; }
         public bool Changed { get; set; }
         public bool Fresh { get; set; }
+        public bool DialectOutdated { get; set; }
         public string ExistingHash { get; set; } = "";
     }
 
@@ -1209,6 +1244,12 @@ public static class Program
             var table = tables[i];
             await EmitProgressEventAsync(args, "repair-cache-dialect", "cache dialect", table.Id, i + 1, tables.Count, "检查 cache 类型行：" + table.Id, "info");
             var action = result.AddAction("cache_dialect.repair", request.DryRun ? "planned" : "done", table.Id + " cache dialect 已检查。");
+            var tableStatus = new SyncTableCacheStatus
+            {
+                TableId = table.Id,
+                DisplayName = FirstNonEmpty(table.Name, table.Id)
+            };
+            result.SyncCacheSummary.Tables.Add(tableStatus);
             action.Details["tableId"] = table.Id;
             action.Details["network"] = "none";
             action.Details["writesOldExcel"] = "false";
@@ -1220,6 +1261,7 @@ public static class Program
                 action.Status = "skipped";
                 action.Message = table.Id + " 未启用 ExcelToSO cache dialect，不需要重写。";
                 result.SyncCacheSummary.UpToDateTables.Add(table.Id);
+                tableStatus.CacheStatus = "upToDate";
                 continue;
             }
 
@@ -1234,6 +1276,8 @@ public static class Program
                 action.Status = "blocked";
                 action.Message = table.Id + " 缺少 semantic cache 或 xlsx cache，无法只做 dialect 快速修复。请先运行 sync-cache dry-run/apply。";
                 result.SyncCacheSummary.BlockedTables.Add(table.Id);
+                tableStatus.CacheStatus = "blocked";
+                tableStatus.Blockers.Add(action.Message);
                 result.AddFailure(action.Message);
                 continue;
             }
@@ -1248,17 +1292,22 @@ public static class Program
                 action.Status = "blocked";
                 action.Message = table.Id + " 的 semantic cache 无法读取：" + ex.Message;
                 result.SyncCacheSummary.BlockedTables.Add(table.Id);
+                tableStatus.CacheStatus = "blocked";
+                tableStatus.Blockers.Add(action.Message);
                 result.AddFailure(action.Message);
                 continue;
             }
 
             var semanticHash = SemanticHasher.ComputeHash(workbook);
             action.Details["semanticHash"] = semanticHash;
+            tableStatus.OnlineSemanticHash = semanticHash;
+            tableStatus.LocalSemanticHash = semanticHash;
             if (!CacheXlsxNeedsExcelToSoDialectRewrite(xlsxPath, table))
             {
                 action.Status = "skipped";
                 action.Message = table.Id + " cache 类型行已经是 ExcelToSO dialect，无需重写。";
                 result.SyncCacheSummary.UpToDateTables.Add(table.Id);
+                tableStatus.CacheStatus = "upToDate";
                 continue;
             }
 
@@ -1274,12 +1323,16 @@ public static class Program
                 action.Status = "blocked";
                 action.Message = table.Id + " 无法安全重写 cache dialect：" + string.Join("；", plan.Errors);
                 result.SyncCacheSummary.BlockedTables.Add(table.Id);
+                tableStatus.CacheStatus = "blocked";
+                tableStatus.Blockers.Add(action.Message);
                 result.AddFailure(action.Message);
                 continue;
             }
 
             result.SyncCacheSummary.ChangedTables.Add(table.Id);
             result.SyncCacheSummary.WillWriteFilePaths.Add(xlsxPath);
+            tableStatus.CacheStatus = request.DryRun ? "dialectOutdated" : "upToDate";
+            tableStatus.NeedsWriteCache = false;
             action.Message = request.DryRun
                 ? table.Id + " 可以快速重写 cache 类型行；不会联网，不改 semantic/hash。"
                 : table.Id + " 已重写 cache 类型行；没有联网，没有改 semantic/hash。";
@@ -1299,8 +1352,14 @@ public static class Program
         result.SyncCacheSummary.CacheStatus = result.SyncCacheSummary.BlockedTables.Count > 0
             ? "blocked"
             : result.SyncCacheSummary.ChangedTables.Count > 0
-                ? "dialectOutdated"
+                ? (request.DryRun ? "dialectOutdated" : "upToDate")
                 : "upToDate";
+        result.SyncCacheSummary.CanApplyCache = false;
+        result.SyncCacheSummary.NextAction = result.SyncCacheSummary.BlockedTables.Count > 0
+            ? "fix-blocker"
+            : result.SyncCacheSummary.ChangedTables.Count > 0
+                ? (request.DryRun ? "repair-cache-dialect" : "import-unity")
+                : "import-unity";
         MirrorSyncCacheSummary(result);
 
         await EmitLifecycleResultAsync(args, result);
@@ -1766,6 +1825,27 @@ public static class Program
         }
 
         return tables.OrderBy(t => t.Id, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static TableConfig ToCacheDialectTableConfig(SeedTableContract table)
+    {
+        return new TableConfig
+        {
+            Id = table.TableId,
+            Name = FirstNonEmpty(table.DisplayName, table.TableId),
+            Provider = "local",
+            Spreadsheet = FirstNonEmpty(table.SpreadsheetToken, table.SpreadsheetUrl),
+            SheetId = table.SheetId,
+            Range = "",
+            LocalSourcePath = table.SourceXlsxPath,
+            UseExcelToSoCacheDialect = UsesExcelToSoCacheDialect(table),
+            Fields = table.Fields.Select(CloneFieldSpec).ToList(),
+            FieldRow = table.FieldRow,
+            TypeRow = table.TypeRow,
+            DescriptionRow = table.DescriptionRow,
+            DataStartRow = table.DataStartRow,
+            TreatUnknownTypesAsEnum = table.TreatUnknownTypesAsEnum
+        };
     }
 
     private static HashSet<string> SplitTableSelection(params string[] values)
@@ -5372,7 +5452,8 @@ public static class Program
     {
         var hints = new List<XlsxTypeHint>();
         var sourcePath = ResolvePathAgainstRoot(workspaceRoot, table.LocalSourcePath);
-        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath) || table.TypeRow < 0)
+        var typeRowIndex = EffectiveTypeRow(table);
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath) || typeRowIndex < 0)
         {
             return hints;
         }
@@ -5380,13 +5461,13 @@ public static class Program
         try
         {
             var matrix = ReadFirstWorksheetMatrix(sourcePath);
-            if (table.TypeRow >= matrix.Count)
+            if (typeRowIndex >= matrix.Count)
             {
                 return hints;
             }
 
             var fieldRow = table.FieldRow >= 0 && table.FieldRow < matrix.Count ? matrix[table.FieldRow] : new List<string>();
-            var typeRow = matrix[table.TypeRow];
+            var typeRow = matrix[typeRowIndex];
             for (var i = 0; i < typeRow.Count; i++)
             {
                 var key = i < fieldRow.Count ? NormalizeFieldKey(fieldRow[i]) : "";
@@ -5409,7 +5490,8 @@ public static class Program
 
     private static bool CacheXlsxNeedsExcelToSoDialectRewrite(string path, TableConfig table)
     {
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || table.TypeRow < 0)
+        var typeRowIndex = EffectiveTypeRow(table);
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || typeRowIndex < 0)
         {
             return false;
         }
@@ -5417,12 +5499,12 @@ public static class Program
         try
         {
             var matrix = ReadFirstWorksheetMatrix(path);
-            if (table.TypeRow >= matrix.Count)
+            if (typeRowIndex >= matrix.Count)
             {
                 return false;
             }
 
-            foreach (var token in matrix[table.TypeRow])
+            foreach (var token in matrix[typeRowIndex])
             {
                 if (TypeTokenShouldBeRewrittenForExcelToSo(token))
                 {
@@ -5436,6 +5518,16 @@ public static class Program
         }
 
         return false;
+    }
+
+    private static int EffectiveTypeRow(TableConfig table)
+    {
+        if (table.TypeRow >= 0)
+        {
+            return table.TypeRow;
+        }
+
+        return (table.FieldRow < 0 ? 0 : table.FieldRow) + 1;
     }
 
     private static bool TypeTokenShouldBeRewrittenForExcelToSo(string token)

@@ -52,6 +52,9 @@ assert(app.includes("UPM {unityVersion}"), "Unity package version must be visibl
 assert(app.includes("CLI {cliVersion}"), "CLI sidecar version/source must be visible in ordinary view");
 assert(app.includes("快速状态检查（不导出 xlsx）"), "Home refresh must be a quick status check, not a full xlsx export");
 assert(app.includes("完整同步预览会读取在线表并临时导出 xlsx"), "Full sync preview must explain why it can take minutes");
+assert(app.includes("repair-cache-dialect-apply"), "Desktop must expose an apply path for offline cache dialect repair");
+assert(workflow.includes("dialectOutdated"), "Workflow must distinguish importability/dialect repair from semantic cache freshness");
+assert(workflow.includes("修复 cache 类型行"), "Planner view must recommend cache dialect repair in human wording");
 assert(!app.includes("<p>Task："), "Ordinary running card must not show internal task ids");
 assert(!app.includes("invoke<CliRunResult>(\"run_cli\""), "UI must not invoke blocking run_cli");
 assert(!app.includes("invoke<CliRunResult>(\"run_setup_action\""), "UI must not invoke blocking run_setup_action");

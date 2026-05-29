@@ -40,6 +40,8 @@ Desktop 是 Config Sheet Forge 的官方主工作台。它负责日常配表 Sou
 
 从 0.4.39 开始，Desktop 不再在多个组件里散读同步结果 JSON，而是先经过 `normalizeSyncCacheResult`。这层会兼容 `syncCacheSummary.cacheStatus`、顶层 `nextAction/canApplyCache` 和后续 `schemaVersion` 扩展。实际结果里即使顶层 `cacheStatus` 为空，只要 summary 说明 `needsUpdate`，Desktop 也会恢复到“写入本地 cache”，关闭重开后仍保持这个下一步。
 
+从 0.4.44 开始，Desktop 会把“cache 语义已最新”和“cache xlsx 类型行可被 ExcelToSO 导入”分开判断。如果 `.config-sheet-forge/excel-cache/*.xlsx` 里还残留 `json/integer/number` 等 Source of Truth canonical 类型，状态会显示“cache 类型行需要修复”，主按钮会推荐“修复 cache 类型行”。这个修复不联网、不写飞书、不改旧 `Excel/`，只把 cache xlsx 的类型行改成 `int/float/string[]/int[]/float[]` 等 ExcelToSO dialect。
+
 Legacy 只用于没有 Desktop、CI 调试或救急 fallback。普通策划不需要从 Legacy 开始。
 
 ## Desktop v1 页面

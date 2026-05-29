@@ -91,8 +91,10 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("lark read uses xlsx sheet data range when dimension is stale", LarkReadUsesXlsxSheetDataRangeWhenDimensionIsStale),
     ("excel to so cache dialect maps portable primitive aliases", () => RunSync(ExcelToSoCacheDialectMapsPortablePrimitiveAliases)),
     ("excel to so cache dialect restores json arrays from source xlsx", () => RunSync(ExcelToSoCacheDialectRestoresJsonArraysFromSourceXlsx)),
+    ("excel to so cache dialect restores json with inferred type row", () => RunSync(ExcelToSoCacheDialectRestoresJsonWithInferredTypeRow)),
     ("excel to so cache dialect blocks unresolved json", () => RunSync(ExcelToSoCacheDialectBlocksUnresolvedJson)),
     ("repair-cache-dialect rewrites xlsx type row offline", RepairCacheDialectRewritesXlsxTypeRowOffline),
+    ("repair-cache-dialect scans stale dimension right-side columns", RepairCacheDialectScansStaleDimensionRightSideColumns),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
     ("seed lifecycle rejects user fallback", SeedLifecycleRejectsUserFallback),
@@ -3162,6 +3164,50 @@ static void ExcelToSoCacheDialectRestoresJsonArraysFromSourceXlsx()
     }
 }
 
+static void ExcelToSoCacheDialectRestoresJsonWithInferredTypeRow()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-excel-to-so-inferred-type-row-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var source = Path.Combine(temp, "SkillsData.xlsx");
+        CreateTypeHintXlsx(source,
+            new[] { "id", "fullicon", "activecooldown", "keys", "values", "costtype" },
+            new[] { "Int", "String[]", "float[]", "string[]", "float[]", "int[]" },
+            dimensionRef: "A1");
+        var workbook = SampleWorkbookWithColumns(
+            ("id", "integer"),
+            ("fullicon", "json"),
+            ("activecooldown", "json"),
+            ("keys", "json"),
+            ("values", "json"),
+            ("costtype", "json"));
+        var table = new TableConfig
+        {
+            Id = "SkillsData",
+            Name = "SkillsData",
+            LocalSourcePath = source,
+            UseExcelToSoCacheDialect = true,
+            FieldRow = 0,
+            TypeRow = -1,
+            DescriptionRow = -1,
+            DataStartRow = -1
+        };
+
+        var plan = BuildExcelToSoDialectPlanForTest(workbook, table, temp);
+
+        AssertTrue(!plan.Errors.Any(), "TypeRow=-1 should infer row 2 and still restore json columns from the old Excel type row.");
+        AssertEqual("int,string[],float[],string[],float[],int[]", string.Join(",", plan.TypeRow), "Inferred type row should restore project-style json array columns.");
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
 static void ExcelToSoCacheDialectBlocksUnresolvedJson()
 {
     var workbook = SampleWorkbookWithColumns(("id", "integer"), ("skillset", "json"));
@@ -3239,7 +3285,104 @@ static async Task RepairCacheDialectRewritesXlsxTypeRowOffline()
             AssertEqual("0", apply.ToString(), "repair-cache-dialect apply should pass.");
             AssertEqual("int,float,string", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "apply should rewrite only the physical ExcelToSO type row.");
             var result = JsonSerializer.Deserialize<LifecycleContractResult>(await File.ReadAllTextAsync(applyResultPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            AssertTrue(result != null && result.SyncCacheSummary.CacheStatus == "dialectOutdated", "Result should explain this was a cache dialect repair.");
+            AssertTrue(result != null && result.SyncCacheSummary.CacheStatus == "upToDate", "Apply result should explain the cache is importable after dialect repair.");
+            AssertEqual("import-unity", result!.SyncCacheSummary.NextAction, "After repair apply, next action should import Unity assets.");
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(oldDir);
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static async Task RepairCacheDialectScansStaleDimensionRightSideColumns()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-repair-dialect-stale-dimension-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var state = Path.Combine(temp, ".config-sheet-forge");
+        var cache = Path.Combine(state, "cache");
+        var excelCache = Path.Combine(state, "excel-cache");
+        Directory.CreateDirectory(cache);
+        Directory.CreateDirectory(excelCache);
+        await File.WriteAllTextAsync(Path.Combine(state, "config.json"), JsonSerializer.Serialize(new ForgeConfig(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var source = Path.Combine(temp, "Excel", "SkillsData.xlsx");
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        CreateTypeHintXlsx(source,
+            new[] { "id", "fullicon", "activecooldown", "keys", "values", "costtype" },
+            new[] { "Int", "String[]", "float[]", "string[]", "float[]", "int[]" },
+            dimensionRef: "A1");
+
+        var workbook = SampleWorkbookWithColumns(
+            ("id", "integer"),
+            ("fullicon", "json"),
+            ("activecooldown", "json"),
+            ("keys", "json"),
+            ("values", "json"),
+            ("costtype", "json"));
+        await File.WriteAllTextAsync(Path.Combine(cache, "SkillsData.semantic.json"), JsonSerializer.Serialize(workbook, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        await File.WriteAllTextAsync(Path.Combine(cache, "SkillsData.sha256"), SemanticHasher.ComputeHash(workbook) + Environment.NewLine);
+        var xlsx = Path.Combine(excelCache, "SkillsData.xlsx");
+        CreateTypeHintXlsx(xlsx,
+            new[] { "id", "fullicon", "activecooldown", "keys", "values", "costtype" },
+            new[] { "integer", "json", "json", "json", "json", "json" },
+            dimensionRef: "A1");
+
+        var request = new LifecycleContractRequest
+        {
+            Operation = "repair-cache-dialect",
+            DryRun = true,
+            SeedFromLocalXlsx = new SeedFromLocalXlsxContract
+            {
+                CacheDirectory = ".config-sheet-forge/cache",
+                ExcelCacheDirectory = ".config-sheet-forge/excel-cache"
+            }
+        };
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract
+        {
+            TableId = "SkillsData",
+            DisplayName = "SkillsData",
+            SourceXlsxPath = "Excel/SkillsData.xlsx",
+            CacheXlsxPath = ".config-sheet-forge/excel-cache/SkillsData.xlsx",
+            SemanticCachePath = ".config-sheet-forge/cache/SkillsData.semantic.json",
+            HashCachePath = ".config-sheet-forge/cache/SkillsData.sha256",
+            FieldRow = 0,
+            TypeRow = -1,
+            DescriptionRow = -1,
+            DataStartRow = -1,
+            UnityExcelToSo = new UnityExcelToSoContract { SettingsPath = "ProjectSettings/ExcelToScriptableObjectSettings.asset", ExcelPath = ".config-sheet-forge/excel-cache/SkillsData.xlsx" }
+        });
+
+        var manifest = Path.Combine(temp, "contract.json");
+        var dryResultPath = Path.Combine(temp, "dry-result.json");
+        var applyResultPath = Path.Combine(temp, "apply-result.json");
+        await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var oldDir = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(temp);
+            var dry = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--dry-run", "--out", dryResultPath });
+            AssertEqual("0", dry.ToString(), "repair-cache-dialect dry-run should not skip stale-dimension right-side json cells.");
+            var dryResult = JsonSerializer.Deserialize<LifecycleContractResult>(await File.ReadAllTextAsync(dryResultPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            AssertTrue(dryResult != null && dryResult.SyncCacheSummary.CacheStatus == "dialectOutdated", "Dry-run should detect dialectOutdated.");
+            AssertTrue(dryResult!.SyncCacheSummary.ChangedTables.Contains("SkillsData"), "Dry-run should list SkillsData for repair.");
+
+            var apply = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--yes", "--out", applyResultPath });
+            AssertEqual("0", apply.ToString(), "repair-cache-dialect apply should pass.");
+            AssertEqual("int,string[],float[],string[],float[],int[]", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "Apply should rewrite all right-side json cells despite stale dimension=A1.");
+            var applyResult = JsonSerializer.Deserialize<LifecycleContractResult>(await File.ReadAllTextAsync(applyResultPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            AssertTrue(applyResult != null && applyResult.SyncCacheSummary.CacheStatus == "upToDate", "Apply result should recommend importing Unity assets next.");
+            AssertEqual("import-unity", applyResult!.SyncCacheSummary.NextAction, "Apply next action should be import-unity.");
         }
         finally
         {
@@ -3632,7 +3775,7 @@ static void CreateMinimalXlsx(string path, bool withMergedCells, string dimensio
         """ + merge + "</worksheet>");
 }
 
-static void CreateTypeHintXlsx(string path, IReadOnlyList<string> fieldRow, IReadOnlyList<string> typeRow)
+static void CreateTypeHintXlsx(string path, IReadOnlyList<string> fieldRow, IReadOnlyList<string> typeRow, string dimensionRef = "")
 {
     using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
     AddZipText(archive, "[Content_Types].xml",
@@ -3667,10 +3810,12 @@ static void CreateTypeHintXlsx(string path, IReadOnlyList<string> fieldRow, IRea
         </Relationships>
         """);
 
+    var dimension = string.IsNullOrWhiteSpace(dimensionRef) ? "" : "<dimension ref=\"" + dimensionRef + "\"/>";
     AddZipText(archive, "xl/worksheets/sheet1.xml",
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        """ + dimension + """
           <sheetData>
         """ +
         BuildInlineStringRow(1, fieldRow) +
