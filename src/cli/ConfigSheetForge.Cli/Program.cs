@@ -777,8 +777,7 @@ public static class Program
         var previewFingerprint = FirstNonEmpty(result.SyncCacheSummary.PreviewFingerprint, result.PreviewFingerprint, result.RequestFingerprint);
         result.SyncCacheSummary.PreviewFingerprint = previewFingerprint;
         result.PreviewFingerprint = previewFingerprint;
-        result.CanApplyCache = result.SyncCacheSummary.CanApplyCache;
-        result.NextAction = result.SyncCacheSummary.NextAction;
+        MirrorSyncCacheSummary(result);
         if (result.BranchStatus != null && result.BranchStatus.RegisteredOnlineTables.Count > 0)
         {
             result.SyncCacheSummary.ResolvedOnlineTables = new List<ResolvedOnlineTableStatus>(result.BranchStatus.RegisteredOnlineTables);
@@ -796,6 +795,19 @@ public static class Program
             action.Details["canApplyCache"] = result.SyncCacheSummary.CanApplyCache.ToString().ToLowerInvariant();
             action.Details["nextAction"] = result.SyncCacheSummary.NextAction;
         }
+    }
+
+    private static void MirrorSyncCacheSummary(LifecycleContractResult result)
+    {
+        result.SyncCacheSummary ??= new SyncCacheSummary();
+        result.CacheStatus = result.SyncCacheSummary.CacheStatus;
+        result.CanApplyCache = result.SyncCacheSummary.CanApplyCache;
+        result.NextAction = result.SyncCacheSummary.NextAction;
+        result.ChangedTables = new List<string>(result.SyncCacheSummary.ChangedTables);
+        result.MissingCacheTables = new List<string>(result.SyncCacheSummary.MissingCacheTables);
+        result.UpToDateTables = new List<string>(result.SyncCacheSummary.UpToDateTables);
+        result.BlockedTables = new List<string>(result.SyncCacheSummary.BlockedTables);
+        result.Tables = new List<SyncTableCacheStatus>(result.SyncCacheSummary.Tables);
     }
 
     private static void ApplyReadOnlySyncStatus(LifecycleContractResult result, LifecycleContractRequest request)
@@ -878,8 +890,7 @@ public static class Program
         FinalizeSyncCacheSummary(summary, summary.BlockedTables.Count > 0, writeFormalCache: false);
         result.SyncCacheSummary = summary;
         result.ResolvedOnlineTables = summary.ResolvedOnlineTables;
-        result.CanApplyCache = summary.CanApplyCache;
-        result.NextAction = summary.NextAction;
+        MirrorSyncCacheSummary(result);
 
         var action = result.AddAction("sync-status.local_cache.inspect", "done", "只读：已根据 live registry 与本地 cache/sha 文件估算当前 cache 状态；没有读取/导出在线 Sheet，也没有写文件。");
         action.Details["cacheStatus"] = summary.CacheStatus;
@@ -1273,6 +1284,7 @@ public static class Program
             : result.SyncCacheSummary.ChangedTables.Count > 0
                 ? "dialectOutdated"
                 : "upToDate";
+        MirrorSyncCacheSummary(result);
 
         await EmitLifecycleResultAsync(args, result);
         foreach (var failure in result.HumanReadableFailures)

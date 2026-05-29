@@ -420,6 +420,12 @@ foreach ($requiredV438Marker in @("read_desktop_result", "syncPreviewFingerprint
   }
 }
 
+foreach ($requiredV439Marker in @("normalizeSyncCacheResult", "syncResultSummaryLine", "schemaVersion", "CacheStatus", "ChangedTables", "MissingCacheTables", "BlockedTables", "sync-cache lifecycle result mirrors summary to top level", "restores write-cache state from an existing desktop sync-cache result file")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw packages/unity/Runtime/Core/LifecycleContracts.cs) + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV439Marker*") {
+    throw "Unity v0.4.39 Desktop sync-cache normalize/state marker is missing: $requiredV439Marker"
+  }
+}
+
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef
 if ($editorAsmdef -like "*GreatClock.ExcelToScriptableObject.Editor*") {
   throw "ExcelToSO must remain an optional peer backend; do not add a hard asmdef reference."

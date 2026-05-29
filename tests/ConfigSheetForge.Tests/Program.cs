@@ -38,6 +38,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("sync-cache exposes live registry branch status", SyncCacheExposesLiveRegistryBranchStatus),
     ("project config probe trusts live registry locators over empty project settings", () => RunSync(ProjectConfigProbeTrustsLiveRegistryLocatorsOverEmptyProjectSettings)),
     ("sync-cache dry-run summary drives next action", () => RunSync(SyncCacheDryRunSummaryDrivesNextAction)),
+    ("sync-cache lifecycle result mirrors summary to top level", () => RunSync(SyncCacheLifecycleResultMirrorsSummaryToTopLevel)),
     ("sync-status inspects local cache without online reads", SyncStatusInspectsLocalCacheWithoutOnlineReads),
     ("current branch bootstrap from target plans instead of seed", CurrentBranchBootstrapFromTargetPlansInsteadOfSeed),
     ("compare-merge dry-run hydrates workspaces and table scope", CompareMergeDryRunHydratesWorkspacesAndTableScope),
@@ -1006,6 +1007,39 @@ static void SyncCacheDryRunSummaryDrivesNextAction()
     AssertEqual("upToDate", summary.SyncCacheStatus, "Probe should read sync cache status.");
     AssertEqual("1", summary.SyncCacheUpToDateTables.Count.ToString(), "Probe should read up-to-date tables.");
     AssertTrue(summary.LiveMissingTables.Count == 0 && summary.LiveMissingLocators.Count == 0, "Live status should not invent missing tables.");
+}
+
+static void SyncCacheLifecycleResultMirrorsSummaryToTopLevel()
+{
+    var result = new LifecycleContractResult
+    {
+        Operation = "sync-cache",
+        DryRun = true,
+        Success = true,
+        RequestFingerprint = "fp-sync"
+    };
+    var summary = new SyncCacheSummary
+    {
+        CacheStatus = "needsUpdate",
+        PreviewFingerprint = "fp-sync",
+        CanApplyCache = true,
+        NextAction = "write-cache",
+        TableCount = 2
+    };
+    summary.ChangedTables.AddRange(new[] { "ItemsData", "SkillsData" });
+    summary.Tables.Add(new SyncTableCacheStatus { TableId = "ItemsData", DisplayName = "Items", CacheStatus = "needsUpdate", NeedsWriteCache = true });
+    summary.Tables.Add(new SyncTableCacheStatus { TableId = "SkillsData", DisplayName = "Skills", CacheStatus = "needsUpdate", NeedsWriteCache = true });
+
+    var method = typeof(ConfigSheetForge.Cli.Program).GetMethod("ApplySyncCacheSummary", BindingFlags.NonPublic | BindingFlags.Static);
+    AssertTrue(method != null, "ApplySyncCacheSummary should remain available for lifecycle contract tests.");
+    method!.Invoke(null, new object[] { result, summary });
+
+    AssertEqual("config-sheet-forge.lifecycle/v1", result.SchemaVersion, "Lifecycle result should declare schema version.");
+    AssertEqual("needsUpdate", result.CacheStatus, "Top-level cacheStatus should mirror syncCacheSummary.");
+    AssertEqual("true", result.CanApplyCache.ToString().ToLowerInvariant(), "Top-level canApplyCache should mirror syncCacheSummary.");
+    AssertEqual("write-cache", result.NextAction, "Top-level nextAction should mirror syncCacheSummary.");
+    AssertEqual("2", result.ChangedTables.Count.ToString(), "Top-level changedTables should mirror syncCacheSummary.");
+    AssertEqual("2", result.Tables.Count.ToString(), "Top-level tables should mirror syncCacheSummary.");
 }
 
 static async Task SyncStatusInspectsLocalCacheWithoutOnlineReads()

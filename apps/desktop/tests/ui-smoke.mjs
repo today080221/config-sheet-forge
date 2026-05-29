@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+const workflow = readFileSync(new URL("../src/workflow.ts", import.meta.url), "utf8");
 const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const tauri = readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8");
 
@@ -27,6 +28,9 @@ assert(app.includes("visibleResult.commandLine"), "Debug mode must expose full c
 assert(app.includes("visibleResult.resultJson"), "Debug mode must expose result JSON");
 assert(app.includes("activeTask?.progressLog"), "Debug mode must tail progress ndjson while a task is running");
 assert(app.includes("read_desktop_result"), "Desktop must restore workflow state from previous result files");
+assert(app.includes("normalizeSyncCacheResult"), "Desktop must normalize sync-cache results before driving workflow state");
+assert(workflow.includes("syncResultSummaryLine"), "Planner result summary must come from normalized sync-cache result");
+assert(workflow.includes("normalizeSyncCacheResult"), "Workflow state must expose one sync-cache normalize layer");
 assert(app.includes("SyncTableSummary"), "Result details must show structured table summaries instead of raw JSON");
 assert(app.includes("resultNextAction"), "Result panel must offer the next workflow action directly");
 assert(app.includes("start_task"), "Lifecycle actions must start backend tasks instead of blocking run_cli");

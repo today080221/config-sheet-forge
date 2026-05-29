@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.39
+
+- Desktop 新增唯一的 `normalizeSyncCacheResult` 状态层，所有同步向导按钮、最近结果摘要和重启恢复都从同一份 normalized result 驱动，不再散读 raw JSON。
+- 修复目标项目形态的同步结果：即使顶层 `cacheStatus=null`，只要 `syncCacheSummary.cacheStatus=needsUpdate`、`canApplyCache=true` 或 `nextAction=write-cache`，Desktop 会立即进入“写入本地 cache”步骤。
+- `sync-cache` lifecycle result 增加 `schemaVersion`，并把 `cacheStatus`、`changedTables`、`missingCacheTables`、`blockedTables`、`tables` 等同步摘要镜像到顶层，方便 Desktop/CI/调试工具稳定读取。
+- 增加 Desktop fixture 回归测试：覆盖 16 表 needsUpdate、状态机主按钮、重启从 `Temp/ConfigSheetForge/desktop/sync-cache.result.json` 恢复、策划视图不暴露 raw JSON/task/PID/stack trace。
+
 ## 0.4.38
 
 - sync-cache result 现在输出可直接驱动工作流的结构化结论：`previewFingerprint`、`canApplyCache`、`nextAction` 和逐表 cache 状态。`cacheStatus=needsUpdate/missingCache` 时会列出需要写入的表，不再出现预览成功后 Desktop 仍说“还没有同步预览”。

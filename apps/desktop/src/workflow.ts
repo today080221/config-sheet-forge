@@ -82,17 +82,44 @@ export type PrGateReportLike = {
 };
 
 export type LifecycleResultLike = {
+  schemaVersion?: string;
   operation?: string;
   dryRun?: boolean;
   success?: boolean;
   requestFingerprint?: string;
   previewFingerprint?: string;
+  cacheStatus?: string | null;
   canApplyCache?: boolean;
   nextAction?: string;
+  changedTables?: string[] | number;
+  missingCacheTables?: string[] | number;
+  upToDateTables?: string[] | number;
+  blockedTables?: string[] | number;
+  tables?: SyncTableCacheStatusLike[];
   humanReadableFailures?: string[];
   syncCacheSummary?: SyncCacheSummaryLike;
   branchStatus?: BranchStatusLike;
   prGateReport?: PrGateReportLike;
+};
+
+export type NormalizedSyncCacheStatus = "upToDate" | "needsUpdate" | "missingCache" | "blocked" | "unknown";
+
+export type NormalizedSyncCacheNextAction = "write-cache" | "import-unity" | "fix-blocker" | "run-pr-gate" | "preview-sync";
+
+export type NormalizedSyncCacheResult = {
+  success: boolean;
+  dryRun: boolean;
+  cacheStatus: NormalizedSyncCacheStatus;
+  canApplyCache: boolean;
+  nextAction: NormalizedSyncCacheNextAction;
+  changedTables: string[];
+  missingCacheTables: string[];
+  upToDateTables: string[];
+  blockedTables: string[];
+  tables: SyncTableCacheStatusLike[];
+  tableCount: number;
+  previewFingerprint: string;
+  humanReadableFailures: string[];
 };
 
 export type WorkflowState = {
@@ -203,11 +230,168 @@ export function normalizeCacheStatus(value: string | undefined): string {
   return (value || "unknown").trim().toLowerCase();
 }
 
-export function syncPreviewFingerprint(result: LifecycleResultLike | null | undefined): string {
-  return result?.previewFingerprint || result?.requestFingerprint || result?.syncCacheSummary?.previewFingerprint || "";
+function canonicalCacheStatus(value: unknown): NormalizedSyncCacheStatus {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/[_\-\s]/g, "");
+  switch (normalized) {
+    case "uptodate":
+      return "upToDate";
+    case "needsupdate":
+      return "needsUpdate";
+    case "missingcache":
+      return "missingCache";
+    case "blocked":
+      return "blocked";
+    default:
+      return "unknown";
+  }
 }
 
-export function syncWritableTableCount(summary: SyncCacheSummaryLike | null | undefined): number {
+function normalizeSyncNextAction(value: unknown): NormalizedSyncCacheNextAction {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  switch (normalized) {
+    case "write-cache":
+    case "writecache":
+      return "write-cache";
+    case "import-unity":
+    case "importunity":
+      return "import-unity";
+    case "fix-blocker":
+    case "fixblocker":
+      return "fix-blocker";
+    case "run-pr-gate":
+    case "runprgate":
+      return "run-pr-gate";
+    default:
+      return "preview-sync";
+  }
+}
+
+function stringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+  }
+
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Array.from({ length: Math.floor(value) }, (_, index) => `table-${index + 1}`);
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    return value.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+
+  return [];
+}
+
+function distinct(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+export function syncPreviewFingerprint(result: LifecycleResultLike | null | undefined): string {
+  return normalizeSyncCacheResult(result)?.previewFingerprint
+    || result?.previewFingerprint
+    || result?.requestFingerprint
+    || result?.syncCacheSummary?.previewFingerprint
+    || "";
+}
+
+export function normalizeSyncCacheResult(result: LifecycleResultLike | null | undefined): NormalizedSyncCacheResult | null {
+  if (!result) {
+    return null;
+  }
+
+  const operation = (result.operation || "").toLowerCase();
+  const looksLikeSyncResult = Boolean(
+    result.syncCacheSummary
+    || result.cacheStatus
+    || result.tables
+    || operation === "sync-cache"
+    || operation === "sync-status"
+    || operation === "registry-status"
+  );
+  if (!looksLikeSyncResult) {
+    return null;
+  }
+
+  const summary = result.syncCacheSummary ?? {};
+  const tables = result.tables ?? summary.tables ?? [];
+  const changedTables = stringArray(result.changedTables ?? summary.changedTables);
+  const missingCacheTables = stringArray(result.missingCacheTables ?? summary.missingCacheTables);
+  const upToDateTables = stringArray(result.upToDateTables ?? summary.upToDateTables);
+  const blockedTables = stringArray(result.blockedTables ?? summary.blockedTables);
+  const summaryStatus = canonicalCacheStatus(summary.cacheStatus);
+  const topLevelStatus = canonicalCacheStatus(result.cacheStatus ?? undefined);
+  let cacheStatus = summaryStatus !== "unknown" ? summaryStatus : topLevelStatus;
+
+  for (const table of tables) {
+    if (!table?.tableId) {
+      continue;
+    }
+
+    const tableStatus = canonicalCacheStatus(table.cacheStatus);
+    if (table.needsWriteCache && tableStatus !== "missingCache" && !changedTables.includes(table.tableId)) {
+      changedTables.push(table.tableId);
+    }
+
+    if (table.needsWriteCache && tableStatus === "missingCache" && !missingCacheTables.includes(table.tableId)) {
+      missingCacheTables.push(table.tableId);
+    }
+
+    if (tableStatus === "blocked" && !blockedTables.includes(table.tableId)) {
+      blockedTables.push(table.tableId);
+    }
+  }
+
+  const explicitNextAction = normalizeSyncNextAction(result.nextAction || summary.nextAction);
+  const failed = result.success === false;
+  if (failed || blockedTables.length > 0 || (summary.triangulationFailedCount ?? 0) > 0 || cacheStatus === "blocked") {
+    cacheStatus = "blocked";
+  } else if (cacheStatus === "unknown") {
+    if (missingCacheTables.length > 0) {
+      cacheStatus = "missingCache";
+    } else if (changedTables.length > 0) {
+      cacheStatus = "needsUpdate";
+    } else if (upToDateTables.length > 0 || tables.length > 0) {
+      cacheStatus = "upToDate";
+    }
+  }
+
+  let nextAction: NormalizedSyncCacheNextAction = explicitNextAction;
+  if (cacheStatus === "blocked" || failed) {
+    nextAction = "fix-blocker";
+  } else if (nextAction === "preview-sync") {
+    if (cacheStatus === "needsUpdate" || cacheStatus === "missingCache") {
+      nextAction = "write-cache";
+    } else if (cacheStatus === "upToDate") {
+      nextAction = "import-unity";
+    }
+  }
+
+  const canApplyFromResult = Boolean(result.canApplyCache ?? summary.canApplyCache);
+  const canApplyCache = cacheStatus !== "blocked"
+    && (canApplyFromResult || nextAction === "write-cache" || cacheStatus === "needsUpdate" || cacheStatus === "missingCache");
+
+  if (canApplyCache && nextAction !== "write-cache" && (cacheStatus === "needsUpdate" || cacheStatus === "missingCache")) {
+    nextAction = "write-cache";
+  }
+
+  return {
+    success: result.success !== false,
+    dryRun: Boolean(result.dryRun),
+    cacheStatus,
+    canApplyCache,
+    nextAction,
+    changedTables: distinct(changedTables),
+    missingCacheTables: distinct(missingCacheTables),
+    upToDateTables: distinct(upToDateTables),
+    blockedTables: distinct(blockedTables),
+    tables,
+    tableCount: summary.tableCount || tables.length || changedTables.length + missingCacheTables.length + upToDateTables.length + blockedTables.length,
+    previewFingerprint: result.previewFingerprint || result.requestFingerprint || summary.previewFingerprint || "",
+    humanReadableFailures: result.humanReadableFailures || []
+  };
+}
+
+export function syncWritableTableCount(summary: SyncCacheSummaryLike | NormalizedSyncCacheResult | null | undefined): number {
   const changed = new Set([...(summary?.changedTables || []), ...(summary?.missingCacheTables || [])].filter(Boolean));
   for (const table of summary?.tables || []) {
     if (table?.needsWriteCache && table.tableId) {
@@ -225,6 +409,27 @@ export function syncWritableTableCount(summary: SyncCacheSummaryLike | null | un
   }
 
   return 0;
+}
+
+export function syncResultSummaryLine(result: LifecycleResultLike | null | undefined): string {
+  const normalized = normalizeSyncCacheResult(result);
+  if (!normalized) {
+    return "还没有同步预览。";
+  }
+
+  if (!normalized.success || normalized.cacheStatus === "blocked") {
+    return `同步预检被阻断：${normalized.blockedTables.join("、") || normalized.humanReadableFailures[0] || "请查看结果详情"}。`;
+  }
+
+  if (normalized.nextAction === "write-cache") {
+    return `预览通过，${syncWritableTableCount(normalized) || normalized.tableCount || "若干"} 张表需要写入 cache，下一步：写入本地 cache。`;
+  }
+
+  if (normalized.nextAction === "import-unity" || normalized.cacheStatus === "upToDate") {
+    return `预览通过，${normalized.tableCount || normalized.tables.length || "全部"} 张表已最新，下一步：导入 Unity asset。`;
+  }
+
+  return "预览通过，下一步：运行 PR 检查。";
 }
 
 export function hasBlockingToolIssue(checks: ToolCheckLike[] | undefined): boolean {
@@ -359,14 +564,14 @@ export function decideWorkflow(scenarioId: ScenarioId, state: WorkflowState): Wo
 
 export function decideSyncImport(state: WorkflowState): WorkflowDecision {
   const preview = state.lastSyncPreview;
-  const summary = preview?.syncCacheSummary;
-  const status = normalizeCacheStatus(summary?.cacheStatus);
-  const blockedTables = summary?.blockedTables ?? [];
-  const changedCount = syncWritableTableCount(summary);
-  const tableCount = summary?.tableCount ?? 0;
+  const normalized = normalizeSyncCacheResult(preview);
+  const status = normalized?.cacheStatus ?? "unknown";
+  const blockedTables = normalized?.blockedTables ?? [];
+  const changedCount = syncWritableTableCount(normalized);
+  const tableCount = normalized?.tableCount ?? 0;
   const fingerprint = syncPreviewFingerprint(preview);
   const base = baseDecision("sync-import", state);
-  const hasPreview = Boolean(preview);
+  const hasPreview = Boolean(normalized);
 
   if (state.activeOperation) {
     return {
@@ -395,7 +600,7 @@ export function decideSyncImport(state: WorkflowState): WorkflowDecision {
     };
   }
 
-  if (!preview?.success || status === "blocked" || blockedTables.length > 0 || (summary?.triangulationFailedCount ?? 0) > 0) {
+  if (!normalized?.success || status === "blocked" || blockedTables.length > 0) {
     return {
       ...base,
       conclusion: "同步预检被阻断",
@@ -408,13 +613,13 @@ export function decideSyncImport(state: WorkflowState): WorkflowDecision {
       steps: syncSteps("blocked"),
       warnings: [
         blockedTables.length > 0 ? `阻断表：${blockedTables.join("、")}` : "同步结果失败，但未返回具体阻断表。",
-        ...(preview?.humanReadableFailures ?? [])
+        ...(normalized?.humanReadableFailures ?? [])
       ],
       debugHints: ["blockedTables", "attemptedRange", "finalRange", "syncCacheSummary"]
     };
   }
 
-  if (status === "uptodate") {
+  if (status === "upToDate") {
     return {
       ...base,
       conclusion: tableCount > 0 ? `${tableCount}/${tableCount} 已同步，cache 已最新` : "本地 cache 已最新",
@@ -429,16 +634,16 @@ export function decideSyncImport(state: WorkflowState): WorkflowDecision {
     };
   }
 
-  if (status === "needsupdate" || status === "missingcache") {
+  if (status === "needsUpdate" || status === "missingCache" || normalized.nextAction === "write-cache" || normalized.canApplyCache) {
     const count = Math.max(1, changedCount);
     return {
       ...base,
-      conclusion: status === "missingcache" ? "本地 cache 缺失" : "本地 cache 需要更新",
+      conclusion: status === "missingCache" ? "本地 cache 缺失" : "本地 cache 需要更新",
       nextStep: "写入本地 cache 后再导入 Unity。",
       primaryLabel: `写入本地 cache（${count} 张）`,
       primaryOperation: "sync-cache-apply",
-      primaryDisabled: !fingerprint || preview?.syncCacheSummary?.canApplyCache === false,
-      disabledReason: fingerprint ? (preview?.syncCacheSummary?.canApplyCache === false ? "当前预览结果没有允许写 cache，请重新生成完整同步预览。" : "") : "缺少同步预览 fingerprint，请重新生成预览。",
+      primaryDisabled: !fingerprint || !normalized.canApplyCache,
+      disabledReason: fingerprint ? (!normalized.canApplyCache ? "当前预览结果没有允许写 cache，请重新生成完整同步预览。" : "") : "缺少同步预览 fingerprint，请重新生成预览。",
       safety: "只写 .config-sheet-forge/excel-cache 和 .config-sheet-forge/cache，不写旧 Excel/ 或飞书。",
       programSummary: "调用 sync-cache --yes --preview-result <dry-run result>，CLI 会校验同输入预览。",
       steps: syncSteps("apply")
@@ -645,23 +850,7 @@ export function summarizeLifecycleResult(result: LifecycleResultLike | PrGateRep
   }
 
   if (lifecycle.operation === "sync-cache" || lifecycle.syncCacheSummary) {
-    const summary = lifecycle.syncCacheSummary;
-    const status = normalizeCacheStatus(summary?.cacheStatus);
-    if (status === "uptodate") {
-      return "同步预览通过，本地 cache 已最新。";
-    }
-
-    if (status === "needsupdate") {
-      return `同步预览通过，${syncWritableTableCount(summary) || "若干"} 张表需要写入 cache。`;
-    }
-
-    if (status === "missingcache") {
-      return "同步预览通过，但本地 cache 缺失。";
-    }
-
-    if (status === "blocked") {
-      return `同步预检被阻断：${(summary?.blockedTables || []).join("、") || "请查看结果详情"}`;
-    }
+    return syncResultSummaryLine(lifecycle);
   }
 
   if (lifecycle.success === false) {

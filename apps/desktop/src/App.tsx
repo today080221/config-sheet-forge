@@ -5,6 +5,7 @@ import {
   decideWorkflow,
   getScenario,
   humanToolStatus,
+  normalizeSyncCacheResult,
   ordinaryToolText,
   primaryToolAction,
   scenarios,
@@ -625,12 +626,13 @@ export function App() {
       return;
     }
 
+    const syncResult = normalizeSyncCacheResult(parsed);
     if (operation === "sync-status" || operation === "registry-status") {
       setLastQuickStatus(parsed);
-    } else if (operation === "sync-cache-dry-run") {
+    } else if (operation === "sync-cache-dry-run" || (parsed.operation === "sync-cache" && syncResult?.dryRun)) {
       setLastSyncPreview(parsed);
       setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "sync-cache"));
-    } else if (operation === "sync-cache-apply") {
+    } else if (operation === "sync-cache-apply" || (parsed.operation === "sync-cache" && !syncResult?.dryRun)) {
       setLastSyncPreview(parsed);
       setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "sync-cache-apply"));
     } else if (operation === "compare-merge") {
@@ -745,14 +747,19 @@ export function App() {
     }
 
     if (operation === "sync-cache-apply") {
-      if (!lastSyncPreviewPath || !lastSyncPreview?.success) {
+      const normalizedPreview = normalizeSyncCacheResult(lastSyncPreview);
+      if (!lastSyncPreviewPath || !normalizedPreview?.success) {
         setError("写入本地 cache 前必须先有最近一次同输入 sync-cache dry-run 成功结果。请重新预览同步。");
         return;
       }
 
-      const status = lastSyncPreview.syncCacheSummary?.cacheStatus || "unknown";
-      if (status.toLowerCase() === "uptodate") {
+      if (normalizedPreview.cacheStatus === "upToDate") {
         setError("本地 cache 已最新，不需要写入。下一步请导入 Unity 配表资产。");
+        return;
+      }
+
+      if (!normalizedPreview.canApplyCache) {
+        setError("最近一次同步预览没有允许写 cache。请重新生成完整同步预览。");
         return;
       }
 
@@ -832,6 +839,7 @@ export function App() {
     || (selectedScenario === "new-table" && decision.primaryOperation === "new-table-dry-run" && newTableErrors.length > 0)
     || Boolean(activeOperation);
   const statusSource = lastSyncPreview || lastQuickStatus;
+  const statusSourceSync = normalizeSyncCacheResult(statusSource);
   const desktopVersion = startup.desktopVersion || "开发预览";
   const unityVersion = snapshot?.unityPackageVersion || "未识别";
   const cliVersion = startup.sidecarCliVersion || (cliCheck?.source?.includes("sidecar") ? desktopVersion : cliCheck?.source || "未识别");
@@ -916,7 +924,7 @@ export function App() {
 
       <section className="status-strip">
         <StatusCard title="在线表" value={statusSource?.branchStatus ? `${statusSource.branchStatus.tableCountRegistered || 0}/${statusSource.branchStatus.tableCountExpected || 0} 已登记` : "等待读取"} detail="以 live registry 为准。" />
-        <StatusCard title="本地 cache" value={statusSource?.syncCacheSummary?.cacheStatus || "等待预览"} detail={summarizeLifecycleResult(statusSource)} />
+        <StatusCard title="本地 cache" value={statusSourceSync?.cacheStatus || "等待预览"} detail={summarizeLifecycleResult(statusSource)} />
         <StatusCard title="PR gate" value={lastGateReport?.prGateReport?.gateState || "等待检查"} detail={summarizeLifecycleResult(lastGateReport)} url={snapshot?.prUrl} onOpen={openExternal} />
         <StatusCard title="飞书注册中心" value={snapshot?.registryBaseToken ? "已配置" : "等待识别"} detail={`Base: ${redact(snapshot?.registryBaseToken || "")}`} url={snapshot?.registryBaseUrl} onOpen={openExternal} />
       </section>
@@ -1055,7 +1063,7 @@ export function App() {
         {logExpanded && visibleParsed ? (
           <div className="result-details">
             <p>{summarizeLifecycleResult(visibleParsed)}</p>
-            {visibleParsed.syncCacheSummary ? <SyncTableSummary summary={visibleParsed.syncCacheSummary} /> : null}
+            {normalizeSyncCacheResult(visibleParsed) ? <SyncTableSummary result={visibleParsed} /> : null}
             {visibleResult?.resultPath && viewMode === "programmer" ? <p className="muted">result：{visibleResult.resultPath}</p> : null}
           </div>
         ) : null}
@@ -1123,22 +1131,21 @@ function StatusCard(props: { title: string; value: string; detail: string; url?:
 }
 
 function resultNextAction(result: LifecycleResultLike | null, bridgeSessionDir: string): { operation: string; label: string } | null {
-  if (!result?.syncCacheSummary) {
+  const normalized = normalizeSyncCacheResult(result);
+  if (!normalized) {
     return null;
   }
 
-  if (result.operation === "sync-status" || result.operation === "registry-status") {
+  if (result?.operation === "sync-status" || result?.operation === "registry-status") {
     return { operation: "sync-cache-dry-run", label: "完整同步预览" };
   }
 
-  const status = (result.syncCacheSummary.cacheStatus || "").toLowerCase();
-  const next = result.syncCacheSummary.nextAction || result.nextAction || "";
-  if ((next === "write-cache" || status === "needsupdate" || status === "missingcache") && result.syncCacheSummary.canApplyCache !== false) {
-    const count = Math.max(1, syncWritableTableCount(result.syncCacheSummary));
+  if (normalized.nextAction === "write-cache" && normalized.canApplyCache) {
+    const count = Math.max(1, syncWritableTableCount(normalized));
     return { operation: "sync-cache-apply", label: `写入本地 cache（${count} 张）` };
   }
 
-  if (next === "import-unity" || status === "uptodate") {
+  if (normalized.nextAction === "import-unity" || normalized.cacheStatus === "upToDate") {
     return bridgeSessionDir
       ? { operation: "unity-import", label: "导入 Unity asset" }
       : null;
@@ -1147,8 +1154,8 @@ function resultNextAction(result: LifecycleResultLike | null, bridgeSessionDir: 
   return null;
 }
 
-function SyncTableSummary(props: { summary: LifecycleResultLike["syncCacheSummary"] }) {
-  const summary = props.summary;
+function SyncTableSummary(props: { result: LifecycleResultLike }) {
+  const summary = normalizeSyncCacheResult(props.result);
   if (!summary) {
     return null;
   }

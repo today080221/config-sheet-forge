@@ -1,15 +1,23 @@
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   decidePrMerge,
   decideSyncImport,
+  normalizeSyncCacheResult,
   ordinaryToolText,
   primaryToolAction,
   shouldShowBotSecretForm,
+  summarizeLifecycleResult,
+  syncResultSummaryLine,
   validateNewTableDraft,
   type LifecycleResultLike,
   type NewTableDraft,
   type ToolCheckLike
 } from "../src/workflow";
+
+const tableIds = Array.from({ length: 16 }, (_, index) => `Table${index + 1}`);
 
 function syncPreview(status: string, patch: Partial<LifecycleResultLike["syncCacheSummary"]> = {}): LifecycleResultLike {
   return {
@@ -37,7 +45,91 @@ function syncPreview(status: string, patch: Partial<LifecycleResultLike["syncCac
   };
 }
 
+function projectNeedsUpdateFixture(): LifecycleResultLike {
+  return {
+    schemaVersion: "config-sheet-forge.lifecycle/v1",
+    operation: "sync-cache",
+    dryRun: true,
+    success: true,
+    requestFingerprint: "77e4954905e9149690d45fca613a8ee997377b4547cdb0929aee00f195f34d3a",
+    previewFingerprint: "77e4954905e9149690d45fca613a8ee997377b4547cdb0929aee00f195f34d3a",
+    cacheStatus: null,
+    nextAction: "write-cache",
+    canApplyCache: true,
+    syncCacheSummary: {
+      cacheStatus: "needsUpdate",
+      canApplyCache: true,
+      nextAction: "write-cache",
+      previewFingerprint: "77e4954905e9149690d45fca613a8ee997377b4547cdb0929aee00f195f34d3a",
+      tableCount: 16,
+      changedTables: [...tableIds],
+      missingCacheTables: [],
+      upToDateTables: [],
+      blockedTables: [],
+      triangulationFailedCount: 0,
+      tables: tableIds.map((tableId) => ({
+        tableId,
+        displayName: tableId,
+        cacheStatus: "needsUpdate",
+        onlineSemanticHash: `online-${tableId}`,
+        localSemanticHash: `local-${tableId}`,
+        needsWriteCache: true,
+        blockers: []
+      }))
+    }
+  };
+}
+
 describe("Desktop workflow state machine", () => {
+  it("normalizes sync-cache result from syncCacheSummary when top-level cacheStatus is null", () => {
+    const normalized = normalizeSyncCacheResult(projectNeedsUpdateFixture());
+
+    expect(normalized?.cacheStatus).toBe("needsUpdate");
+    expect(normalized?.nextAction).toBe("write-cache");
+    expect(normalized?.canApplyCache).toBe(true);
+    expect(normalized?.changedTables).toHaveLength(16);
+    expect(normalized?.tables).toHaveLength(16);
+  });
+
+  it("routes needsUpdate fixture to write-cache with a planner summary", () => {
+    const fixture = projectNeedsUpdateFixture();
+    const decision = decideSyncImport({ lastSyncPreview: fixture });
+
+    expect(decision.primaryOperation).toBe("sync-cache-apply");
+    expect(decision.primaryLabel).toBe("写入本地 cache（16 张）");
+    expect(decision.primaryLabel).not.toBe("预览同步");
+    expect(summarizeLifecycleResult(fixture)).toBe("预览通过，16 张表需要写入 cache，下一步：写入本地 cache。");
+    expect(syncResultSummaryLine(fixture)).toContain("下一步：写入本地 cache");
+  });
+
+  it("restores write-cache state from an existing desktop sync-cache result file", () => {
+    const root = mkdtempSync(join(tmpdir(), "csforge-desktop-restore-"));
+    const resultDir = join(root, "Temp", "ConfigSheetForge", "desktop");
+    mkdirSync(resultDir, { recursive: true });
+    const resultPath = join(resultDir, "sync-cache.result.json");
+    writeFileSync(resultPath, JSON.stringify(projectNeedsUpdateFixture(), null, 2), "utf8");
+
+    const restored = JSON.parse(readFileSync(resultPath, "utf8")) as LifecycleResultLike;
+    const decision = decideSyncImport({ lastSyncPreview: restored });
+    const normalized = normalizeSyncCacheResult(restored);
+
+    expect(decision.conclusion).not.toContain("还没有同步预览");
+    expect(decision.primaryOperation).toBe("sync-cache-apply");
+    expect(decision.primaryLabel).toContain("写入本地 cache");
+    expect(normalized?.changedTables).toHaveLength(16);
+  });
+
+  it("planner sync result smoke has no debug noise and shows the next action", () => {
+    const summary = syncResultSummaryLine(projectNeedsUpdateFixture());
+
+    expect(summary).toContain("预览通过");
+    expect(summary).toContain("16 张表");
+    expect(summary).toContain("写入本地 cache");
+    for (const leak of ["{", "}", "task-", "PID", "stack trace", "System.IO", "config-sheet-forge sync-cache"]) {
+      expect(summary).not.toContain(leak);
+    }
+  });
+
   it("routes upToDate sync preview to Unity import instead of writing cache", () => {
     const decision = decideSyncImport({
       lastSyncPreview: syncPreview("upToDate"),

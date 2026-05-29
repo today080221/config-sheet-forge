@@ -311,6 +311,7 @@ namespace ConfigSheetForge.Core
 
     public sealed class LifecycleContractResult
     {
+        public string SchemaVersion { get; set; } = "config-sheet-forge.lifecycle/v1";
         public string Operation { get; set; } = "";
         public bool DryRun { get; set; }
         public bool Success { get; set; } = true;
@@ -332,8 +333,14 @@ namespace ConfigSheetForge.Core
         public Dictionary<string, string> DocumentationTargets { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public string RequestFingerprint { get; set; } = "";
         public string PreviewFingerprint { get; set; } = "";
+        public string CacheStatus { get; set; } = "";
         public bool CanApplyCache { get; set; }
         public string NextAction { get; set; } = "";
+        public List<string> ChangedTables { get; set; } = new List<string>();
+        public List<string> MissingCacheTables { get; set; } = new List<string>();
+        public List<string> UpToDateTables { get; set; } = new List<string>();
+        public List<string> BlockedTables { get; set; } = new List<string>();
+        public List<SyncTableCacheStatus> Tables { get; set; } = new List<SyncTableCacheStatus>();
         public Dictionary<string, string> RequestSummary { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public PrGateReport PrGateReport { get; set; } = new PrGateReport();
         public string GateReportPath { get; set; } = "";

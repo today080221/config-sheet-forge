@@ -38,6 +38,8 @@ Desktop 是 Config Sheet Forge 的官方主工作台。它负责日常配表 Sou
 
 0.4.38 还把最近结果区改成真正的轻量摘要：默认只显示成功/失败、表数量、下一步按钮；展开后才看表格详情；完整命令、progress ndjson、stdout/stderr 和 result JSON 只在 Debug。新建配表也改成字段编辑器，可以添加、删除、移动、复制字段，字段类型只允许 ExcelToSO 支持的安全类型。
 
+从 0.4.39 开始，Desktop 不再在多个组件里散读同步结果 JSON，而是先经过 `normalizeSyncCacheResult`。这层会兼容 `syncCacheSummary.cacheStatus`、顶层 `nextAction/canApplyCache` 和后续 `schemaVersion` 扩展。实际结果里即使顶层 `cacheStatus` 为空，只要 summary 说明 `needsUpdate`，Desktop 也会恢复到“写入本地 cache”，关闭重开后仍保持这个下一步。
+
 Legacy 只用于没有 Desktop、CI 调试或救急 fallback。普通策划不需要从 Legacy 开始。
 
 ## Desktop v1 页面
@@ -108,6 +110,19 @@ Desktop 会检查：
 同步预览是“完整预检”，会真实读取在线表并临时导出 xlsx，所以 16 张表可能跑几分钟。运行时页面会显示当前第几张表、TableId、当前动作和已用时间。点击取消只会终止本次预览，不会写 cache，也不会改飞书。
 
 如果只是想确认当前分支在线表是否登记、cache 文件是否存在或 hash 是否匹配，用“快速状态检查（不导出 xlsx）”。它不会导出 16 张 xlsx，也不能替代 apply/PR gate 前的完整预检。
+
+#### sync-cache result schema
+
+Desktop 只依赖结构化 result，不解析 stdout。`sync-cache` dry-run / apply 会写到 `Temp/ConfigSheetForge/desktop/sync-cache.result.json` 或 `sync-cache-apply.result.json`，关键字段如下：
+
+- `schemaVersion`：当前为 `config-sheet-forge.lifecycle/v1`。
+- 顶层镜像字段：`cacheStatus`、`previewFingerprint`、`canApplyCache`、`nextAction`、`changedTables`、`missingCacheTables`、`upToDateTables`、`blockedTables`、`tables`。
+- `syncCacheSummary`：同样包含上述同步摘要，是 Desktop normalized 状态的主来源。
+- `nextAction=write-cache` 或 `cacheStatus=needsUpdate/missingCache`：下一步是写入本地 cache。
+- `cacheStatus=upToDate`：下一步是导入 Unity asset。
+- `cacheStatus=blocked` 或 `success=false`：停止在阻断态，不能写 cache。
+
+普通视图只展示“预览通过 / N 张表 / 下一步”，完整 JSON 只在 Debug。
 
 ### 写入本地 cache
 
