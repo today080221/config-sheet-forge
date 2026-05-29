@@ -409,7 +409,7 @@ namespace ConfigSheetForge.Unity.Editor
                 return;
             }
 
-            foreach (var file in Directory.GetFiles(commands, "*.json").OrderBy(path => path))
+            foreach (var file in Directory.GetFiles(commands, "*.json").Where(IsBridgeCommandFile).OrderBy(path => path))
             {
                 try
                 {
@@ -451,6 +451,23 @@ namespace ConfigSheetForge.Unity.Editor
                     _recentSummary = "处理 Desktop bridge 命令失败：" + ex.Message;
                 }
             }
+        }
+
+        internal static bool IsBridgeCommandFile(string path)
+        {
+            var name = Path.GetFileName(path) ?? "";
+            if (name.EndsWith(".processed.json", StringComparison.OrdinalIgnoreCase) ||
+                name.EndsWith(".running.json", StringComparison.OrdinalIgnoreCase) ||
+                name.EndsWith(".response.json", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return name.EndsWith(".command.json", StringComparison.OrdinalIgnoreCase) ||
+                   (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
+                    name.IndexOf(".processed.", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    name.IndexOf(".running.", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    name.IndexOf(".response.", StringComparison.OrdinalIgnoreCase) < 0);
         }
 
         private static string ExtractJsonString(string json, string key)

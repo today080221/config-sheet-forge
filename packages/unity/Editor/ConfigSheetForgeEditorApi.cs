@@ -38,6 +38,7 @@ namespace ConfigSheetForge.Unity.Editor
         public string summary = "";
         public string nextAction = "";
         public string[] humanReadableFailures = new string[0];
+        public string[] debugPreflight = new string[0];
         public UnityImportBridgeSummary unityImportSummary = new UnityImportBridgeSummary();
         public UnityImportBridgeItem[] items = new UnityImportBridgeItem[0];
 
@@ -106,10 +107,19 @@ namespace ConfigSheetForge.Unity.Editor
             var fieldRow = Math.Max(0, ExtractInt(settingsText, "field_row") ?? 0);
             var typeRow = Math.Max(0, ExtractInt(settingsText, "type_row") ?? 1);
             var dataStartRow = Math.Max(0, ExtractInt(settingsText, "data_from_row") ?? (typeRow + 2));
+            var debugPreflight = ConfigSheetForgeExcelToSoImporter.BuildCacheImportPreflightDetails(
+                importItems,
+                fieldRow,
+                typeRow,
+                dataStartRow,
+                settingsPath,
+                ConfigSheetForgeExcelToSoImporter.SourceOfTruthProfileId);
             var cacheTypePreflight = ConfigSheetForgeExcelToSoImporter.InspectCacheTypes(importItems, typeRow, dataStartRow, fieldRow);
             if (!cacheTypePreflight.Ready)
             {
-                return Blocked(cacheTypePreflight.Message);
+                var blocked = Blocked(cacheTypePreflight.Message);
+                blocked.debugPreflight = debugPreflight;
+                return blocked;
             }
 
             var imported = ConfigSheetForgeExcelToSoImporter.ImportSourceOfTruthProfile();
@@ -117,6 +127,7 @@ namespace ConfigSheetForge.Unity.Editor
             {
                 success = imported.All(item => item.Success),
                 nextAction = imported.All(item => item.Success) ? "run-pr-gate" : "fix-import",
+                debugPreflight = debugPreflight,
                 items = imported.Select(ToBridgeItem).ToArray()
             };
             result.unityImportSummary.importedCount = imported.Count(item => item.Success);

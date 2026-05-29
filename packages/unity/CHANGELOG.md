@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.47
+
+- 修复 SourceOfTruthCache cache writer 的字段匹配：旧 ExcelToSO 模板字段如 `Pickup Sfx` 现在能匹配 registry/semantic 中的 `pickup_sfx`，不会再丢失音效列或把事件数组写到错误列。
+- Unity thin bridge 处理 Desktop bridge 命令时会跳过 `.processed.json` / `.running.json` / response 文件，避免生成 `.processed.processed.json` 的命令循环。
+- Unity 导入 SourceOfTruthCache 前会把 profile id、settings path、每张 cache xlsx 路径、工作表名以及前 4 行预览写入 bridge result 的 Debug preflight，普通视图仍只显示中文摘要。
+- 增加回归测试覆盖项目旧 ExcelToSO 物理模板：保留 sheet name、字段大小写、说明行、`data_from_row`，不生成 `column_4`，并验证 `Pickup Sfx` 能映射到 `pickup_sfx`。
+
 ## 0.4.46
 
 - `repair-cache-dialect` / sync-cache cache writer 现在会保留旧 ExcelToSO 物理模板语义：工作表名、字段行大小写、类型行 dialect、说明行和 `data_from_row` 都从旧/default ExcelToSO xlsx 模板继承，不再用 TableId / canonical lowercase schema 重建。

@@ -6721,7 +6721,21 @@ public static class Program
 
     private static string NormalizeFieldKey(string value)
     {
-        return (value ?? "").Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "";
+        }
+
+        var builder = new StringBuilder(value.Length);
+        foreach (var ch in value.Trim())
+        {
+            if (char.IsLetterOrDigit(ch))
+            {
+                builder.Append(char.ToLowerInvariant(ch));
+            }
+        }
+
+        return builder.ToString();
     }
 
     private static async Task<string> ReadExistingHashAsync(string path)

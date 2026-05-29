@@ -473,6 +473,12 @@ foreach ($requiredV446Marker in @("ReadExcelToSoPhysicalTemplate", "ValidateExce
   }
 }
 
+foreach ($requiredV447Marker in @("Pickup Sfx", "pickup_sfx", "BuildCacheImportPreflightDetails", "debugPreflight", "IsBridgeCommandFile", ".processed.json", ".running.json")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs) + "`n" + (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeExcelToSoImporter.cs) + "`n" + (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeEditorApi.cs) + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV447Marker*") {
+    throw "Unity v0.4.47 ExcelToSO import bridge marker is missing: $requiredV447Marker"
+  }
+}
+
 if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
   throw "Unity bridge import-assets must not open the Legacy sync window."
 }

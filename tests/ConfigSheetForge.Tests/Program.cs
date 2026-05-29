@@ -3648,6 +3648,52 @@ static void ExcelToSoCacheWriterPreservesPhysicalTemplateSemantics()
         AssertEqual("ID,RoomType,Prefab", string.Join(",", ReadTypeRowFromXlsx(roomOutput, 0)), "Blank trailing template columns should stop the field list.");
         AssertTrue(!ReadTypeRowFromXlsx(roomOutput, 0).Any(field => string.Equals(field, "column_4", StringComparison.OrdinalIgnoreCase)), "Cache writer must not generate column_4 fields.");
         AssertEqual("1,2", ReadTypeRowFromXlsx(roomOutput, 3)[2], "Json array values should be restored to ExcelToSO list cell text.");
+
+        var autoPickupSource = Path.Combine(temp, "Excel", "AutoPickupDropData.xlsx");
+        CreateTypeHintXlsx(autoPickupSource,
+            new[] { "Id", "InteractionTime", "InteractionRadius", "Prefab", "Pickup Sfx", "InteractionStartEventCallback", "InteractionEndEventCallback" },
+            new[] { "int", "float", "float", "string", "string", "string", "string[]" },
+            sheetName: "AutoPickupDropEntry",
+            descriptionRow: new[] { "唯一Id", "交互所需时间", "交互范围半径", "Assets/Prefabs/Drop 下", "Assets/Media/Audios/Skill", "交互开始事件", "交互结束事件" });
+        var autoPickupWorkbook = SampleWorkbookWithColumns(
+            ("id", "integer"),
+            ("interactiontime", "number"),
+            ("interactionradius", "number"),
+            ("prefab", "string"),
+            ("pickup_sfx", "string"),
+            ("interactionstarteventcallback", "string"),
+            ("interactionendeventcallback", "json"));
+        autoPickupWorkbook.Sheets[0].Rows.Clear();
+        var autoPickupRow = new RowDocument { StableId = "1", SourceIndex = 4 };
+        autoPickupRow.Cells["id"] = new CellValue { RawText = "1", NormalizedText = "1" };
+        autoPickupRow.Cells["interactiontime"] = new CellValue { RawText = "0.5", NormalizedText = "0.5" };
+        autoPickupRow.Cells["interactionradius"] = new CellValue { RawText = "0.5", NormalizedText = "0.5" };
+        autoPickupRow.Cells["prefab"] = new CellValue { RawText = "InCombatDrop_Heal", NormalizedText = "InCombatDrop_Heal" };
+        autoPickupRow.Cells["pickup_sfx"] = new CellValue { RawText = "掉落物拾取1.mp3", NormalizedText = "掉落物拾取1.mp3" };
+        autoPickupRow.Cells["interactionstarteventcallback"] = new CellValue { RawText = "", NormalizedText = "" };
+        autoPickupRow.Cells["interactionendeventcallback"] = new CellValue { RawText = "[\"heal_player_100\"]", NormalizedText = "[\"heal_player_100\"]" };
+        autoPickupWorkbook.Sheets[0].Rows.Add(autoPickupRow);
+        var autoPickupTable = new TableConfig
+        {
+            Id = "AutoPickupDropData",
+            Name = "AutoPickupDropData",
+            LocalSourcePath = autoPickupSource,
+            UseExcelToSoCacheDialect = true,
+            FieldRow = 0,
+            TypeRow = 1,
+            DescriptionRow = 2,
+            DataStartRow = 3
+        };
+        autoPickupTable.Fields.Add(new ContractFieldSpec { Key = "interactionendeventcallback", ExcelToSoType = "string[]" });
+        var autoPickupPlan = BuildExcelToSoDialectPlanForTest(autoPickupWorkbook, autoPickupTable, temp);
+        var autoPickupOutput = Path.Combine(temp, "AutoPickupDropData.cache.xlsx");
+        WriteExcelToSoCacheXlsxForTest(autoPickupOutput, autoPickupWorkbook, autoPickupTable, autoPickupPlan.TypeRow);
+        var autoPickupData = ReadRowFromXlsxPreservePositions(autoPickupOutput, 3);
+
+        AssertEqual("AutoPickupDropEntry", ReadFirstSheetNameFromXlsx(autoPickupOutput), "AutoPickupDropData cache should preserve the old item sheet name.");
+        AssertTrue(autoPickupData.Count >= 7, "AutoPickupDropData data row should keep all 7 physical template columns. Actual: " + string.Join(",", autoPickupData));
+        AssertEqual("掉落物拾取1.mp3", autoPickupData[4], "Template field 'Pickup Sfx' must match semantic key pickup_sfx instead of losing the sfx value.");
+        AssertEqual("heal_player_100", autoPickupData[6], "InteractionEndEventCallback should stay in the event callback column after physical template mapping.");
     }
     finally
     {
@@ -4186,6 +4232,45 @@ static List<string> ReadTypeRowFromXlsx(string path, int typeRow)
     return row!.Elements(ns + "c")
         .Select(c => ReadTestCellValue(c, sharedStrings))
         .ToList();
+}
+
+static List<string> ReadRowFromXlsxPreservePositions(string path, int rowIndex)
+{
+    using var archive = ZipFile.OpenRead(path);
+    var sharedStrings = ReadTestSharedStrings(archive);
+    var entry = archive.GetEntry("xl/worksheets/sheet1.xml");
+    AssertTrue(entry != null, "Generated xlsx should contain sheet1.xml.");
+    using var stream = entry!.Open();
+    var document = System.Xml.Linq.XDocument.Load(stream);
+    var ns = System.Xml.Linq.XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+    var row = document.Descendants(ns + "row").FirstOrDefault(r => (string?)r.Attribute("r") == (rowIndex + 1).ToString());
+    AssertTrue(row != null, "Generated xlsx should contain requested row.");
+    var cells = new SortedDictionary<int, string>();
+    foreach (var cell in row!.Elements(ns + "c"))
+    {
+        var reference = (string?)cell.Attribute("r") ?? "";
+        var columnIndex = 0;
+        var cursor = 0;
+        while (cursor < reference.Length && char.IsLetter(reference[cursor]))
+        {
+            columnIndex = columnIndex * 26 + (char.ToUpperInvariant(reference[cursor]) - 'A' + 1);
+            cursor++;
+        }
+
+        if (columnIndex > 0)
+        {
+            cells[columnIndex - 1] = ReadTestCellValue(cell, sharedStrings);
+        }
+    }
+
+    var values = new List<string>();
+    var max = cells.Keys.DefaultIfEmpty(-1).Max();
+    for (var i = 0; i <= max; i++)
+    {
+        values.Add(cells.TryGetValue(i, out var value) ? value : "");
+    }
+
+    return values;
 }
 
 static List<string> ReadTestSharedStrings(ZipArchive archive)

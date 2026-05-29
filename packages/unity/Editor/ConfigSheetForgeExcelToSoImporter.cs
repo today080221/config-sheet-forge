@@ -225,6 +225,51 @@ namespace ConfigSheetForge.Unity.Editor
             return preflight;
         }
 
+        public static string[] BuildCacheImportPreflightDetails(IEnumerable<ExcelToSoImportItem> items, int fieldRow, int typeRow, int dataStartRow, string settingsPath, string profileId)
+        {
+            var details = new List<string>
+            {
+                "profileId=" + FirstNonEmpty(profileId, SourceOfTruthProfileId),
+                "settingsPath=" + FirstNonEmpty(settingsPath, "<missing>"),
+                "fieldRow=" + fieldRow.ToString(CultureInfo.InvariantCulture) +
+                ", typeRow=" + typeRow.ToString(CultureInfo.InvariantCulture) +
+                ", descriptionRow=" + Math.Max(0, typeRow + 1).ToString(CultureInfo.InvariantCulture) +
+                ", data_from_row=" + dataStartRow.ToString(CultureInfo.InvariantCulture)
+            };
+
+            foreach (var item in items ?? Enumerable.Empty<ExcelToSoImportItem>())
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                var table = FirstNonEmpty(item.TableId, Path.GetFileNameWithoutExtension(item.CacheXlsxPath), "<unknown>");
+                if (string.IsNullOrWhiteSpace(item.CacheXlsxPath) || !File.Exists(item.CacheXlsxPath))
+                {
+                    details.Add(table + ": cache xlsx 不存在：" + FirstNonEmpty(item.CacheXlsxPath, "<empty>"));
+                    continue;
+                }
+
+                try
+                {
+                    var matrix = ReadFirstWorksheetMatrix(item.CacheXlsxPath, out var sheetName);
+                    details.Add(table + ": xlsx=" + item.CacheXlsxPath + ", sheet=" + sheetName);
+                    var previewRows = Math.Min(4, matrix.Count);
+                    for (var i = 0; i < previewRows; i++)
+                    {
+                        details.Add(table + ": row" + (i + 1).ToString(CultureInfo.InvariantCulture) + "=" + string.Join(" | ", matrix[i].Take(12)));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    details.Add(table + ": 无法读取前 4 行预览：" + ex.Message);
+                }
+            }
+
+            return details.ToArray();
+        }
+
         private static string InspectOpenXmlCompatibility(string xlsxPath)
         {
             using (var archive = ZipFile.OpenRead(xlsxPath))
