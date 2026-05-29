@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.45
+
+- 修复 `repair-cache-dialect --yes` 生成的 cache xlsx 仍无法被 ExcelToSO v1.0.6 / ExcelDataReader 读取的问题。cache writer 现在写出 `xl/sharedStrings.xml` 和 `xl/styles.xml`，字符串单元格使用 shared string，并写入完整 worksheet dimension。
+- `repair-cache-dialect` apply 后会做 ExcelToSO 兼容性 postflight；如果生成的 xlsx 缺少必要 OpenXML 部件或本机 Excel.dll 无法打开，结果会 `success=false` / `cacheStatus=blocked`，不会推荐导入 Unity。
+- Unity 导入前 preflight 现在会拦截缺 `sharedStrings.xml` / `styles.xml` 的 cache 文件，并用中文提示先回 Desktop 修复 cache 类型行，避免只在 Console 看到 `NullReferenceException`。
+- 增加回归测试覆盖：v0.4.44 风格 inlineStr 极简 xlsx，经 `repair-cache-dialect --yes` 后必须能被 ExcelToSO/ExcelDataReader 兼容 reader 打开，且类型行不再含 `json`。
+
 ## 0.4.44
 
 - 修复 `repair-cache-dialect` 漏检问题：项目未显式声明 `typeRow` 时，现在会按 ExcelToSO 常规布局推导“字段行下一行”为类型行；即使 xlsx 的 `dimension ref=A1` 失真，也会扫描实际 `sheetData` 单元格，能发现 `SkillsData!E2=json` 这类右侧类型列。

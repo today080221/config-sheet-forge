@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Xml;
 using System.Xml.Linq;
 using ConfigSheetForge.Core;
 using ConfigSheetForge.Providers.Lark;
@@ -1338,7 +1339,20 @@ public static class Program
                 : table.Id + " 已重写 cache 类型行；没有联网，没有改 semantic/hash。";
             if (!request.DryRun)
             {
-                WriteExcelToSoCacheXlsx(xlsxPath, workbook, table, plan.TypeRow);
+                try
+                {
+                    WriteExcelToSoCacheXlsx(xlsxPath, workbook, table, plan.TypeRow, workspace.Root);
+                }
+                catch (Exception ex) when (ex is CliException || ex is IOException || ex is InvalidDataException || ex is UnauthorizedAccessException)
+                {
+                    action.Status = "blocked";
+                    action.Message = table.Id + " cache 类型行重写后无法通过 ExcelToSO 可读性检查：" + ex.Message;
+                    result.SyncCacheSummary.BlockedTables.Add(table.Id);
+                    tableStatus.CacheStatus = "blocked";
+                    tableStatus.Blockers.Add(action.Message);
+                    result.AddFailure(action.Message);
+                    continue;
+                }
             }
         }
 
@@ -5194,7 +5208,7 @@ public static class Program
                     throw new CliException("无法写入 ExcelToSO cache xlsx：" + string.Join("；", plan.Errors), 2);
                 }
 
-                WriteExcelToSoCacheXlsx(xlsxPath, workbook, table, plan.TypeRow);
+                WriteExcelToSoCacheXlsx(xlsxPath, workbook, table, plan.TypeRow, workspace == null ? Directory.GetCurrentDirectory() : workspace.Root);
             }
             else
             {
@@ -5498,6 +5512,11 @@ public static class Program
 
         try
         {
+            if (CacheXlsxNeedsExcelToSoOpenXmlRewrite(path))
+            {
+                return true;
+            }
+
             var matrix = ReadFirstWorksheetMatrix(path);
             if (typeRowIndex >= matrix.Count)
             {
@@ -5518,6 +5537,36 @@ public static class Program
         }
 
         return false;
+    }
+
+    private static bool CacheXlsxNeedsExcelToSoOpenXmlRewrite(string path)
+    {
+        try
+        {
+            using (var archive = ZipFile.OpenRead(path))
+            {
+                if (archive.GetEntry("xl/sharedStrings.xml") == null || archive.GetEntry("xl/styles.xml") == null)
+                {
+                    return true;
+                }
+
+                var workbook = ReadWorkbookSheets(archive);
+                var sheetPath = workbook.Count == 0 ? "xl/worksheets/sheet1.xml" : workbook[0];
+                var entry = archive.GetEntry(sheetPath);
+                if (entry == null)
+                {
+                    return true;
+                }
+
+                var ns = XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+                return ReadXml(entry).Descendants(ns + "c")
+                    .Any(cell => string.Equals(cell.Attribute("t")?.Value, "inlineStr", StringComparison.OrdinalIgnoreCase));
+            }
+        }
+        catch (Exception ex) when (ex is IOException || ex is InvalidDataException || ex is UnauthorizedAccessException || ex is XmlException)
+        {
+            return true;
+        }
     }
 
     private static int EffectiveTypeRow(TableConfig table)
@@ -5559,7 +5608,7 @@ public static class Program
         }
     }
 
-    private static void WriteExcelToSoCacheXlsx(string path, WorkbookDocument workbook, TableConfig table, IList<string> typeRow)
+    private static void WriteExcelToSoCacheXlsx(string path, WorkbookDocument workbook, TableConfig table, IList<string> typeRow, string workspaceRoot)
     {
         var sheet = workbook.Sheets.FirstOrDefault();
         if (sheet == null)
@@ -5577,11 +5626,28 @@ public static class Program
 
         using (var archive = ZipFile.Open(tempPath, ZipArchiveMode.Create))
         {
+            var sharedStrings = BuildSharedStringTable(rows);
             WriteZipText(archive, "[Content_Types].xml", BuildContentTypesXml());
             WriteZipText(archive, "_rels/.rels", BuildRootRelsXml());
             WriteZipText(archive, "xl/workbook.xml", BuildWorkbookXml(SanitizeSheetName(FirstNonEmpty(sheet.Name, table.Name, table.Id))));
             WriteZipText(archive, "xl/_rels/workbook.xml.rels", BuildWorkbookRelsXml());
-            WriteZipText(archive, "xl/worksheets/sheet1.xml", BuildWorksheetXml(rows));
+            WriteZipText(archive, "xl/styles.xml", BuildStylesXml());
+            WriteZipText(archive, "xl/sharedStrings.xml", BuildSharedStringsXml(sharedStrings.Values));
+            WriteZipText(archive, "xl/worksheets/sheet1.xml", BuildWorksheetXml(rows, sharedStrings.Indexes));
+        }
+
+        if (!ValidateExcelToSoCompatibleXlsx(tempPath, workspaceRoot, out var validationError))
+        {
+            try
+            {
+                File.Delete(tempPath);
+            }
+            catch
+            {
+                // Best effort cleanup; the caller reports the validation failure.
+            }
+
+            throw new CliException("生成的 cache xlsx 不能被 ExcelToSO 读取：" + validationError, 2);
         }
 
         if (File.Exists(path))
@@ -5634,6 +5700,37 @@ public static class Program
         return rows;
     }
 
+    private sealed class SharedStringTable
+    {
+        public Dictionary<string, int> Indexes { get; } = new(StringComparer.Ordinal);
+        public List<string> Values { get; } = new();
+    }
+
+    private static SharedStringTable BuildSharedStringTable(IList<List<string>> rows)
+    {
+        var table = new SharedStringTable();
+        foreach (var row in rows)
+        {
+            foreach (var value in row)
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    continue;
+                }
+
+                if (table.Indexes.ContainsKey(value))
+                {
+                    continue;
+                }
+
+                table.Indexes[value] = table.Values.Count;
+                table.Values.Add(value);
+            }
+        }
+
+        return table;
+    }
+
     private static string BuildContentTypesXml()
     {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
@@ -5641,6 +5738,8 @@ public static class Program
                "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>" +
                "<Default Extension=\"xml\" ContentType=\"application/xml\"/>" +
                "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>" +
+               "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>" +
+               "<Override PartName=\"/xl/sharedStrings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml\"/>" +
                "<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>" +
                "</Types>";
     }
@@ -5666,13 +5765,51 @@ public static class Program
         return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
                "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>" +
+               "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>" +
+               "<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/>" +
                "</Relationships>";
     }
 
-    private static string BuildWorksheetXml(IList<List<string>> rows)
+    private static string BuildStylesXml()
+    {
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+               "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" +
+               "<fonts count=\"1\"><font><sz val=\"11\"/><color theme=\"1\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font></fonts>" +
+               "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>" +
+               "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>" +
+               "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>" +
+               "<cellXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/></cellXfs>" +
+               "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>" +
+               "<dxfs count=\"0\"/><tableStyles count=\"0\" defaultTableStyle=\"TableStyleMedium9\" defaultPivotStyle=\"PivotStyleLight16\"/>" +
+               "</styleSheet>";
+    }
+
+    private static string BuildSharedStringsXml(IList<string> values)
+    {
+        var ns = XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+        var root = new XElement(ns + "sst",
+            new XAttribute("count", values.Count.ToString(CultureInfo.InvariantCulture)),
+            new XAttribute("uniqueCount", values.Count.ToString(CultureInfo.InvariantCulture)));
+        foreach (var value in values)
+        {
+            var text = new XElement(ns + "t", value ?? "");
+            if (!string.IsNullOrEmpty(value) && value.Length != value.Trim().Length)
+            {
+                text.SetAttributeValue(XNamespace.Xml + "space", "preserve");
+            }
+
+            root.Add(new XElement(ns + "si", text));
+        }
+
+        return new XDocument(new XDeclaration("1.0", "UTF-8", "yes"), root).ToString(SaveOptions.DisableFormatting);
+    }
+
+    private static string BuildWorksheetXml(IList<List<string>> rows, IReadOnlyDictionary<string, int> sharedStringIndexes)
     {
         var ns = XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
         var sheetData = new XElement(ns + "sheetData");
+        var rowCount = Math.Max(1, rows.Count);
+        var columnCount = Math.Max(1, rows.Select(r => r.Count).DefaultIfEmpty(1).Max());
         for (var r = 0; r < rows.Count; r++)
         {
             var rowElement = new XElement(ns + "row", new XAttribute("r", (r + 1).ToString(CultureInfo.InvariantCulture)));
@@ -5685,22 +5822,178 @@ public static class Program
                     continue;
                 }
 
-                var text = new XElement(ns + "t", value);
-                if (value.Length != value.Trim().Length)
+                if (!sharedStringIndexes.TryGetValue(value, out var sharedIndex))
                 {
-                    text.SetAttributeValue(XNamespace.Xml + "space", "preserve");
+                    sharedIndex = 0;
                 }
-
                 rowElement.Add(new XElement(ns + "c",
                     new XAttribute("r", ToA1(c, r)),
-                    new XAttribute("t", "inlineStr"),
-                    new XElement(ns + "is", text)));
+                    new XAttribute("t", "s"),
+                    new XElement(ns + "v", sharedIndex.ToString(CultureInfo.InvariantCulture))));
             }
 
             sheetData.Add(rowElement);
         }
 
-        return new XDocument(new XDeclaration("1.0", "UTF-8", "yes"), new XElement(ns + "worksheet", sheetData)).ToString(SaveOptions.DisableFormatting);
+        return new XDocument(new XDeclaration("1.0", "UTF-8", "yes"),
+            new XElement(ns + "worksheet",
+                new XElement(ns + "dimension", new XAttribute("ref", "A1:" + ToA1(columnCount - 1, rowCount - 1))),
+                sheetData)).ToString(SaveOptions.DisableFormatting);
+    }
+
+    private static bool ValidateExcelToSoCompatibleXlsx(string path, string workspaceRoot, out string error)
+    {
+        error = "";
+        try
+        {
+            using (var archive = ZipFile.OpenRead(path))
+            {
+                var required = new[]
+                {
+                    "[Content_Types].xml",
+                    "_rels/.rels",
+                    "xl/workbook.xml",
+                    "xl/_rels/workbook.xml.rels",
+                    "xl/worksheets/sheet1.xml",
+                    "xl/sharedStrings.xml",
+                    "xl/styles.xml"
+                };
+                var missing = required.Where(entry => archive.GetEntry(entry) == null).ToList();
+                if (missing.Count > 0)
+                {
+                    error = "xlsx 缺少 ExcelDataReader 需要的 OpenXML 部件：" + string.Join(", ", missing);
+                    return false;
+                }
+
+                var sharedStrings = ReadSharedStrings(archive);
+                var sheets = ReadWorkbookSheets(archive);
+                if (sheets.Count == 0)
+                {
+                    error = "xlsx workbook 没有声明 worksheet。";
+                    return false;
+                }
+
+                var matrix = ReadWorksheetMatrix(archive, sheets[0], sharedStrings);
+                if (matrix.Count == 0)
+                {
+                    error = "xlsx 第一张 worksheet 没有可读取的单元格。";
+                    return false;
+                }
+            }
+
+            if (!TryValidateWithLegacyExcelReader(path, workspaceRoot, out var readerError))
+            {
+                error = readerError;
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException || ex is InvalidDataException || ex is UnauthorizedAccessException || ex is XmlException || ex is TargetInvocationException || ex is BadImageFormatException)
+        {
+            error = ex is TargetInvocationException target && target.InnerException != null ? target.InnerException.Message : ex.Message;
+            return false;
+        }
+    }
+
+    private static bool TryValidateWithLegacyExcelReader(string path, string workspaceRoot, out string error)
+    {
+        error = "";
+        var excelDll = FindLegacyExcelDll(workspaceRoot);
+        if (string.IsNullOrWhiteSpace(excelDll))
+        {
+            return true;
+        }
+
+        ResolveEventHandler? resolver = null;
+        var excelDir = Path.GetDirectoryName(excelDll) ?? "";
+        try
+        {
+            resolver = (_, args) =>
+            {
+                var name = new AssemblyName(args.Name).Name + ".dll";
+                var candidate = Path.Combine(excelDir, name);
+                return File.Exists(candidate) ? Assembly.LoadFrom(candidate) : null;
+            };
+            AppDomain.CurrentDomain.AssemblyResolve += resolver;
+            var assembly = Assembly.LoadFrom(excelDll);
+            var factory = assembly.GetType("Excel.ExcelReaderFactory", throwOnError: false);
+            var method = factory == null
+                ? null
+                : factory.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                    .FirstOrDefault(m => string.Equals(m.Name, "CreateOpenXmlReader", StringComparison.Ordinal) &&
+                                         m.GetParameters().Length == 1 &&
+                                         typeof(Stream).IsAssignableFrom(m.GetParameters()[0].ParameterType));
+            if (method == null)
+            {
+                return true;
+            }
+
+            using (var stream = File.OpenRead(path))
+            {
+                var reader = method.Invoke(null, new object[] { stream });
+                try
+                {
+                    reader?.GetType().GetMethod("Read", Type.EmptyTypes)?.Invoke(reader, Array.Empty<object>());
+                }
+                finally
+                {
+                    (reader as IDisposable)?.Dispose();
+                }
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            var root = ex is TargetInvocationException target && target.InnerException != null ? target.InnerException : ex;
+            error = "ExcelToSO/ExcelDataReader 无法打开 cache xlsx：" + root.GetType().Name + " " + root.Message;
+            return false;
+        }
+        finally
+        {
+            if (resolver != null)
+            {
+                AppDomain.CurrentDomain.AssemblyResolve -= resolver;
+            }
+        }
+    }
+
+    private static string FindLegacyExcelDll(string workspaceRoot)
+    {
+        var env = Environment.GetEnvironmentVariable("CONFIG_SHEET_FORGE_EXCEL_DLL");
+        if (!string.IsNullOrWhiteSpace(env) && File.Exists(env))
+        {
+            return env;
+        }
+
+        var roots = new List<string>();
+        if (!string.IsNullOrWhiteSpace(workspaceRoot))
+        {
+            roots.Add(Path.Combine(workspaceRoot, "Packages"));
+            roots.Add(Path.Combine(workspaceRoot, "Library", "PackageCache"));
+        }
+
+        roots.Add(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "excel_to_scriptableobject", "Editor")));
+        roots.Add(Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..", "excel_to_scriptableobject", "Editor")));
+
+        foreach (var root in roots.Where(Directory.Exists))
+        {
+            try
+            {
+                var candidate = Directory.EnumerateFiles(root, "Excel.dll", SearchOption.AllDirectories).FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(candidate))
+                {
+                    return candidate;
+                }
+            }
+            catch
+            {
+                // Best effort only. Structural OpenXML validation still runs when Excel.dll is unavailable.
+            }
+        }
+
+        return "";
     }
 
     private static List<List<string>> ReadFirstWorksheetMatrix(string path)
@@ -7427,7 +7720,7 @@ public static class Program
                             throw new CliException("无法写入 ExcelToSO cache xlsx：" + string.Join("；", plan.Errors), 2);
                         }
 
-                        WriteExcelToSoCacheXlsx(xlsxPath, localWorkbook, cacheTable, plan.TypeRow);
+                        WriteExcelToSoCacheXlsx(xlsxPath, localWorkbook, cacheTable, plan.TypeRow, Directory.GetCurrentDirectory());
                     }
                     else
                     {

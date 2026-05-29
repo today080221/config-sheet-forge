@@ -95,6 +95,8 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("excel to so cache dialect blocks unresolved json", () => RunSync(ExcelToSoCacheDialectBlocksUnresolvedJson)),
     ("repair-cache-dialect rewrites xlsx type row offline", RepairCacheDialectRewritesXlsxTypeRowOffline),
     ("repair-cache-dialect scans stale dimension right-side columns", RepairCacheDialectScansStaleDimensionRightSideColumns),
+    ("repair-cache-dialect writes exceldatareader compatible xlsx", RepairCacheDialectWritesExcelDataReaderCompatibleXlsx),
+    ("repair-cache-dialect rewrites already typed legacy xlsx package", RepairCacheDialectRewritesAlreadyTypedLegacyXlsxPackage),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
     ("seed lifecycle rejects user fallback", SeedLifecycleRejectsUserFallback),
@@ -3398,6 +3400,178 @@ static async Task RepairCacheDialectScansStaleDimensionRightSideColumns()
     }
 }
 
+static async Task RepairCacheDialectWritesExcelDataReaderCompatibleXlsx()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-repair-dialect-compatible-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var state = Path.Combine(temp, ".config-sheet-forge");
+        var cache = Path.Combine(state, "cache");
+        var excelCache = Path.Combine(state, "excel-cache");
+        Directory.CreateDirectory(cache);
+        Directory.CreateDirectory(excelCache);
+        await File.WriteAllTextAsync(Path.Combine(state, "config.json"), JsonSerializer.Serialize(new ForgeConfig(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var source = Path.Combine(temp, "Excel", "WeaponData.xlsx");
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        CreateTypeHintXlsx(source,
+            new[] { "id", "actives", "passives" },
+            new[] { "Int", "int[]", "string[]" },
+            dimensionRef: "A1");
+
+        var workbook = SampleWorkbookWithColumns(("id", "integer"), ("actives", "json"), ("passives", "json"));
+        await File.WriteAllTextAsync(Path.Combine(cache, "WeaponData.semantic.json"), JsonSerializer.Serialize(workbook, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        await File.WriteAllTextAsync(Path.Combine(cache, "WeaponData.sha256"), SemanticHasher.ComputeHash(workbook) + Environment.NewLine);
+        var xlsx = Path.Combine(excelCache, "WeaponData.xlsx");
+        CreateTypeHintXlsx(xlsx,
+            new[] { "id", "actives", "passives" },
+            new[] { "integer", "json", "json" },
+            dimensionRef: "A1");
+
+        var request = new LifecycleContractRequest
+        {
+            Operation = "repair-cache-dialect",
+            DryRun = true,
+            SeedFromLocalXlsx = new SeedFromLocalXlsxContract
+            {
+                CacheDirectory = ".config-sheet-forge/cache",
+                ExcelCacheDirectory = ".config-sheet-forge/excel-cache"
+            }
+        };
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract
+        {
+            TableId = "WeaponData",
+            DisplayName = "WeaponData",
+            SourceXlsxPath = "Excel/WeaponData.xlsx",
+            CacheXlsxPath = ".config-sheet-forge/excel-cache/WeaponData.xlsx",
+            SemanticCachePath = ".config-sheet-forge/cache/WeaponData.semantic.json",
+            HashCachePath = ".config-sheet-forge/cache/WeaponData.sha256",
+            FieldRow = 0,
+            TypeRow = -1,
+            DescriptionRow = -1,
+            DataStartRow = -1,
+            UnityExcelToSo = new UnityExcelToSoContract { SettingsPath = "ProjectSettings/ExcelToScriptableObjectSettings.asset", ExcelPath = ".config-sheet-forge/excel-cache/WeaponData.xlsx" }
+        });
+
+        var manifest = Path.Combine(temp, "contract.json");
+        var applyResultPath = Path.Combine(temp, "apply-result.json");
+        await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var oldDir = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(temp);
+            var apply = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--yes", "--out", applyResultPath });
+            AssertEqual("0", apply.ToString(), "repair-cache-dialect apply should pass for a legacy inlineStr cache xlsx.");
+            AssertEqual("int,int[],string[]", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "Apply should rewrite json columns into ExcelToSO dialect.");
+            AssertTrue(XlsxHasEntry(xlsx, "xl/sharedStrings.xml"), "Repaired xlsx must include sharedStrings.xml for ExcelToSO/ExcelDataReader.");
+            AssertTrue(XlsxHasEntry(xlsx, "xl/styles.xml"), "Repaired xlsx must include styles.xml for ExcelToSO/ExcelDataReader.");
+            AssertTrue(!WorksheetContainsInlineStrings(xlsx), "Repaired xlsx should use shared strings instead of inlineStr.");
+            AssertLegacyExcelReaderCanOpenIfAvailable(xlsx);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(oldDir);
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static async Task RepairCacheDialectRewritesAlreadyTypedLegacyXlsxPackage()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-repair-dialect-typed-legacy-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var state = Path.Combine(temp, ".config-sheet-forge");
+        var cache = Path.Combine(state, "cache");
+        var excelCache = Path.Combine(state, "excel-cache");
+        Directory.CreateDirectory(cache);
+        Directory.CreateDirectory(excelCache);
+        await File.WriteAllTextAsync(Path.Combine(state, "config.json"), JsonSerializer.Serialize(new ForgeConfig(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var workbook = SampleWorkbookWithColumns(("id", "integer"), ("actives", "json"), ("passives", "json"));
+        await File.WriteAllTextAsync(Path.Combine(cache, "WeaponData.semantic.json"), JsonSerializer.Serialize(workbook, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        await File.WriteAllTextAsync(Path.Combine(cache, "WeaponData.sha256"), SemanticHasher.ComputeHash(workbook) + Environment.NewLine);
+        var xlsx = Path.Combine(excelCache, "WeaponData.xlsx");
+        CreateTypeHintXlsx(xlsx,
+            new[] { "id", "actives", "passives" },
+            new[] { "int", "int[]", "string[]" },
+            dimensionRef: "A1");
+
+        var request = new LifecycleContractRequest
+        {
+            Operation = "repair-cache-dialect",
+            DryRun = true,
+            SeedFromLocalXlsx = new SeedFromLocalXlsxContract
+            {
+                CacheDirectory = ".config-sheet-forge/cache",
+                ExcelCacheDirectory = ".config-sheet-forge/excel-cache"
+            }
+        };
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract
+        {
+            TableId = "WeaponData",
+            DisplayName = "WeaponData",
+            CacheXlsxPath = ".config-sheet-forge/excel-cache/WeaponData.xlsx",
+            SemanticCachePath = ".config-sheet-forge/cache/WeaponData.semantic.json",
+            HashCachePath = ".config-sheet-forge/cache/WeaponData.sha256",
+            FieldRow = 0,
+            TypeRow = 1,
+            DescriptionRow = 2,
+            DataStartRow = 3,
+            Fields =
+            {
+                new ContractFieldSpec { Key = "id", ExcelToSoType = "int" },
+                new ContractFieldSpec { Key = "actives", ExcelToSoType = "int[]" },
+                new ContractFieldSpec { Key = "passives", ExcelToSoType = "string[]" }
+            },
+            UnityExcelToSo = new UnityExcelToSoContract { SettingsPath = "ProjectSettings/ExcelToScriptableObjectSettings.asset", ExcelPath = ".config-sheet-forge/excel-cache/WeaponData.xlsx" }
+        });
+
+        var manifest = Path.Combine(temp, "contract.json");
+        var dryResultPath = Path.Combine(temp, "dry-result.json");
+        var applyResultPath = Path.Combine(temp, "apply-result.json");
+        await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var oldDir = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(temp);
+            var dry = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--dry-run", "--out", dryResultPath });
+            AssertEqual("0", dry.ToString(), "repair-cache-dialect dry-run should catch typed but ExcelDataReader-incompatible xlsx packages.");
+            var dryResult = JsonSerializer.Deserialize<LifecycleContractResult>(await File.ReadAllTextAsync(dryResultPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            AssertTrue(dryResult != null && dryResult.SyncCacheSummary.CacheStatus == "dialectOutdated", "Typed legacy package should still be dialectOutdated because it lacks sharedStrings/styles.");
+
+            var apply = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--yes", "--out", applyResultPath });
+            AssertEqual("0", apply.ToString(), "repair-cache-dialect apply should rewrite typed legacy package to compatible OpenXML.");
+            AssertEqual("int,int[],string[]", string.Join(",", ReadTypeRowFromXlsx(xlsx, 1)), "Repair should preserve existing ExcelToSO dialect tokens.");
+            AssertTrue(XlsxHasEntry(xlsx, "xl/sharedStrings.xml"), "Repaired typed legacy xlsx must include sharedStrings.xml.");
+            AssertTrue(XlsxHasEntry(xlsx, "xl/styles.xml"), "Repaired typed legacy xlsx must include styles.xml.");
+            AssertTrue(!WorksheetContainsInlineStrings(xlsx), "Repaired typed legacy xlsx should not use inlineStr.");
+            AssertLegacyExcelReaderCanOpenIfAvailable(xlsx);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(oldDir);
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
 static async Task StrictBotModeDoesNotFallbackToUser()
 {
     if (!OperatingSystem.IsWindows())
@@ -3897,12 +4071,13 @@ static void WriteExcelToSoCacheXlsxForTest(string path, WorkbookDocument workboo
 {
     var method = typeof(ConfigSheetForge.Cli.Program).GetMethod("WriteExcelToSoCacheXlsx", BindingFlags.NonPublic | BindingFlags.Static);
     AssertTrue(method != null, "WriteExcelToSoCacheXlsx should exist.");
-    method!.Invoke(null, new object[] { path, workbook, table, typeRow });
+    method!.Invoke(null, new object[] { path, workbook, table, typeRow, Directory.GetCurrentDirectory() });
 }
 
 static List<string> ReadTypeRowFromXlsx(string path, int typeRow)
 {
     using var archive = ZipFile.OpenRead(path);
+    var sharedStrings = ReadTestSharedStrings(archive);
     var entry = archive.GetEntry("xl/worksheets/sheet1.xml");
     AssertTrue(entry != null, "Generated xlsx should contain sheet1.xml.");
     using var stream = entry!.Open();
@@ -3911,8 +4086,126 @@ static List<string> ReadTypeRowFromXlsx(string path, int typeRow)
     var row = document.Descendants(ns + "row").FirstOrDefault(r => (string?)r.Attribute("r") == (typeRow + 1).ToString());
     AssertTrue(row != null, "Generated xlsx should contain requested type row.");
     return row!.Elements(ns + "c")
-        .Select(c => string.Concat(c.Descendants(ns + "t").Select(t => t.Value)))
+        .Select(c => ReadTestCellValue(c, sharedStrings))
         .ToList();
+}
+
+static List<string> ReadTestSharedStrings(ZipArchive archive)
+{
+    var values = new List<string>();
+    var entry = archive.GetEntry("xl/sharedStrings.xml");
+    if (entry == null)
+    {
+        return values;
+    }
+
+    using var stream = entry.Open();
+    var document = System.Xml.Linq.XDocument.Load(stream);
+    var ns = System.Xml.Linq.XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+    values.AddRange(document.Descendants(ns + "si").Select(item => string.Concat(item.Descendants(ns + "t").Select(t => t.Value))));
+    return values;
+}
+
+static string ReadTestCellValue(System.Xml.Linq.XElement cell, IList<string> sharedStrings)
+{
+    var ns = System.Xml.Linq.XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+    var type = (string?)cell.Attribute("t") ?? "";
+    if (type == "inlineStr")
+    {
+        return string.Concat(cell.Descendants(ns + "t").Select(t => t.Value));
+    }
+
+    var raw = cell.Element(ns + "v")?.Value ?? "";
+    if (type == "s" && int.TryParse(raw, out var index) && index >= 0 && index < sharedStrings.Count)
+    {
+        return sharedStrings[index];
+    }
+
+    return raw;
+}
+
+static bool XlsxHasEntry(string path, string entryName)
+{
+    using var archive = ZipFile.OpenRead(path);
+    return archive.GetEntry(entryName) != null;
+}
+
+static bool WorksheetContainsInlineStrings(string path)
+{
+    using var archive = ZipFile.OpenRead(path);
+    var entry = archive.GetEntry("xl/worksheets/sheet1.xml");
+    AssertTrue(entry != null, "Generated xlsx should contain sheet1.xml.");
+    using var stream = entry!.Open();
+    var document = System.Xml.Linq.XDocument.Load(stream);
+    var ns = System.Xml.Linq.XNamespace.Get("http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+    return document.Descendants(ns + "c").Any(c => string.Equals((string?)c.Attribute("t"), "inlineStr", StringComparison.Ordinal));
+}
+
+static void AssertLegacyExcelReaderCanOpenIfAvailable(string xlsxPath)
+{
+    var excelDll = FindLegacyExcelDllForTest();
+    if (string.IsNullOrWhiteSpace(excelDll))
+    {
+        return;
+    }
+
+    ResolveEventHandler? resolver = null;
+    var excelDir = Path.GetDirectoryName(excelDll)!;
+    try
+    {
+        resolver = (_, args) =>
+        {
+            var name = new AssemblyName(args.Name).Name + ".dll";
+            var candidate = Path.Combine(excelDir, name);
+            return File.Exists(candidate) ? Assembly.LoadFrom(candidate) : null;
+        };
+        AppDomain.CurrentDomain.AssemblyResolve += resolver;
+        var assembly = Assembly.LoadFrom(excelDll);
+        var factory = assembly.GetType("Excel.ExcelReaderFactory", throwOnError: false);
+        var method = factory?.GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .FirstOrDefault(m => m.Name == "CreateOpenXmlReader" &&
+                                 m.GetParameters().Length == 1 &&
+                                 typeof(Stream).IsAssignableFrom(m.GetParameters()[0].ParameterType));
+        AssertTrue(method != null, "Excel.dll should expose ExcelReaderFactory.CreateOpenXmlReader.");
+        using var stream = File.OpenRead(xlsxPath);
+        var reader = method!.Invoke(null, new object[] { stream });
+        try
+        {
+            reader?.GetType().GetMethod("Read", Type.EmptyTypes)?.Invoke(reader, Array.Empty<object>());
+        }
+        finally
+        {
+            (reader as IDisposable)?.Dispose();
+        }
+    }
+    catch (Exception ex)
+    {
+        var root = ex is TargetInvocationException target && target.InnerException != null ? target.InnerException : ex;
+        throw new InvalidOperationException("ExcelToSO Excel.dll should open repaired cache xlsx: " + root.GetType().Name + " " + root.Message, root);
+    }
+    finally
+    {
+        if (resolver != null)
+        {
+            AppDomain.CurrentDomain.AssemblyResolve -= resolver;
+        }
+    }
+}
+
+static string FindLegacyExcelDllForTest()
+{
+    var env = Environment.GetEnvironmentVariable("CONFIG_SHEET_FORGE_EXCEL_DLL");
+    if (!string.IsNullOrWhiteSpace(env) && File.Exists(env))
+    {
+        return env;
+    }
+
+    var candidates = new[]
+    {
+        Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..", "excel_to_scriptableobject", "Editor", "Excel.dll")),
+        @"K:\GithubRepos\excel_to_scriptableobject\Editor\Excel.dll"
+    };
+    return candidates.FirstOrDefault(File.Exists) ?? "";
 }
 
 static void AddZipText(ZipArchive archive, string path, string text)

@@ -26,6 +26,8 @@ Config Sheet Forge 的核心原则是：飞书在线 Sheet 是正式源头，本
 
 从 0.4.44 开始，如果 cache 的 semantic/hash 已最新，但 xlsx 第 2 行仍有 `json/integer/number` 等 ExcelToSO 不能直接导入的类型，Desktop 不会让你继续导入 Unity，而是提示“修复 cache 类型行”。这一步只改 `.config-sheet-forge/excel-cache` 里的生成 cache，不联网、不写飞书、不改旧 `Excel/`。
 
+从 0.4.45 开始，这个修复还会检查 xlsx 本身能不能被 ExcelToSO 读取。旧的极简 cache 如果缺少 `sharedStrings.xml` 或 `styles.xml`，修复会离线重写为兼容格式；如果仍不可读，界面会停下来给出中文原因。
+
 ## 安装要求
 
 - .NET 8 SDK 或更新版本，用于 CLI。

@@ -461,6 +461,12 @@ foreach ($requiredV444Marker in @("dialectOutdated", "repair-cache-dialect-apply
   }
 }
 
+foreach ($requiredV445Marker in @("BuildSharedStringsXml", "BuildStylesXml", "ValidateExcelToSoCompatibleXlsx", "ExcelToSO/ExcelDataReader", "InspectOpenXmlCompatibility", "RepairCacheDialectWritesExcelDataReaderCompatibleXlsx", "RepairCacheDialectRewritesAlreadyTypedLegacyXlsxPackage")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs) + "`n" + (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeExcelToSoImporter.cs) + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV445Marker*") {
+    throw "Unity v0.4.45 ExcelToSO-compatible cache xlsx marker is missing: $requiredV445Marker"
+  }
+}
+
 if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
   throw "Unity bridge import-assets must not open the Legacy sync window."
 }

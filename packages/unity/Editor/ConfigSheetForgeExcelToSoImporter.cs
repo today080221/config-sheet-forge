@@ -105,13 +105,13 @@ namespace ConfigSheetForge.Unity.Editor
             catch (TargetInvocationException ex)
             {
                 var failed = new ExcelToSoSingleImportResult { Success = false, TableId = SourceOfTruthProfileId };
-                failed.Errors.Add(ex.InnerException == null ? ex.ToString() : ex.InnerException.ToString());
+                failed.Errors.Add(FormatImportException(ex.InnerException ?? ex));
                 return new List<ExcelToSoSingleImportResult> { failed };
             }
             catch (Exception ex)
             {
                 var failed = new ExcelToSoSingleImportResult { Success = false, TableId = SourceOfTruthProfileId };
-                failed.Errors.Add(ex.ToString());
+                failed.Errors.Add(FormatImportException(ex));
                 return new List<ExcelToSoSingleImportResult> { failed };
             }
 
@@ -144,13 +144,13 @@ namespace ConfigSheetForge.Unity.Editor
             catch (TargetInvocationException ex)
             {
                 var failed = new ExcelToSoSingleImportResult { Success = false, TableId = tableId ?? "", ExcelPath = excelPath ?? "" };
-                failed.Errors.Add(ex.InnerException == null ? ex.ToString() : ex.InnerException.ToString());
+                failed.Errors.Add(FormatImportException(ex.InnerException ?? ex));
                 return failed;
             }
             catch (Exception ex)
             {
                 var failed = new ExcelToSoSingleImportResult { Success = false, TableId = tableId ?? "", ExcelPath = excelPath ?? "" };
-                failed.Errors.Add(ex.ToString());
+                failed.Errors.Add(FormatImportException(ex));
                 return failed;
             }
 
@@ -175,6 +175,14 @@ namespace ConfigSheetForge.Unity.Editor
                 List<string> row;
                 try
                 {
+                    var compatibilityError = InspectOpenXmlCompatibility(item.CacheXlsxPath);
+                    if (!string.IsNullOrWhiteSpace(compatibilityError))
+                    {
+                        preflight.Ready = false;
+                        preflight.BlockingCells.Add(FirstNonEmpty(item.TableId, Path.GetFileNameWithoutExtension(item.CacheXlsxPath)) + ": " + compatibilityError);
+                        continue;
+                    }
+
                     row = ReadTypeRow(item.CacheXlsxPath, Math.Max(0, typeRow));
                 }
                 catch (Exception ex)
@@ -209,6 +217,31 @@ namespace ConfigSheetForge.Unity.Editor
             return preflight;
         }
 
+        private static string InspectOpenXmlCompatibility(string xlsxPath)
+        {
+            using (var archive = ZipFile.OpenRead(xlsxPath))
+            {
+                var missing = new List<string>();
+                if (archive.GetEntry("xl/sharedStrings.xml") == null)
+                {
+                    missing.Add("xl/sharedStrings.xml");
+                }
+
+                if (archive.GetEntry("xl/styles.xml") == null)
+                {
+                    missing.Add("xl/styles.xml");
+                }
+
+                if (missing.Count == 0)
+                {
+                    return "";
+                }
+
+                return "cache xlsx 缺少 ExcelToSO 读取所需的 OpenXML 部件：" + string.Join(", ", missing) +
+                       "。请先在 Config Sheet Forge Desktop 点击“修复 cache 类型行”，重新生成 ExcelToSO 兼容 cache。";
+            }
+        }
+
         private static string SuggestExcelToSoType(string token)
         {
             var normalized = (token ?? "").Trim().ToLowerInvariant();
@@ -225,6 +258,18 @@ namespace ConfigSheetForge.Unity.Editor
                 default:
                     return "（建议：修复为 ExcelToSO 支持的类型）";
             }
+        }
+
+        private static string FormatImportException(Exception ex)
+        {
+            var message = ex == null ? "未知异常" : ex.GetType().Name + ": " + ex.Message;
+            if (ex is NullReferenceException)
+            {
+                return "ExcelToSO 读取 cache xlsx 时失败：" + message +
+                       "。这通常表示 xlsx OpenXML 结构不兼容 ExcelToSO。请先在 Config Sheet Forge Desktop 执行“修复 cache 类型行”，然后重试导入。";
+            }
+
+            return "ExcelToSO 导入失败：" + message;
         }
 
         private static Type FindApiType()

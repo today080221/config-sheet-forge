@@ -42,6 +42,8 @@ Desktop 是 Config Sheet Forge 的官方主工作台。它负责日常配表 Sou
 
 从 0.4.44 开始，Desktop 会把“cache 语义已最新”和“cache xlsx 类型行可被 ExcelToSO 导入”分开判断。如果 `.config-sheet-forge/excel-cache/*.xlsx` 里还残留 `json/integer/number` 等 Source of Truth canonical 类型，状态会显示“cache 类型行需要修复”，主按钮会推荐“修复 cache 类型行”。这个修复不联网、不写飞书、不改旧 `Excel/`，只把 cache xlsx 的类型行改成 `int/float/string[]/int[]/float[]` 等 ExcelToSO dialect。
 
+从 0.4.45 开始，修复动作还会把极简 cache xlsx 重写为 ExcelToSO/ExcelDataReader 兼容 OpenXML：包含 `sharedStrings.xml`、`styles.xml`，并在写入后做 postflight。postflight 不通过时会停在“修复 cache”，不会让用户继续导入 Unity。
+
 Legacy 只用于没有 Desktop、CI 调试或救急 fallback。普通策划不需要从 Legacy 开始。
 
 ## Desktop v1 页面
