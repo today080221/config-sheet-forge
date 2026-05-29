@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.43
+
+- Unity thin bridge 的“导入 Unity 配表资产”现在直接在 Unity Editor 进程内校验最新 sync-cache 状态，并调用 ExcelToSO `ImportByProfile(SourceOfTruthCache)`；Desktop `import-assets` bridge 命令不再打开 Legacy 完整窗口。
+- Desktop 会轮询 Unity bridge 的 `.processed.json` 响应，普通视图显示“正在请求 Unity 导入 / 导入成功 X 张 / 下一步运行 PR gate”，失败时给出缺 Unity bridge、ExcelToSO、SourceOfTruthCache profile、cache 未最新或具体表导入失败等中文原因。
+- Desktop 场景页上半屏布局固定：Header、项目目录、智能场景卡、状态卡使用稳定高度和文本截断，切换五个场景时只改变当前场景工作区；新建配表字段列表在工作区内部滚动。
+- 增加 Unity / Desktop / Tauri 回归测试，覆盖 direct import 不走 Legacy、Unity bridge response 解析、导入结果摘要、稳定布局 CSS 标记和 bridge poll marker。
+
 ## 0.4.42
 
 - CLI machine-readable JSON outputs now use UTF-8 without BOM, including lifecycle result JSON, PR gate reports, progress NDJSON and generated contracts. This prevents Desktop/Node JSON parsing from choking on a leading `U+FEFF`.

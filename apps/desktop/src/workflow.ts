@@ -86,6 +86,7 @@ export type LifecycleResultLike = {
   operation?: string;
   dryRun?: boolean;
   success?: boolean;
+  summary?: string;
   requestFingerprint?: string;
   previewFingerprint?: string;
   cacheStatus?: string | null;
@@ -100,6 +101,13 @@ export type LifecycleResultLike = {
   syncCacheSummary?: SyncCacheSummaryLike;
   branchStatus?: BranchStatusLike;
   prGateReport?: PrGateReportLike;
+  unityImportSummary?: {
+    importedCount?: number;
+    failedCount?: number;
+    skippedCount?: number;
+    profileId?: string;
+    nextStep?: string;
+  };
 };
 
 export function stripJsonBom(text: string | undefined): string {
@@ -901,6 +909,18 @@ export function summarizeLifecycleResult(result: LifecycleResultLike | PrGateRep
 
   if (lifecycle.operation === "sync-cache" || lifecycle.syncCacheSummary) {
     return syncResultSummaryLine(lifecycle);
+  }
+
+  if (lifecycle.operation === "unity-import-assets" || lifecycle.unityImportSummary) {
+    const summary = lifecycle.unityImportSummary;
+    if (lifecycle.success === false) {
+      return (lifecycle.humanReadableFailures || []).slice(0, 1)[0] || lifecycle.summary || "Unity 导入未完成，请查看失败表。";
+    }
+
+    const imported = summary?.importedCount ?? 0;
+    const failed = summary?.failedCount ?? 0;
+    const skipped = summary?.skippedCount ?? 0;
+    return `导入成功 ${imported} 张，失败 ${failed} 张${skipped > 0 ? `，跳过 ${skipped} 张` : ""}。下一步：运行 PR gate。`;
   }
 
   if (lifecycle.success === false) {

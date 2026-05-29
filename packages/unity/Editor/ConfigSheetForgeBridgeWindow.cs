@@ -66,7 +66,7 @@ namespace ConfigSheetForge.Unity.Editor
         [MenuItem("Tools/Config Sheet Forge/导入 Unity 配表资产", false, 1004)]
         public static void OpenImportTool()
         {
-            ConfigSheetForgeWindow.OpenSyncCache();
+            ConfigSheetForgeEditorApi.ImportUnityAssetsFromSourceOfTruthCacheMenu();
         }
 
         [MenuItem("Tools/Config Sheet Forge/运行 PR 检查", false, 1005)]
@@ -211,7 +211,7 @@ namespace ConfigSheetForge.Unity.Editor
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Unity 内动作", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("这些动作只在 Unity Editor 内有意义。它们复用 Legacy 面板里的稳定服务，但不会把完整调试工作台放到默认首页。", EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("这些动作只在 Unity Editor 内有意义。导入资产会直接调用 ExcelToSO API；完整调试工作台只保留在 Legacy 入口。", EditorStyles.wordWrappedLabel);
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button(new GUIContent("安装/更新 SourceOfTruthCache profile", "只新增或更新 ExcelToSO SourceOfTruthCache profile，不改变 default/local profile。"), GUILayout.Height(30)))
             {
@@ -220,7 +220,12 @@ namespace ConfigSheetForge.Unity.Editor
 
             if (GUILayout.Button(new GUIContent("导入 Unity 配表资产", "调用 ExcelToSO ImportByProfile(SourceOfTruthCache)，只写 Unity asset。"), GUILayout.Height(30)))
             {
-                ConfigSheetForgeWindow.OpenSyncCache();
+                var result = ConfigSheetForgeEditorApi.ImportUnityAssetsFromSourceOfTruthCacheResult(_projectRoot);
+                _recentSummary = result.summary;
+                EditorUtility.DisplayDialog(
+                    result.success ? "导入 Unity 配表资产完成" : "导入 Unity 配表资产未完成",
+                    result.summary + (result.humanReadableFailures.Length > 0 ? "\n\n" + string.Join("\n", result.humanReadableFailures.Take(8)) : ""),
+                    "知道了");
             }
             EditorGUILayout.EndHorizontal();
 
@@ -413,8 +418,11 @@ namespace ConfigSheetForge.Unity.Editor
                     var processed = Path.ChangeExtension(file, ".processed.json");
                     if (string.Equals(operation, "import-assets", StringComparison.OrdinalIgnoreCase))
                     {
-                        ConfigSheetForgeWindow.OpenSyncCache();
-                        _recentSummary = "Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板，请确认 SourceOfTruthCache profile 和 cache 状态后执行。";
+                        var result = ConfigSheetForgeEditorApi.ImportUnityAssetsFromSourceOfTruthCacheResult(_projectRoot);
+                        _recentSummary = result.summary;
+                        WriteBridgeProcessedResponse(file, result);
+                        Repaint();
+                        continue;
                     }
                     else if (string.Equals(operation, "install-profile", StringComparison.OrdinalIgnoreCase))
                     {
@@ -483,6 +491,18 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             return end < json.Length ? json.Substring(quote + 1, end - quote - 1).Replace("\\\"", "\"") : "";
+        }
+
+        private static void WriteBridgeProcessedResponse(string commandPath, UnityImportBridgeResult result)
+        {
+            var processed = Path.ChangeExtension(commandPath, ".processed.json");
+            if (File.Exists(processed))
+            {
+                File.Delete(processed);
+            }
+
+            File.WriteAllText(processed, result.ToJson(), Utf8NoBom);
+            File.Delete(commandPath);
         }
 
         private static string EscapeJson(string value)

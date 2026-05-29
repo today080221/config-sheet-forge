@@ -28,6 +28,9 @@ assert(app.includes("visibleResult.commandLine"), "Debug mode must expose full c
 assert(app.includes("visibleResult.resultJson"), "Debug mode must expose result JSON");
 assert(app.includes("activeTask?.progressLog"), "Debug mode must tail progress ndjson while a task is running");
 assert(app.includes("read_desktop_result"), "Desktop must restore workflow state from previous result files");
+assert(app.includes("read_bridge_response"), "Desktop must poll Unity bridge responses instead of fire-and-forget commands");
+assert(app.includes("正在请求 Unity 导入"), "Desktop must show a human readable Unity import running state");
+assert(app.includes("unity-import-assets"), "Desktop must understand direct Unity import results");
 assert(app.includes("readResultAfterTaskCompletion"), "Desktop must consume result JSON immediately after a background task completes");
 assert(app.includes("shouldReadDesktopResultAfterTask"), "Desktop must reread --out result files when TaskSnapshot misses resultJson");
 assert(app.includes("normalizeSyncCacheResult"), "Desktop must normalize sync-cache results before driving workflow state");
@@ -35,6 +38,7 @@ assert(app.includes("parseLifecycleResultJson"), "Desktop must parse lifecycle J
 assert(workflow.includes("syncResultSummaryLine"), "Planner result summary must come from normalized sync-cache result");
 assert(workflow.includes("normalizeSyncCacheResult"), "Workflow state must expose one sync-cache normalize layer");
 assert(workflow.includes("stripJsonBom"), "Workflow JSON parsing must strip UTF-8 BOM from old result files");
+assert(workflow.includes("unityImportSummary"), "Workflow summaries must include direct Unity import results");
 assert(app.includes("SyncTableSummary"), "Result details must show structured table summaries instead of raw JSON");
 assert(app.includes("resultNextAction"), "Result panel must offer the next workflow action directly");
 assert(app.includes("start_task"), "Lifecycle actions must start backend tasks instead of blocking run_cli");
@@ -57,6 +61,17 @@ assert(app.includes("primaryToolAction"), "Tool/auth cards must distinguish prim
 assert(app.includes("添加字段"), "New-table editor must let users add fields");
 assert(app.includes("复制字段"), "New-table editor must let users duplicate fields");
 assert(app.includes("ExcelToSO 支持列表"), "New-table validation must use ExcelToSO dialect field types");
+
+for (const stableLayoutMarker of [
+  "scrollbar-gutter: stable",
+  "grid-auto-rows: 146px",
+  "height: 146px",
+  "grid-auto-rows: 128px",
+  "height: 128px",
+  "max-height: 360px"
+]) {
+  assert(css.includes(stableLayoutMarker), `Stable scene switching CSS marker missing: ${stableLayoutMarker}`);
+}
 
 for (const rawLeak of ["完整命令", "raw JSON", "stdout 第一行"]) {
   assert(!app.includes(rawLeak), `ordinary view leaked debug wording: ${rawLeak}`);

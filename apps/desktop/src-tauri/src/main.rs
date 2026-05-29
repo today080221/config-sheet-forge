@@ -386,6 +386,59 @@ fn write_bridge_command(
 }
 
 #[tauri::command]
+fn read_bridge_response(command_path: String) -> Result<CliRunResult, String> {
+    let command = PathBuf::from(command_path.trim());
+    if command.as_os_str().is_empty() {
+        return Err("Unity bridge 命令路径为空。".to_string());
+    }
+
+    let processed = command.with_extension("processed.json");
+    if !processed.exists() {
+        return Ok(CliRunResult {
+            command_line: "unity-bridge import-assets".to_string(),
+            exit_code: -2,
+            stdout: "正在等待 Unity Editor 执行导入。".to_string(),
+            stderr: String::new(),
+            executable_path: String::new(),
+            source: "unity-bridge-pending".to_string(),
+            attempted_paths: vec![normalize_path_string_for_cli(&processed.to_string_lossy())],
+            result_path: normalize_path_string_for_cli(&processed.to_string_lossy()),
+            result_json: String::new(),
+        });
+    }
+
+    let result_json = fs::read_to_string(&processed)
+        .map(strip_utf8_bom)
+        .map_err(|e| format!("读取 Unity bridge 返回结果失败：{}", e))?;
+    let parsed = serde_json::from_str::<Value>(&result_json).unwrap_or(Value::Null);
+    let success = parsed
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let summary = parsed
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or(if success {
+            "Unity 已完成导入。"
+        } else {
+            "Unity 导入未完成，请查看返回结果。"
+        })
+        .to_string();
+
+    Ok(CliRunResult {
+        command_line: "unity-bridge import-assets".to_string(),
+        exit_code: if success { 0 } else { 1 },
+        stdout: summary,
+        stderr: String::new(),
+        executable_path: String::new(),
+        source: "unity-bridge".to_string(),
+        attempted_paths: Vec::new(),
+        result_path: normalize_path_string_for_cli(&processed.to_string_lossy()),
+        result_json,
+    })
+}
+
+#[tauri::command]
 fn start_setup_task(
     project_root: String,
     action: String,
@@ -513,6 +566,7 @@ fn main() {
             cancel_task,
             read_desktop_result,
             write_bridge_command,
+            read_bridge_response,
             open_external_url
         ])
         .run(tauri::generate_context!())
@@ -2661,5 +2715,26 @@ mod tests {
         assert_eq!(text, "{\"ok\":true}");
         let parsed: Value = serde_json::from_str(&text).expect("BOM-stripped JSON should parse");
         assert_eq!(parsed["ok"], true);
+    }
+
+    #[test]
+    fn bridge_response_reads_processed_import_result() {
+        let dir = env::temp_dir().join(format!("csforge-bridge-{}", chrono_like_timestamp()));
+        fs::create_dir_all(&dir).expect("temp bridge dir");
+        let command = dir.join("001-import-assets.json");
+        let processed = dir.join("001-import-assets.processed.json");
+        fs::write(&command, "{\"operation\":\"import-assets\"}").expect("command file");
+        fs::write(
+            &processed,
+            "\u{feff}{\"operation\":\"unity-import-assets\",\"success\":true,\"summary\":\"导入成功 16 张，失败 0 张。下一步：运行 PR gate。\",\"unityImportSummary\":{\"importedCount\":16,\"failedCount\":0}}",
+        )
+        .expect("processed file");
+
+        let result = read_bridge_response(command.to_string_lossy().to_string()).expect("bridge response");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.source, "unity-bridge");
+        assert!(result.result_json.contains("unity-import-assets"));
+        assert!(!result.result_json.starts_with('\u{feff}'));
+        let _ = fs::remove_dir_all(dir);
     }
 }

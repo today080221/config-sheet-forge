@@ -396,6 +396,7 @@ foreach ($requiredV433Marker in @("Publish-SidecarCli", "sidecarCli", "--expect-
 }
 
 $desktopWorkflowSources = $bridgeWindow + "`n" +
+  (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeEditorApi.cs) + "`n" +
   (Get-Content -Raw apps/desktop/src/App.tsx) + "`n" +
   (Get-Content -Raw apps/desktop/src/workflow.ts) + "`n" +
   (Get-Content -Raw apps/desktop/src/styles.css) + "`n" +
@@ -446,6 +447,16 @@ foreach ($requiredV439Marker in @("normalizeSyncCacheResult", "syncResultSummary
   if (($desktopWorkflowSources + "`n" + (Get-Content -Raw packages/unity/Runtime/Core/LifecycleContracts.cs) + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV439Marker*") {
     throw "Unity v0.4.39 Desktop sync-cache normalize/state marker is missing: $requiredV439Marker"
   }
+}
+
+foreach ($requiredV443Marker in @("ConfigSheetForgeEditorApi.ImportUnityAssetsFromSourceOfTruthCache", "ImportSourceOfTruthProfile", "read_bridge_response", "unity-import-assets", "正在请求 Unity 导入", "grid-auto-rows: 146px", "grid-auto-rows: 128px", "scrollbar-gutter: stable", "DesktopBridgeImportUsesDirectEditorApiInsteadOfLegacyWindow")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw packages/unity/Tests/Editor/ConfigSheetForgeEditorUtilityTests.cs)) -notlike "*$requiredV443Marker*") {
+    throw "Unity v0.4.43 Desktop direct import/stable layout marker is missing: $requiredV443Marker"
+  }
+}
+
+if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
+  throw "Unity bridge import-assets must not open the Legacy sync window."
 }
 
 $editorAsmdef = Get-Content -Raw packages/unity/Editor/ConfigSheetForge.Editor.asmdef

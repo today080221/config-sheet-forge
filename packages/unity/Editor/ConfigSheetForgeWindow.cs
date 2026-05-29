@@ -7273,6 +7273,21 @@ namespace ConfigSheetForge.Unity.Editor
             ConfigSheetForgeBridgeWindow.OpenStatusWindow();
         }
 
+        public static string ImportUnityAssetsFromSourceOfTruthCache()
+        {
+            return ConfigSheetForgeEditorImportRunner.ImportUnityAssetsFromSourceOfTruthCache().ToJson();
+        }
+
+        public static void ImportUnityAssetsFromSourceOfTruthCacheMenu()
+        {
+            ConfigSheetForgeEditorImportRunner.ImportUnityAssetsFromSourceOfTruthCacheMenu();
+        }
+
+        internal static UnityImportBridgeResult ImportUnityAssetsFromSourceOfTruthCacheResult(string projectRoot)
+        {
+            return ConfigSheetForgeEditorImportRunner.ImportUnityAssetsFromSourceOfTruthCache(projectRoot);
+        }
+
         public static void OpenCompareMerge()
         {
             ConfigSheetForgeBridgeWindow.OpenStatusWindow();

@@ -276,6 +276,10 @@ function delay(ms: number) {
 }
 
 function taskHumanTitle(operation: string) {
+  if (operation === "unity-import") {
+    return "正在请求 Unity 导入";
+  }
+
   if (operation === "sync-cache-dry-run") {
     return "正在预览同步，不会写入文件";
   }
@@ -288,6 +292,10 @@ function taskHumanTitle(operation: string) {
 }
 
 function taskHumanProgress(task: TaskSnapshot | null, operation: string) {
+  if (operation === "unity-import" && !task) {
+    return "当前：等待 Unity Editor 调用 ExcelToSO ImportByProfile(SourceOfTruthCache)。";
+  }
+
   if (task?.tableId && task.current && task.total) {
     return `当前：第 ${task.current}/${task.total} 张 ${task.tableId}，${task.phase || operationStage(operation)}`;
   }
@@ -310,6 +318,10 @@ function taskEtaText(task: TaskSnapshot | null) {
 }
 
 function taskSafetyText(operation: string, fallback: string) {
+  if (operation === "unity-import") {
+    return "只写 Unity asset，不写飞书、不写 cache、不改 ProjectSettings、不碰旧 Excel/。";
+  }
+
   if (operation === "sync-cache-dry-run") {
     return "完整同步预览会读取在线表并临时导出 xlsx，可能需要几分钟；不会写本地 cache、飞书或 ProjectSettings。";
   }
@@ -719,22 +731,64 @@ export function App() {
       return;
     }
 
-    const path = await invoke<string>("write_bridge_command", {
-      bridgeSessionDir: startup.bridgeSessionDir,
-      operation,
-      payloadJson: JSON.stringify({
-        projectRoot: snapshot?.projectRoot || projectRoot,
-        requestedAt: new Date().toISOString()
-      })
-    });
-    setLastResult({
-      commandLine: `unity-bridge ${operation}`,
-      exitCode: 0,
-      stdout: `已发送给 Unity bridge：${path}`,
-      stderr: "",
-      resultPath: path
-    });
-  }, [projectRoot, runtimeAvailable, snapshot?.projectRoot, startup.bridgeSessionDir]);
+    const desktopOperation = operation === "import-assets" ? "unity-import" : operation;
+    setActiveOperation(desktopOperation);
+    setOperationStartedAt(Date.now());
+    setActiveTask(null);
+    setLastResult(null);
+    setLastResultParsed(null);
+
+    try {
+      const path = await invoke<string>("write_bridge_command", {
+        bridgeSessionDir: startup.bridgeSessionDir,
+        operation,
+        payloadJson: JSON.stringify({
+          projectRoot: snapshot?.projectRoot || projectRoot,
+          requestedAt: new Date().toISOString()
+        })
+      });
+
+      setLastResult({
+        commandLine: `unity-bridge ${operation}`,
+        exitCode: -2,
+        stdout: "正在请求 Unity 导入，请保持 Unity Editor 打开。",
+        stderr: "",
+        resultPath: path,
+        source: "unity-bridge-pending"
+      });
+
+      const started = Date.now();
+      while (Date.now() - started < 5 * 60 * 1000) {
+        const response = await invoke<CliRunResult>("read_bridge_response", {
+          commandPath: path
+        });
+
+        if (response.exitCode === -2) {
+          setLastResult({
+            ...response,
+            stdout: "正在请求 Unity 导入：等待 Unity Editor 调用 ExcelToSO ImportByProfile(SourceOfTruthCache)。"
+          });
+          await delay(500);
+          continue;
+        }
+
+        applyResult(desktopOperation, response);
+        const parsed = parseResultJson(response.resultJson);
+        if (!parsed) {
+          setError("Unity 已返回导入结果，但 Desktop 没有解析成功。请打开 Debug 查看 bridge response。");
+        } else if (parsed.success === false) {
+          setError((parsed.humanReadableFailures || [])[0] || summarizeLifecycleResult(parsed));
+        }
+        return;
+      }
+
+      setError("Unity 导入请求超时。请确认 Unity Editor 仍在运行，并在 Unity Console 查看是否有 ExcelToSO 错误。");
+    } finally {
+      setActiveOperation("");
+      setOperationStartedAt(null);
+      setActiveTask(null);
+    }
+  }, [applyResult, projectRoot, runtimeAvailable, snapshot?.projectRoot, startup.bridgeSessionDir]);
 
   const handleToolAction = useCallback(async (action: string) => {
     if (!action || action === "none") {
@@ -1158,6 +1212,12 @@ function StatusCard(props: { title: string; value: string; detail: string; url?:
 }
 
 function resultNextAction(result: LifecycleResultLike | null, bridgeSessionDir: string): { operation: string; label: string } | null {
+  if (result?.operation === "unity-import-assets" || result?.unityImportSummary) {
+    return result.success === false
+      ? null
+      : { operation: "pr-gate-report", label: "运行 PR gate" };
+  }
+
   const normalized = normalizeSyncCacheResult(result);
   if (!normalized) {
     return null;

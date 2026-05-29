@@ -177,6 +177,23 @@ namespace ConfigSheetForge.Unity.Editor.Tests
         }
 
         [Test]
+        public void DesktopBridgeImportUsesDirectEditorApiInsteadOfLegacyWindow()
+        {
+            var bridgeSource = File.ReadAllText("Packages/dev.config-sheet-forge.unity/Editor/ConfigSheetForgeBridgeWindow.cs");
+            var editorApiSource = File.ReadAllText("Packages/dev.config-sheet-forge.unity/Editor/ConfigSheetForgeEditorApi.cs");
+
+            Assert.That(bridgeSource, Does.Contain("ConfigSheetForgeEditorApi.ImportUnityAssetsFromSourceOfTruthCache"));
+            Assert.That(bridgeSource, Does.Contain("WriteBridgeProcessedResponse"));
+            Assert.That(bridgeSource, Does.Contain("import-assets"));
+            Assert.That(bridgeSource, Does.Not.Contain("Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板"));
+            Assert.That(editorApiSource, Does.Contain("ImportSourceOfTruthProfile"));
+            Assert.That(editorApiSource, Does.Contain("cacheStatus=upToDate"));
+            Assert.That(editorApiSource, Does.Contain("SourceOfTruthCache profile 缺失"));
+            Assert.That(editorApiSource, Does.Contain("ExcelToSO 未安装或版本过旧"));
+            Assert.That(editorApiSource, Does.Contain("不写飞书"));
+        }
+
+        [Test]
         public void DesktopReleaseRequiresSidecarAndEnvironmentGuidance()
         {
             var packageScript = File.ReadAllText("Packages/dev.config-sheet-forge.unity/../../scripts/Package-DesktopRelease.ps1");

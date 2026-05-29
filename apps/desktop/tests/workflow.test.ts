@@ -166,6 +166,22 @@ describe("Desktop workflow state machine", () => {
     expect(decision.programSummary).toContain("SourceOfTruthCache");
   });
 
+  it("summarizes direct Unity import result for planner view", () => {
+    const result: LifecycleResultLike = {
+      operation: "unity-import-assets",
+      success: true,
+      nextAction: "run-pr-gate",
+      unityImportSummary: {
+        importedCount: 16,
+        failedCount: 0,
+        skippedCount: 0,
+        profileId: "SourceOfTruthCache"
+      }
+    };
+
+    expect(summarizeLifecycleResult(result)).toBe("导入成功 16 张，失败 0 张。下一步：运行 PR gate。");
+  });
+
   it("requires a same-input preview fingerprint before cache apply", () => {
     const missingFingerprint = syncPreview("needsUpdate", {
       changedTables: ["ProjectileData"]
