@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.51
+
+- Desktop 启动和运行中会扫描 Unity bridge session 中已经完成的 `*.processed.json`，即使结果不是本次 Desktop 进程发起，也会补写 `Temp/ConfigSheetForge/desktop/unity-import-assets.result.json` 并把流程推进到“运行 PR 检查”。
+- Unity thin bridge 会校验 `session.json` 的 UPM version 和 projectRoot；版本变化时会创建新 bridge session，避免 v0.4.51 Desktop 继续使用旧版本 session metadata。
+- 增加 bridge processed result 端到端 fixture：已有 `import-assets.processed.json` 时，Desktop 必须恢复 Unity import 结果、持久化 desktop result，并保留 17 个 Unity 导入项 / 16 张在线表的普通视图语义。
+- PR 检查文案继续区分通过、临时放行和待补 SchemaReviews，避免把 waiver 状态误读成完全无后续事项。
+
 ## 0.4.50
 
 - Desktop 增加统一项目状态模型：在线表、cache、Unity 导入、PR 检查、bridge 模式和版本一致性都从同一份 normalized state 渲染，避免 0/0 在线表、cache upToDate、导入已完成之间互相矛盾。

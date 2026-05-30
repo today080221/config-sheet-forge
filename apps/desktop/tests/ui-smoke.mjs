@@ -29,6 +29,7 @@ assert(app.includes("visibleResult.resultJson"), "Debug mode must expose result 
 assert(app.includes("activeTask?.progressLog"), "Debug mode must tail progress ndjson while a task is running");
 assert(app.includes("read_desktop_result"), "Desktop must restore workflow state from previous result files");
 assert(app.includes("read_bridge_response"), "Desktop must poll Unity bridge responses instead of fire-and-forget commands");
+assert(app.includes("scan_bridge_processed_results"), "Desktop must recover bridge processed results that were completed before polling");
 assert(app.includes("正在请求 Unity 导入"), "Desktop must show a human readable Unity import running state");
 assert(app.includes("unity-import-assets"), "Desktop must understand direct Unity import results");
 assert(app.includes("buildProjectState"), "Desktop must render status cards from one normalized project state");

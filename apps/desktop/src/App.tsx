@@ -775,6 +775,40 @@ export function App() {
     };
   }, [applyResult, runtimeAvailable, snapshot?.projectRoot]);
 
+  useEffect(() => {
+    if (!runtimeAvailable || !snapshot?.projectRoot || !startup.bridgeSessionDir) {
+      return;
+    }
+
+    let canceled = false;
+    const scan = async () => {
+      try {
+        const results = await invoke<CliRunResult[]>("scan_bridge_processed_results", {
+          bridgeSessionDir: startup.bridgeSessionDir,
+          projectRoot: snapshot.projectRoot
+        });
+        if (canceled || results.length === 0) {
+          return;
+        }
+
+        for (const result of results) {
+          applyResult("unity-import", result);
+        }
+      } catch (ex) {
+        if (!canceled) {
+          setError(`读取 Unity bridge 已完成导入结果失败：${ordinaryErrorText(ex)}。`);
+        }
+      }
+    };
+
+    void scan();
+    const timer = window.setInterval(scan, 1500);
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [applyResult, runtimeAvailable, snapshot?.projectRoot, startup.bridgeSessionDir]);
+
   const sendUnityBridgeCommand = useCallback(async (operation: string) => {
     if (!startup.bridgeSessionDir) {
       setError("这个窗口不是从 Unity 打开的，所以暂时不能直接让 Unity 导入。请回到 Unity 的 Config Sheet Forge 窗口点击“导入 Unity 配表资产”，或从 Unity 重新打开 Desktop。");

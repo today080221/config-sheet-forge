@@ -772,11 +772,11 @@ export function buildProjectState(state: WorkflowState): ProjectState {
       ? "Desktop 可通过 Unity bridge 调用 ExcelToSO。"
       : "独立模式不能直接调用 Unity Editor。";
   const prGateLabel = gate
-    ? gate.passed || gate.gateState === "passed"
-      ? "已通过"
-      : gate.waived || gate.gateState === "waived"
+    ? gate.waived || gate.gateState === "waived"
         ? "已临时放行"
-        : "未通过"
+        : gate.passed || gate.gateState === "passed"
+          ? "已通过"
+          : "未通过"
     : "等待检查";
   const prGateDetail = gate ? summarizeLifecycleResult(state.lastGateReport) : "导入完成后运行 PR 检查。";
   const nextAction = versionStatus.blocking
@@ -990,6 +990,24 @@ export function decidePrMerge(state: WorkflowState): WorkflowDecision {
   const base = baseDecision("pr-merge", state);
   const gate = extractPrGate(state.lastGateReport);
 
+  if (gate?.waived || gate?.gateState === "waived") {
+    const waivedFailures = gate.waivedFailures || [];
+    return {
+      ...base,
+      conclusion: "PR 检查已临时放行",
+      nextStep: waivedFailures.length > 0
+        ? "当前可按项目规则合并，但后续仍需补齐被 waiver 放行的审查项。"
+        : "当前可按项目规则合并；请确认负责人已知晓 waiver。",
+      primaryLabel: "完成",
+      primaryOperation: "",
+      primaryDisabled: true,
+      disabledReason: "当前流程已由负责人临时放行。",
+      safety: "不会再执行写入。",
+      programSummary: "gateState=waived。",
+      steps: prSteps("gate")
+    };
+  }
+
   if (gate?.passed || gate?.gateState === "passed") {
     return {
       ...base,
@@ -1163,12 +1181,15 @@ export function summarizeLifecycleResult(result: LifecycleResultLike | PrGateRep
   const lifecycle = result as LifecycleResultLike;
   const gate = extractPrGate(result);
   if (gate) {
-    if (gate.passed || gate.gateState === "passed") {
-      return "PR 检查已通过。";
+    if (gate.waived || gate.gateState === "waived") {
+      const waived = (gate.waivedFailures || []).filter(Boolean);
+      return waived.length > 0
+        ? `PR 检查已由负责人临时放行；后续仍需处理：${waived.join("；")}`
+        : "PR 检查已由负责人临时放行。";
     }
 
-    if (gate.waived || gate.gateState === "waived") {
-      return "PR 检查已由负责人临时放行。";
+    if (gate.passed || gate.gateState === "passed") {
+      return "PR 检查已通过。";
     }
   }
 

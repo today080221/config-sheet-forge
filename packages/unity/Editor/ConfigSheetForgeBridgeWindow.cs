@@ -416,15 +416,54 @@ namespace ConfigSheetForge.Unity.Editor
 
         private void EnsureBridgeSessionDirectory()
         {
-            if (!string.IsNullOrWhiteSpace(_bridgeSessionDirectory) && Directory.Exists(_bridgeSessionDirectory))
+            var root = Directory.GetParent(Application.dataPath)?.FullName ?? Directory.GetCurrentDirectory();
+            if (!string.IsNullOrWhiteSpace(_bridgeSessionDirectory) &&
+                Directory.Exists(_bridgeSessionDirectory) &&
+                BridgeSessionMatches(_bridgeSessionDirectory, root, PackageVersion))
             {
+                WriteBridgeSessionMetadata(_bridgeSessionDirectory, root);
                 return;
             }
 
-            var root = Directory.GetParent(Application.dataPath)?.FullName ?? Directory.GetCurrentDirectory();
             _bridgeSessionDirectory = Path.Combine(root, "Library", "ConfigSheetForge", "DesktopBridge", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Path.Combine(_bridgeSessionDirectory, "commands"));
-            File.WriteAllText(Path.Combine(_bridgeSessionDirectory, "session.json"), "{\"projectRoot\":\"" + EscapeJson(root) + "\",\"version\":\"" + PackageVersion + "\"}", Utf8NoBom);
+            WriteBridgeSessionMetadata(_bridgeSessionDirectory, root);
+        }
+
+        internal static bool BridgeSessionMatches(string sessionDirectory, string projectRoot, string packageVersion)
+        {
+            if (string.IsNullOrWhiteSpace(sessionDirectory) || !Directory.Exists(sessionDirectory))
+            {
+                return false;
+            }
+
+            var sessionPath = Path.Combine(sessionDirectory, "session.json");
+            if (!File.Exists(sessionPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                var text = File.ReadAllText(sessionPath);
+                var version = ExtractJsonString(text, "version");
+                var root = ExtractJsonString(text, "projectRoot");
+                return string.Equals(version, packageVersion, StringComparison.OrdinalIgnoreCase) &&
+                       string.Equals(Path.GetFullPath(root), Path.GetFullPath(projectRoot), StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void WriteBridgeSessionMetadata(string sessionDirectory, string projectRoot)
+        {
+            Directory.CreateDirectory(Path.Combine(sessionDirectory, "commands"));
+            File.WriteAllText(
+                Path.Combine(sessionDirectory, "session.json"),
+                "{\"projectRoot\":\"" + EscapeJson(projectRoot) + "\",\"version\":\"" + PackageVersion + "\"}",
+                Utf8NoBom);
         }
 
         private void ProcessBridgeSessionCommands()

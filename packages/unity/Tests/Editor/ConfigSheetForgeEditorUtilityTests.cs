@@ -185,6 +185,8 @@ namespace ConfigSheetForge.Unity.Editor.Tests
             Assert.That(bridgeSource, Does.Contain("ConfigSheetForgeEditorApi.ImportUnityAssetsFromSourceOfTruthCache"));
             Assert.That(bridgeSource, Does.Contain("WriteBridgeProcessedResponse"));
             Assert.That(bridgeSource, Does.Contain("IsBridgeCommandFile"));
+            Assert.That(bridgeSource, Does.Contain("BridgeSessionMatches"));
+            Assert.That(bridgeSource, Does.Contain("WriteBridgeSessionMetadata"));
             Assert.That(bridgeSource, Does.Contain(".processed.json"));
             Assert.That(bridgeSource, Does.Contain(".running.json"));
             Assert.That(bridgeSource, Does.Contain("import-assets"));

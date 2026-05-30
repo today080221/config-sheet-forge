@@ -371,6 +371,28 @@ describe("Desktop workflow state machine", () => {
     expect(gateDecision.primaryDisabled).toBe(true);
     expect(gateDecision.conclusion).toContain("已通过");
   });
+
+  it("shows waived PR gate as temporary approval instead of full pass", () => {
+    const report = {
+      prGateReport: {
+        passed: true,
+        gateState: "waived",
+        waived: true,
+        waivedFailures: ["Schema 审查还没有完成"]
+      }
+    };
+    const state = buildProjectState({ lastGateReport: report });
+    const decision = decidePrMerge({
+      lastComparePreview: { operation: "compare-merge", success: true },
+      lastGateReport: report
+    });
+
+    expect(state.prGateLabel).toBe("已临时放行");
+    expect(state.prGateDetail).toContain("临时放行");
+    expect(state.prGateDetail).toContain("Schema 审查");
+    expect(decision.conclusion).toContain("临时放行");
+    expect(decision.nextStep).toContain("后续仍需");
+  });
 });
 
 describe("new table validation", () => {

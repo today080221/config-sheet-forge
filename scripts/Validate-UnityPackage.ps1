@@ -497,6 +497,12 @@ foreach ($requiredV450Marker in @("buildProjectState", "getVersionStatus", "Desk
   }
 }
 
+foreach ($requiredV451Marker in @("scan_bridge_processed_results", "bridge_processed_scan_persists_existing_import_result", "BridgeSessionMatches", "WriteBridgeSessionMetadata", "Unity bridge 已完成导入结果", "0.4.51")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw apps/desktop/src-tauri/src/main.rs) + "`n" + (Get-Content -Raw packages/unity/Tests/Editor/ConfigSheetForgeEditorUtilityTests.cs) + "`n" + (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeBridgeWindow.cs) + "`n" + (Get-Content -Raw packages/unity/CHANGELOG.md)) -notlike "*$requiredV451Marker*") {
+    throw "Unity v0.4.51 Desktop bridge processed-result recovery marker is missing: $requiredV451Marker"
+  }
+}
+
 if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
   throw "Unity bridge import-assets must not open the Legacy sync window."
 }

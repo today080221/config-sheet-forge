@@ -410,24 +410,7 @@ fn read_bridge_response(command_path: String) -> Result<CliRunResult, String> {
     let result_json = fs::read_to_string(&processed)
         .map(strip_utf8_bom)
         .map_err(|e| format!("读取 Unity bridge 返回结果失败：{}", e))?;
-    if let Ok(command_json) = fs::read_to_string(&command).map(strip_utf8_bom) {
-        if let Ok(command_value) = serde_json::from_str::<Value>(&command_json) {
-            if let Some(project_root) = command_value
-                .get("payload")
-                .and_then(|payload| payload.get("projectRoot"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-            {
-                let result_dir = PathBuf::from(project_root)
-                    .join("Temp")
-                    .join("ConfigSheetForge")
-                    .join("desktop");
-                if fs::create_dir_all(&result_dir).is_ok() {
-                    let _ = fs::write(result_dir.join("unity-import-assets.result.json"), &result_json);
-                }
-            }
-        }
-    }
+    let _ = persist_bridge_import_result(&command, &processed, &result_json, "");
     let parsed = serde_json::from_str::<Value>(&result_json).unwrap_or(Value::Null);
     let success = parsed
         .get("success")
@@ -454,6 +437,169 @@ fn read_bridge_response(command_path: String) -> Result<CliRunResult, String> {
         result_path: normalize_path_string_for_cli(&processed.to_string_lossy()),
         result_json,
     })
+}
+
+fn original_command_for_processed(processed: &Path) -> Option<PathBuf> {
+    let name = processed.file_name()?.to_string_lossy();
+    let original_name = name.strip_suffix(".processed.json")?.to_string() + ".json";
+    Some(processed.with_file_name(original_name))
+}
+
+fn bridge_result_project_root(command: &Path, fallback_project_root: &str) -> Option<String> {
+    if let Ok(command_json) = fs::read_to_string(command).map(strip_utf8_bom) {
+        if let Ok(command_value) = serde_json::from_str::<Value>(&command_json) {
+            if let Some(project_root) = command_value
+                .get("payload")
+                .and_then(|payload| payload.get("projectRoot"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                return Some(project_root.to_string());
+            }
+        }
+    }
+
+    let trimmed = fallback_project_root.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn desktop_unity_import_result_path(project_root: &str) -> PathBuf {
+    PathBuf::from(project_root)
+        .join("Temp")
+        .join("ConfigSheetForge")
+        .join("desktop")
+        .join("unity-import-assets.result.json")
+}
+
+fn processed_is_newer_than_result(processed: &Path, result_path: &Path) -> bool {
+    if !result_path.exists() {
+        return true;
+    }
+
+    let processed_modified = fs::metadata(processed).and_then(|m| m.modified()).ok();
+    let result_modified = fs::metadata(result_path).and_then(|m| m.modified()).ok();
+    match (processed_modified, result_modified) {
+        (Some(processed_time), Some(result_time)) => processed_time > result_time,
+        _ => true,
+    }
+}
+
+fn persist_bridge_import_result(
+    command: &Path,
+    _processed: &Path,
+    result_json: &str,
+    fallback_project_root: &str,
+) -> Option<PathBuf> {
+    let parsed = serde_json::from_str::<Value>(result_json).ok()?;
+    let is_import_result = parsed
+        .get("operation")
+        .and_then(Value::as_str)
+        .map(|value| value == "unity-import-assets")
+        .unwrap_or(false)
+        || parsed.get("unityImportSummary").is_some();
+    if !is_import_result {
+        return None;
+    }
+
+    let project_root = bridge_result_project_root(command, fallback_project_root)?;
+    let result_path = desktop_unity_import_result_path(&project_root);
+    if let Some(parent) = result_path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    fs::write(&result_path, result_json).ok()?;
+    Some(result_path)
+}
+
+#[tauri::command]
+fn scan_bridge_processed_results(
+    bridge_session_dir: String,
+    project_root: String,
+) -> Result<Vec<CliRunResult>, String> {
+    let session = PathBuf::from(bridge_session_dir.trim());
+    if session.as_os_str().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let commands = session.join("commands");
+    if !commands.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut results = Vec::new();
+    let entries = fs::read_dir(&commands)
+        .map_err(|e| format!("读取 Unity bridge commands 目录失败：{}", e))?;
+    for entry in entries.flatten() {
+        let processed = entry.path();
+        let name = processed
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !name.ends_with(".processed.json") {
+            continue;
+        }
+
+        let command = original_command_for_processed(&processed)
+            .unwrap_or_else(|| processed.with_extension("json"));
+        let result_json = fs::read_to_string(&processed)
+            .map(strip_utf8_bom)
+            .map_err(|e| format!("读取 Unity bridge processed 结果失败：{}", e))?;
+        let parsed = serde_json::from_str::<Value>(&result_json).unwrap_or(Value::Null);
+        let is_import_result = parsed
+            .get("operation")
+            .and_then(Value::as_str)
+            .map(|value| value == "unity-import-assets")
+            .unwrap_or(false)
+            || parsed.get("unityImportSummary").is_some();
+        if !is_import_result {
+            continue;
+        }
+
+        let Some(project_root_for_result) = bridge_result_project_root(&command, &project_root)
+        else {
+            continue;
+        };
+        let target_result_path = desktop_unity_import_result_path(&project_root_for_result);
+        if !processed_is_newer_than_result(&processed, &target_result_path) {
+            continue;
+        }
+
+        let Some(result_path) =
+            persist_bridge_import_result(&command, &processed, &result_json, &project_root)
+        else {
+            continue;
+        };
+        let success = parsed
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let summary = parsed
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or(if success {
+                "Unity 已完成导入。"
+            } else {
+                "Unity 导入未完成，请查看返回结果。"
+            })
+            .to_string();
+        results.push(CliRunResult {
+            command_line: "unity-bridge import-assets".to_string(),
+            exit_code: if success { 0 } else { 1 },
+            stdout: summary,
+            stderr: String::new(),
+            executable_path: String::new(),
+            source: "unity-bridge-processed-scan".to_string(),
+            attempted_paths: vec![normalize_path_string_for_cli(&processed.to_string_lossy())],
+            result_path: normalize_path_string_for_cli(&result_path.to_string_lossy()),
+            result_json,
+        });
+    }
+
+    Ok(results)
 }
 
 #[tauri::command]
@@ -585,6 +731,7 @@ fn main() {
             read_desktop_result,
             write_bridge_command,
             read_bridge_response,
+            scan_bridge_processed_results,
             open_external_url
         ])
         .run(tauri::generate_context!())
@@ -2754,5 +2901,48 @@ mod tests {
         assert!(result.result_json.contains("unity-import-assets"));
         assert!(!result.result_json.starts_with('\u{feff}'));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bridge_processed_scan_persists_existing_import_result() {
+        let root = env::temp_dir().join(format!("csforge-bridge-project-{}", chrono_like_timestamp()));
+        let session = root.join("Library").join("ConfigSheetForge").join("DesktopBridge").join("session");
+        let commands = session.join("commands");
+        fs::create_dir_all(&commands).expect("commands dir");
+        let command = commands.join("001-import-assets.json");
+        let processed = commands.join("001-import-assets.processed.json");
+        fs::write(
+            &command,
+            format!(
+                "{{\"operation\":\"import-assets\",\"payload\":{{\"projectRoot\":\"{}\"}}}}",
+                root.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .expect("command file");
+        fs::write(
+            &processed,
+            "{\"operation\":\"unity-import-assets\",\"success\":true,\"nextAction\":\"run-pr-gate\",\"summary\":\"导入成功 17 个 Unity 导入项，对应在线表 16 张。下一步：运行 PR 检查。\",\"unityImportSummary\":{\"importedCount\":17,\"importItemCount\":17,\"tableCount\":16,\"failedCount\":0}}",
+        )
+        .expect("processed file");
+
+        let results = scan_bridge_processed_results(
+            session.to_string_lossy().to_string(),
+            root.to_string_lossy().to_string(),
+        )
+        .expect("scan processed results");
+
+        let desktop_result = root
+            .join("Temp")
+            .join("ConfigSheetForge")
+            .join("desktop")
+            .join("unity-import-assets.result.json");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(results[0].source, "unity-bridge-processed-scan");
+        assert!(desktop_result.exists(), "desktop result should be persisted");
+        let persisted = fs::read_to_string(&desktop_result).expect("persisted result");
+        assert!(persisted.contains("run-pr-gate"));
+        assert!(persisted.contains("importItemCount"));
+        let _ = fs::remove_dir_all(root);
     }
 }
