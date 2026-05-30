@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.48
+
+- 修复 SourceOfTruthCache cache xlsx 字段行仍保留旧 Excel display label 的问题。旧模板/在线表显示名可继续宽松匹配，但写给 ExcelToSO 的 `field_row` 现在必须是合法脚本字段名；例如 `Pickup Sfx` 会输出为 `PickupSfx`，说明行仍保留人类可读文本。
+- `repair-cache-dialect` postflight 和 Unity 导入 preflight 现在会检查字段行合法性，避免 `repair-cache-dialect` 显示 `upToDate` 但 `ImportByProfile(SourceOfTruthCache)` 因 invalid field name 失败。
+- 增加 AutoPickupDropData 风格 fixture：旧模板字段显示名含空格、semantic key 为 `pickup_sfx`，修复后字段名合法且音效列/事件列不丢不串。
+
 ## 0.4.47
 
 - 修复 SourceOfTruthCache cache writer 的字段匹配：旧 ExcelToSO 模板字段如 `Pickup Sfx` 现在能匹配 registry/semantic 中的 `pickup_sfx`，不会再丢失音效列或把事件数组写到错误列。

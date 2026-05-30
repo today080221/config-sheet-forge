@@ -3688,9 +3688,11 @@ static void ExcelToSoCacheWriterPreservesPhysicalTemplateSemantics()
         var autoPickupPlan = BuildExcelToSoDialectPlanForTest(autoPickupWorkbook, autoPickupTable, temp);
         var autoPickupOutput = Path.Combine(temp, "AutoPickupDropData.cache.xlsx");
         WriteExcelToSoCacheXlsxForTest(autoPickupOutput, autoPickupWorkbook, autoPickupTable, autoPickupPlan.TypeRow);
+        var autoPickupFields = ReadTypeRowFromXlsx(autoPickupOutput, 0);
         var autoPickupData = ReadRowFromXlsxPreservePositions(autoPickupOutput, 3);
 
         AssertEqual("AutoPickupDropEntry", ReadFirstSheetNameFromXlsx(autoPickupOutput), "AutoPickupDropData cache should preserve the old item sheet name.");
+        AssertEqual("Id,InteractionTime,InteractionRadius,Prefab,PickupSfx,InteractionStartEventCallback,InteractionEndEventCallback", string.Join(",", autoPickupFields), "Invalid old display label 'Pickup Sfx' must be written as the legal ExcelToSO script field name PickupSfx.");
         AssertTrue(autoPickupData.Count >= 7, "AutoPickupDropData data row should keep all 7 physical template columns. Actual: " + string.Join(",", autoPickupData));
         AssertEqual("掉落物拾取1.mp3", autoPickupData[4], "Template field 'Pickup Sfx' must match semantic key pickup_sfx instead of losing the sfx value.");
         AssertEqual("heal_player_100", autoPickupData[6], "InteractionEndEventCallback should stay in the event callback column after physical template mapping.");

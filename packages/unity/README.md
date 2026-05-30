@@ -10,6 +10,8 @@
 
 Desktop 工作台文档见 [docs/desktop-workbench.md](../../docs/desktop-workbench.md)。长网络任务（sync-cache、导出 xlsx、三方一致性、compare-merge、PR gate）推荐从 Desktop 跑；Unity 里真正必须执行的是最后的 ExcelToSO `ImportByProfile(SourceOfTruthCache)` 导入 Unity asset。
 
+`SourceOfTruthCache` 写出的 xlsx 会同时照顾两套名字：旧 Excel 显示名和在线表字段名可以用宽松规则匹配（忽略空格、下划线、符号和大小写），但最终写给 ExcelToSO 的 `field_row` 必须是合法脚本字段名 / machine key，只能使用英文、数字和下划线且不能以数字开头。例如旧模板里可读显示名 `Pickup Sfx` 会写成 ExcelToSO 可导入的 `PickupSfx`；中文说明、路径提示等人类可读内容保留在说明行，不放在字段行。
+
 Legacy 窗口仍采用任务型 Dashboard：第一次打开会提示“飞书在线表是正式源头，本地 Excel 是缓存”；首页会给出“推荐下一步”，通常从 `预览同步计划` 开始。预览类按钮只读取不写文件；写入、创建、写回类按钮必须勾选确认，并要求最近一次同输入预览成功。
 
 从 0.4.23 开始，Unity 状态页把 Feishu Base 注册中心当作 live locator 的 Source of Truth。`ProjectSettings/*ConfigSheetForge*.json` 可以只保存表 ID、分支/profile 规则、路径和治理配置，不需要保存每张表的 `SpreadsheetToken` / `SheetId`。窗口会后台运行只读 `registry-status`，用 BranchBindings + ConfigSheets 判断“当前分支是否已登记在线表”。

@@ -5863,7 +5863,7 @@ public static class Program
                 var templateType = i < template.Types.Count ? template.Types[i] : "";
                 columns.Add(new ExcelToSoPhysicalColumn
                 {
-                    FieldName = fieldName,
+                    FieldName = ToExcelToSoOutputFieldName(fieldName, semantic?.Column),
                     TypeName = ChoosePhysicalTypeName(templateType, plannedType),
                     Description = i < template.Descriptions.Count ? template.Descriptions[i] : "",
                     SemanticColumnIndex = semanticIndex,
@@ -5877,9 +5877,10 @@ public static class Program
         for (var i = 0; i < sheet.Columns.Count; i++)
         {
             var column = sheet.Columns[i];
+            var fieldName = FirstNonEmpty(column.DisplayName, column.Key, column.SourceColumn);
             columns.Add(new ExcelToSoPhysicalColumn
             {
-                FieldName = FirstNonEmpty(column.SourceColumn, column.DisplayName, column.Key),
+                FieldName = ToExcelToSoOutputFieldName(fieldName, column),
                 TypeName = i < typeRow.Count ? typeRow[i] : "string",
                 Description = column.Details.TryGetValue("description", out var description) ? description : "",
                 SemanticColumnIndex = i,
@@ -5888,6 +5889,74 @@ public static class Program
         }
 
         return columns;
+    }
+
+    private static string ToExcelToSoOutputFieldName(string templateFieldName, ColumnDefinition? semanticColumn)
+    {
+        var candidate = (templateFieldName ?? "").Trim();
+        if (IsExcelToSoFieldName(candidate))
+        {
+            return candidate;
+        }
+
+        var sanitizedTemplate = SanitizeExcelToSoFieldName(candidate);
+        if (IsExcelToSoFieldName(sanitizedTemplate))
+        {
+            return sanitizedTemplate;
+        }
+
+        var semanticKey = FirstNonEmpty(semanticColumn?.Key ?? "", semanticColumn?.DisplayName ?? "");
+        if (IsExcelToSoFieldName(semanticKey))
+        {
+            return semanticKey;
+        }
+
+        var sanitizedSemantic = SanitizeExcelToSoFieldName(semanticKey);
+        return IsExcelToSoFieldName(sanitizedSemantic) ? sanitizedSemantic : "Field";
+    }
+
+    private static bool IsExcelToSoFieldName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        if (!(char.IsLetter(value[0]) || value[0] == '_'))
+        {
+            return false;
+        }
+
+        return value.All(ch => char.IsLetterOrDigit(ch) || ch == '_');
+    }
+
+    private static string SanitizeExcelToSoFieldName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "";
+        }
+
+        var builder = new StringBuilder(value.Length);
+        var capitalizeNext = false;
+        foreach (var ch in value.Trim())
+        {
+            if (char.IsLetterOrDigit(ch) || ch == '_')
+            {
+                builder.Append(capitalizeNext ? char.ToUpperInvariant(ch) : ch);
+                capitalizeNext = false;
+                continue;
+            }
+
+            capitalizeNext = builder.Length > 0;
+        }
+
+        if (builder.Length > 0 && char.IsDigit(builder[0]))
+        {
+            builder.Insert(0, '_');
+        }
+
+        return builder.ToString();
     }
 
     private static string ChoosePhysicalTypeName(string templateType, string plannedType)
@@ -6315,15 +6384,25 @@ public static class Program
                 return false;
             }
 
+            var invalidField = fieldRow.FirstOrDefault(field => !string.IsNullOrWhiteSpace(field) && !IsExcelToSoFieldName(field));
+            if (!string.IsNullOrWhiteSpace(invalidField))
+            {
+                error = "cache xlsx 字段行包含 ExcelToSO 不接受的字段名 “" + invalidField + "”。字段行必须是合法脚本字段名 / machine key，只能包含英文、数字和下划线，且不能以数字开头。";
+                return false;
+            }
+
             if (template.Available)
             {
                 var expectedFields = template.Fields.TakeWhile(field => !string.IsNullOrWhiteSpace(field)).ToList();
                 for (var i = 0; i < expectedFields.Count; i++)
                 {
                     var actual = i < fieldRow.Count ? fieldRow[i] : "";
-                    if (!string.Equals(actual, expectedFields[i], StringComparison.Ordinal))
+                    var expected = IsExcelToSoFieldName(expectedFields[i])
+                        ? expectedFields[i]
+                        : SanitizeExcelToSoFieldName(expectedFields[i]);
+                    if (!string.Equals(actual, expected, StringComparison.Ordinal))
                     {
-                        error = "cache xlsx 字段行第 " + (i + 1).ToString(CultureInfo.InvariantCulture) + " 列为 “" + actual + "”，但 ExcelToSO 模板要求 “" + expectedFields[i] + "”。字段大小写会影响 Unity serialized field，例如 ID 不能写成 id。";
+                        error = "cache xlsx 字段行第 " + (i + 1).ToString(CultureInfo.InvariantCulture) + " 列为 “" + actual + "”，但 ExcelToSO 模板要求 “" + expected + "”。字段大小写会影响 Unity serialized field，例如 ID 不能写成 id；旧模板显示名如 Pickup Sfx 必须写成合法字段名 PickupSfx。";
                         return false;
                     }
                 }

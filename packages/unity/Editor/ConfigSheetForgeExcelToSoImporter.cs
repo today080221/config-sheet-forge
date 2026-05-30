@@ -6,6 +6,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Xml.Linq;
 
 namespace ConfigSheetForge.Unity.Editor
@@ -310,6 +311,12 @@ namespace ConfigSheetForge.Unity.Editor
                 return "字段行包含自动生成字段 “" + generated + "”。这通常来自空列被错误重建，ExcelToSO 脚本里没有对应字段。";
             }
 
+            var invalidField = cacheFields.FirstOrDefault(field => !string.IsNullOrWhiteSpace(field) && !IsExcelToSoFieldName(field));
+            if (!string.IsNullOrWhiteSpace(invalidField))
+            {
+                return "字段行包含 ExcelToSO 不接受的字段名 “" + invalidField + "”。字段行必须写合法脚本字段名 / machine key；旧显示名如 Pickup Sfx 应写成 PickupSfx。";
+            }
+
             if (dataStartRow >= 0 && dataStartRow < cacheMatrix.Count && LooksLikeTypeTokenRow(cacheMatrix[dataStartRow]))
             {
                 return "data_from_row 第一行看起来仍是 integer/string/json 这类类型行，ExcelToSO 会把它当作真实数据。请修复 cache，确保第一行数据就是配表数据。";
@@ -343,13 +350,60 @@ namespace ConfigSheetForge.Unity.Editor
             for (var i = 0; i < expectedFields.Count; i++)
             {
                 var actual = i < cacheFields.Count ? cacheFields[i] : "";
-                if (!string.Equals(actual, expectedFields[i], StringComparison.Ordinal))
+                var expected = IsExcelToSoFieldName(expectedFields[i])
+                    ? expectedFields[i]
+                    : SanitizeExcelToSoFieldName(expectedFields[i]);
+                if (!string.Equals(actual, expected, StringComparison.Ordinal))
                 {
-                    return "字段行第 " + (i + 1).ToString(CultureInfo.InvariantCulture) + " 列为 “" + actual + "”，但旧 ExcelToSO 模板要求 “" + expectedFields[i] + "”。字段大小写会影响 Unity serialized field，例如 ID 不能写成 id。";
+                    return "字段行第 " + (i + 1).ToString(CultureInfo.InvariantCulture) + " 列为 “" + actual + "”，但旧 ExcelToSO 模板要求 “" + expected + "”。字段大小写会影响 Unity serialized field，例如 ID 不能写成 id。";
                 }
             }
 
             return "";
+        }
+
+        private static bool IsExcelToSoFieldName(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            if (!(char.IsLetter(value[0]) || value[0] == '_'))
+            {
+                return false;
+            }
+
+            return value.All(ch => char.IsLetterOrDigit(ch) || ch == '_');
+        }
+
+        private static string SanitizeExcelToSoFieldName(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "";
+            }
+
+            var builder = new StringBuilder(value.Length);
+            var capitalizeNext = false;
+            foreach (var ch in value.Trim())
+            {
+                if (char.IsLetterOrDigit(ch) || ch == '_')
+                {
+                    builder.Append(capitalizeNext ? char.ToUpperInvariant(ch) : ch);
+                    capitalizeNext = false;
+                    continue;
+                }
+
+                capitalizeNext = builder.Length > 0;
+            }
+
+            if (builder.Length > 0 && char.IsDigit(builder[0]))
+            {
+                builder.Insert(0, '_');
+            }
+
+            return builder.ToString();
         }
 
         private static string SuggestExcelToSoType(string token)

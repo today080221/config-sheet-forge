@@ -479,6 +479,12 @@ foreach ($requiredV447Marker in @("Pickup Sfx", "pickup_sfx", "BuildCacheImportP
   }
 }
 
+foreach ($requiredV448Marker in @("ToExcelToSoOutputFieldName", "SanitizeExcelToSoFieldName", "合法脚本字段名", "PickupSfx", "ExcelToSO 不接受的字段名", "写出的 xlsx 会同时照顾两套名字")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs) + "`n" + (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeExcelToSoImporter.cs) + "`n" + (Get-Content -Raw packages/unity/README.md) + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV448Marker*") {
+    throw "Unity v0.4.48 ExcelToSO field-row legality marker is missing: $requiredV448Marker"
+  }
+}
+
 if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
   throw "Unity bridge import-assets must not open the Legacy sync window."
 }
