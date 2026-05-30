@@ -491,6 +491,12 @@ foreach ($requiredV449Marker in @("RepairCacheDialectRewritesInvalidDisplayField
   }
 }
 
+foreach ($requiredV450Marker in @("buildProjectState", "getVersionStatus", "Desktop 版本过旧", "Unity 导入项", "unity-import-assets.result.json", "CloseMismatchedDesktopProcesses", "mode-card", "standalone mode does not pretend Unity import can run", "routes successful Unity import processed result to PR gate")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw apps/desktop/tests/workflow.test.ts) + "`n" + (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeBridgeWindow.cs) + "`n" + (Get-Content -Raw packages/unity/Editor/ConfigSheetForgeEditorApi.cs) + "`n" + (Get-Content -Raw packages/unity/CHANGELOG.md)) -notlike "*$requiredV450Marker*") {
+    throw "Unity v0.4.50 Desktop state/version/import QA marker is missing: $requiredV450Marker"
+  }
+}
+
 if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
   throw "Unity bridge import-assets must not open the Legacy sync window."
 }

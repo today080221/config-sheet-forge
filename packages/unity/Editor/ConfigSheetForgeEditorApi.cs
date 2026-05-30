@@ -13,6 +13,8 @@ namespace ConfigSheetForge.Unity.Editor
     internal sealed class UnityImportBridgeSummary
     {
         public int importedCount;
+        public int importItemCount;
+        public int tableCount;
         public int failedCount;
         public int skippedCount;
         public string profileId = ConfigSheetForgeExcelToSoImporter.SourceOfTruthProfileId;
@@ -80,6 +82,7 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             var projectConfig = ConfigSheetForgeEditorUtility.LoadProjectConfigSummary(projectRoot);
+            var tableCount = (projectConfig.Tables ?? new List<ProjectConfigTableSummary>()).Select(table => table.TableId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct().Count();
             var importItems = BuildImportItems(projectRoot, projectConfig);
             if (importItems.Count == 0)
             {
@@ -131,9 +134,11 @@ namespace ConfigSheetForge.Unity.Editor
                 items = imported.Select(ToBridgeItem).ToArray()
             };
             result.unityImportSummary.importedCount = imported.Count(item => item.Success);
+            result.unityImportSummary.importItemCount = imported.Count;
+            result.unityImportSummary.tableCount = tableCount > 0 ? tableCount : importItems.Select(item => item.TableId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct().Count();
             result.unityImportSummary.failedCount = imported.Count(item => !item.Success);
             result.unityImportSummary.skippedCount = 0;
-            result.unityImportSummary.nextStep = result.success ? "运行 PR gate。" : "修复失败表后重新导入。";
+            result.unityImportSummary.nextStep = result.success ? "运行 PR 检查。" : "修复失败表后重新导入。";
             if (!result.success)
             {
                 failures.AddRange(imported.Where(item => !item.Success).SelectMany(item => item.Errors.Select(error => FirstNonEmpty(item.TableId, item.ExcelPath, "未知表") + ": " + error)));
@@ -141,8 +146,8 @@ namespace ConfigSheetForge.Unity.Editor
 
             result.humanReadableFailures = failures.ToArray();
             result.summary = result.success
-                ? "导入成功 " + result.unityImportSummary.importedCount + " 张，失败 0 张。下一步：运行 PR gate。"
-                : "导入完成，但失败 " + result.unityImportSummary.failedCount + " 张。请查看失败表。";
+                ? "导入成功：" + result.unityImportSummary.importItemCount + " 个 Unity 导入项，失败 0 个。对应在线表：" + result.unityImportSummary.tableCount + " 张。下一步：运行 PR 检查。"
+                : "导入完成，但失败 " + result.unityImportSummary.failedCount + " 个 Unity 导入项。请查看失败表。";
             return result;
         }
 

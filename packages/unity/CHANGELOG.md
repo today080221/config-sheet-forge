@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.50
+
+- Desktop 增加统一项目状态模型：在线表、cache、Unity 导入、PR 检查、bridge 模式和版本一致性都从同一份 normalized state 渲染，避免 0/0 在线表、cache upToDate、导入已完成之间互相矛盾。
+- 修复 Unity 导入成功后 Desktop 主流程不推进的问题。`unity-import-assets` processed result 现在会被消费、持久化到 Desktop result 目录，并把同步导入场景推进到“运行 PR gate”。
+- 区分 Unity bridge 模式和独立模式：独立打开 Desktop 时会明确提示回 Unity 导入，不再展示看似可执行但实际不可用的主按钮。
+- 导入数量文案改为“Unity 导入项”而不是“张表”，并显示对应在线表数量，避免 RoomData slave 让 16 张在线表显示成 17 张表。
+- Unity thin bridge 优先启动当前 UPM tag 对应的 Desktop 安装目录，并尽力关闭同产品旧版本进程；Desktop 侧会在版本低于 UPM 或 CLI 不一致时阻断主流程。
+- 智能场景卡和状态卡布局优化，长标题/路径不再撑高或截成不可读的片段。
+
 ## 0.4.49
 
 - 修复 `repair-cache-dialect` 只按旧模板原文比较字段行导致误判 `upToDate` 的问题。现在旧模板 display label（如 `Pickup Sfx`）会先投影成 ExcelToSO 合法字段名（`PickupSfx`），再参与物理 xlsx 判定。

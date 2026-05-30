@@ -346,6 +346,7 @@ namespace ConfigSheetForge.Unity.Editor
 
         private static void StartProcess(string executable, string[] args, string workingDirectory, bool visible)
         {
+            CloseMismatchedDesktopProcesses(executable);
             var startInfo = new ProcessStartInfo
             {
                 FileName = executable,
@@ -360,6 +361,36 @@ namespace ConfigSheetForge.Unity.Editor
             }
 
             Process.Start(startInfo);
+        }
+
+        private static void CloseMismatchedDesktopProcesses(string expectedExecutable)
+        {
+            try
+            {
+                var expected = Path.GetFullPath(expectedExecutable ?? "");
+                foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(DesktopExecutableName)))
+                {
+                    try
+                    {
+                        var path = process.MainModule != null ? process.MainModule.FileName : "";
+                        if (!string.IsNullOrWhiteSpace(path) &&
+                            string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        process.Kill();
+                    }
+                    catch
+                    {
+                        // Best effort: if Windows denies MainModule/Kill access, the Desktop side still blocks mismatched versions.
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort cleanup only; launch should not fail because process enumeration failed.
+            }
         }
 
         private void OpenLifecycleDirectory()
@@ -541,6 +572,15 @@ namespace ConfigSheetForge.Unity.Editor
         private static DesktopDiscovery DiscoverDesktop()
         {
             var discovery = DesktopDiscovery.Empty;
+            var expectedInstalledPath = Path.Combine(BuildDesktopInstallDirectory(PackageVersion), DesktopExecutableName);
+            if (File.Exists(expectedInstalledPath))
+            {
+                discovery.ExecutablePath = expectedInstalledPath;
+                discovery.InstalledVersion = FirstNonEmpty(ReadInstalledDesktopVersion(expectedInstalledPath), PackageVersion);
+                discovery.Source = "已安装";
+                return discovery.WithVersionStatus(PackageVersion);
+            }
+
             var installedPath = EditorPrefs.GetString(DesktopInstallPathPrefKey, "");
             var installedVersion = EditorPrefs.GetString(DesktopInstallVersionPrefKey, "");
             if (!string.IsNullOrWhiteSpace(installedPath) && File.Exists(installedPath))

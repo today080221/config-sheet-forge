@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  buildProjectState,
   decidePrMerge,
   decideSyncImport,
   desktopResultNameForOperation,
+  getVersionStatus,
   normalizeSyncCacheResult,
   ordinaryToolText,
   parseLifecycleResultJson,
@@ -220,14 +222,104 @@ describe("Desktop workflow state machine", () => {
       success: true,
       nextAction: "run-pr-gate",
       unityImportSummary: {
-        importedCount: 16,
+        importedCount: 17,
+        importItemCount: 17,
+        tableCount: 16,
         failedCount: 0,
         skippedCount: 0,
         profileId: "SourceOfTruthCache"
       }
     };
 
-    expect(summarizeLifecycleResult(result)).toBe("导入成功 16 张，失败 0 张。下一步：运行 PR gate。");
+    expect(summarizeLifecycleResult(result)).toContain("17 个 Unity 导入项");
+    expect(summarizeLifecycleResult(result)).toContain("对应在线表：16 张");
+    expect(summarizeLifecycleResult(result)).not.toContain("17 张表");
+  });
+
+  it("routes successful Unity import processed result to PR gate", () => {
+    const importResult: LifecycleResultLike = {
+      operation: "unity-import-assets",
+      success: true,
+      nextAction: "run-pr-gate",
+      unityImportSummary: {
+        importedCount: 17,
+        importItemCount: 17,
+        tableCount: 16,
+        failedCount: 0
+      }
+    };
+    const decision = decideSyncImport({
+      lastSyncPreview: syncPreview("upToDate"),
+      lastUnityImport: importResult,
+      bridgeSessionDir: "Library/ConfigSheetForge/DesktopBridge/session"
+    });
+
+    expect(decision.primaryOperation).toBe("pr-gate-report");
+    expect(decision.primaryLabel).toBe("运行 PR 检查");
+    expect(decision.conclusion).toContain("已导入");
+  });
+
+  it("standalone mode does not pretend Unity import can run", () => {
+    const decision = decideSyncImport({ lastSyncPreview: syncPreview("upToDate"), bridgeSessionDir: "" });
+
+    expect(decision.primaryOperation).toBe("unity-import");
+    expect(decision.primaryDisabled).toBe(true);
+    expect(decision.disabledReason).toContain("无法直接调用 Unity Editor");
+    expect(decision.nextStep).toContain("请回 Unity");
+  });
+
+  it("builds a single project state without 0/0 registry contradictions", () => {
+    const state = buildProjectState({
+      lastQuickStatus: {
+        operation: "registry-status",
+        success: true,
+        branchStatus: {
+          tableCountExpected: 16,
+          tableCountRegistered: 16,
+          missingTables: [],
+          missingLocators: []
+        }
+      },
+      lastSyncPreview: syncPreview("upToDate"),
+      lastUnityImport: {
+        operation: "unity-import-assets",
+        success: true,
+        nextAction: "run-pr-gate",
+        unityImportSummary: { importedCount: 17, importItemCount: 17, tableCount: 16, failedCount: 0 }
+      },
+      bridgeSessionDir: "Library/ConfigSheetForge/DesktopBridge/session",
+      desktopVersion: "0.4.49",
+      unityPackageVersion: "v0.4.49",
+      cliVersion: "0.4.49"
+    });
+
+    expect(state.onlineTableLabel).toBe("16/16 已登记");
+    expect(state.cacheLabel).toBe("已是最新");
+    expect(state.unityImportDetail).toContain("17 个 Unity 导入项");
+    expect(state.unityImportDetail).toContain("16 张");
+    expect(state.nextAction).toBe("run-pr-gate");
+  });
+
+  it("blocks workflow when Desktop is older than UPM", () => {
+    const version = getVersionStatus("0.4.44", "v0.4.49", "0.4.44");
+    const decision = decideSyncImport({
+      lastSyncPreview: syncPreview("upToDate"),
+      desktopVersion: "0.4.44",
+      unityPackageVersion: "v0.4.49",
+      cliVersion: "0.4.44"
+    });
+
+    expect(version.blocking).toBe(true);
+    expect(decision.primaryOperation).toBe("update-desktop");
+    expect(decision.primaryDisabled).toBe(true);
+    expect(decision.conclusion).toContain("版本过旧");
+  });
+
+  it("does not treat descriptive CLI source labels as stale CLI versions", () => {
+    const version = getVersionStatus("0.4.50", "v0.4.50", "Desktop sidecar CLI");
+
+    expect(version.blocking).toBe(false);
+    expect(version.status).toBe("ok");
   });
 
   it("requires a same-input preview fingerprint before cache apply", () => {

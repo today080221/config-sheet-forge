@@ -410,6 +410,24 @@ fn read_bridge_response(command_path: String) -> Result<CliRunResult, String> {
     let result_json = fs::read_to_string(&processed)
         .map(strip_utf8_bom)
         .map_err(|e| format!("读取 Unity bridge 返回结果失败：{}", e))?;
+    if let Ok(command_json) = fs::read_to_string(&command).map(strip_utf8_bom) {
+        if let Ok(command_value) = serde_json::from_str::<Value>(&command_json) {
+            if let Some(project_root) = command_value
+                .get("payload")
+                .and_then(|payload| payload.get("projectRoot"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                let result_dir = PathBuf::from(project_root)
+                    .join("Temp")
+                    .join("ConfigSheetForge")
+                    .join("desktop");
+                if fs::create_dir_all(&result_dir).is_ok() {
+                    let _ = fs::write(result_dir.join("unity-import-assets.result.json"), &result_json);
+                }
+            }
+        }
+    }
     let parsed = serde_json::from_str::<Value>(&result_json).unwrap_or(Value::Null);
     let success = parsed
         .get("success")

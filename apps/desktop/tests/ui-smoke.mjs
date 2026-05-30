@@ -11,7 +11,7 @@ function assert(condition, message) {
   }
 }
 
-for (const viewport of ["1280x720", "1366x768", "1920x1080"]) {
+for (const viewport of ["1280x720", "1366x768", "1600x900", "1920x1080", "125% zoom"]) {
   assert(css.includes("overflow-x: hidden"), `${viewport}: ordinary view must prevent horizontal scroll`);
   assert(css.includes("min-width: 0"), `${viewport}: grid/card items need min-width: 0 overflow guard`);
   assert(css.includes("text-overflow: ellipsis"), `${viewport}: long labels need ellipsis`);
@@ -31,6 +31,10 @@ assert(app.includes("read_desktop_result"), "Desktop must restore workflow state
 assert(app.includes("read_bridge_response"), "Desktop must poll Unity bridge responses instead of fire-and-forget commands");
 assert(app.includes("正在请求 Unity 导入"), "Desktop must show a human readable Unity import running state");
 assert(app.includes("unity-import-assets"), "Desktop must understand direct Unity import results");
+assert(app.includes("buildProjectState"), "Desktop must render status cards from one normalized project state");
+assert(app.includes("mode-card"), "Standalone mode must show a clear non-bridge explanation");
+assert(workflow.includes("getVersionStatus"), "Desktop must block mismatched Desktop/UPM/CLI versions");
+assert(workflow.includes("Unity 导入项"), "Unity import summaries must distinguish import items from online tables");
 assert(app.includes("readResultAfterTaskCompletion"), "Desktop must consume result JSON immediately after a background task completes");
 assert(app.includes("shouldReadDesktopResultAfterTask"), "Desktop must reread --out result files when TaskSnapshot misses resultJson");
 assert(app.includes("normalizeSyncCacheResult"), "Desktop must normalize sync-cache results before driving workflow state");
@@ -71,6 +75,7 @@ for (const stableLayoutMarker of [
   "height: 146px",
   "grid-auto-rows: 128px",
   "height: 128px",
+  "white-space: normal",
   "max-height: 360px"
 ]) {
   assert(css.includes(stableLayoutMarker), `Stable scene switching CSS marker missing: ${stableLayoutMarker}`);

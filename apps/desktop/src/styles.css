@@ -340,9 +340,12 @@ button.large {
 .scenario-card strong {
   display: block;
   font-size: 16px;
-  white-space: nowrap;
+  min-height: 44px;
+  line-height: 1.35;
+  white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 .scenario-card small {
@@ -367,7 +370,7 @@ button.large {
 
 .status-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   grid-auto-rows: 128px;
   gap: 10px;
 }
@@ -396,8 +399,11 @@ button.large {
 }
 
 .status-card strong {
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   font-size: 18px;
+  line-height: 1.25;
+  max-height: 46px;
 }
 
 .status-card p {
@@ -412,6 +418,16 @@ button.large {
 .link-button {
   justify-self: start;
   padding: 6px 10px;
+}
+
+.mode-card {
+  min-height: 54px;
+  padding: 13px 16px;
+  border: 1px solid #f1c36d;
+  border-radius: 10px;
+  background: #fff8e6;
+  color: #5d420d;
+  line-height: 1.45;
 }
 
 .wizard-layout {
@@ -839,7 +855,7 @@ pre {
   }
 
   .status-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .wizard-layout {

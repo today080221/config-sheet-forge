@@ -103,6 +103,8 @@ export type LifecycleResultLike = {
   prGateReport?: PrGateReportLike;
   unityImportSummary?: {
     importedCount?: number;
+    importItemCount?: number;
+    tableCount?: number;
     failedCount?: number;
     skippedCount?: number;
     profileId?: string;
@@ -154,10 +156,15 @@ export type WorkflowState = {
   lastScenario?: ScenarioId;
   lastSyncPreview?: LifecycleResultLike | null;
   lastSyncApply?: LifecycleResultLike | null;
+  lastQuickStatus?: LifecycleResultLike | null;
+  lastUnityImport?: LifecycleResultLike | null;
   lastComparePreview?: LifecycleResultLike | null;
   lastGateReport?: LifecycleResultLike | PrGateReportLike | null;
   bridgeSessionDir?: string;
   activeOperation?: string;
+  desktopVersion?: string;
+  unityPackageVersion?: string;
+  cliVersion?: string;
 };
 
 export type ScenarioStep = {
@@ -187,6 +194,28 @@ export type WorkflowDecision = {
   steps: ScenarioStep[];
   warnings: string[];
   debugHints: string[];
+};
+
+export type VersionStatus = {
+  status: "ok" | "desktopOlder" | "cliMismatch" | "unknown";
+  message: string;
+  blocking: boolean;
+};
+
+export type ProjectState = {
+  onlineTableLabel: string;
+  onlineTableDetail: string;
+  expectedTableCount: number;
+  onlineTableCount: number;
+  cacheLabel: string;
+  cacheDetail: string;
+  unityImportLabel: string;
+  unityImportDetail: string;
+  prGateLabel: string;
+  prGateDetail: string;
+  bridgeMode: "bridge" | "standalone";
+  versionStatus: VersionStatus;
+  nextAction: string;
 };
 
 export type FieldType = "string" | "int" | "float" | "bool" | "string[]" | "int[]" | "float[]" | "bool[]";
@@ -227,7 +256,7 @@ export const scenarios: ScenarioDefinition[] = [
     id: "pr-merge",
     title: "准备 PR 合并",
     shortTitle: "合并",
-    description: "生成合并预览、提交合并审查记录，再运行 PR gate。",
+    description: "生成合并预览、提交合并审查记录，再运行 PR 检查。",
     safeNote: "合并预览不写 main；提交审查只写 MergeReviews。"
   },
   {
@@ -254,6 +283,62 @@ export function getScenario(id: ScenarioId): ScenarioDefinition {
 
 export function normalizeCacheStatus(value: string | undefined): string {
   return (value || "unknown").trim().toLowerCase();
+}
+
+export function normalizeVersionText(value: string | undefined): string {
+  return (value || "").trim().replace(/^v/i, "");
+}
+
+export function compareSemverLike(left: string | undefined, right: string | undefined): number {
+  const a = normalizeVersionText(left);
+  const b = normalizeVersionText(right);
+  if (!a || !b || a === "开发预览" || b === "开发预览" || a === "未识别" || b === "未识别") {
+    return 0;
+  }
+
+  const parse = (value: string) => value.split(/[+-]/)[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const av = parse(a);
+  const bv = parse(b);
+  const count = Math.max(av.length, bv.length, 3);
+  for (let i = 0; i < count; i += 1) {
+    const diff = (av[i] || 0) - (bv[i] || 0);
+    if (diff !== 0) {
+      return diff > 0 ? 1 : -1;
+    }
+  }
+
+  return 0;
+}
+
+function looksLikeSemver(value: string | undefined): boolean {
+  return /^\d+(?:\.\d+){1,2}(?:[+-].*)?$/.test(normalizeVersionText(value));
+}
+
+export function getVersionStatus(desktopVersion?: string, unityPackageVersion?: string, cliVersion?: string): VersionStatus {
+  const desktop = normalizeVersionText(desktopVersion);
+  const unity = normalizeVersionText(unityPackageVersion);
+  const cli = normalizeVersionText(cliVersion);
+  if (!desktop || !unity) {
+    return { status: "unknown", message: "正在识别 Desktop / UPM / CLI 版本。", blocking: false };
+  }
+
+  if (compareSemverLike(desktop, unity) < 0) {
+    return {
+      status: "desktopOlder",
+      message: `Desktop v${desktop} 低于 UPM v${unity}。请更新 Desktop 后继续，避免旧窗口写入旧格式结果。`,
+      blocking: true
+    };
+  }
+
+  if (cli && looksLikeSemver(cli) && compareSemverLike(cli, desktop) !== 0) {
+    return {
+      status: "cliMismatch",
+      message: `Desktop v${desktop} 与 CLI v${cli} 不一致。请重新安装同版本 Desktop。`,
+      blocking: true
+    };
+  }
+
+  return { status: "ok", message: `Desktop / UPM / CLI 版本一致：v${desktop}。`, blocking: false };
 }
 
 function canonicalCacheStatus(value: unknown): NormalizedSyncCacheStatus {
@@ -623,7 +708,119 @@ export function decideRecommendedScenario(state: WorkflowState): ScenarioId {
   return "sync-import";
 }
 
+function bestBranchStatus(...results: Array<LifecycleResultLike | null | undefined>): BranchStatusLike | undefined {
+  const statuses = results.map((result) => result?.branchStatus).filter(Boolean) as BranchStatusLike[];
+  return statuses.find((status) => (status.tableCountExpected || 0) > 0 || (status.tableCountRegistered || 0) > 0)
+    ?? statuses[0];
+}
+
+function importSummaryCounts(result: LifecycleResultLike | null | undefined, fallbackTableCount: number): { importItemCount: number; tableCount: number; failedCount: number; skippedCount: number } {
+  const summary = result?.unityImportSummary;
+  const importItemCount = summary?.importItemCount ?? summary?.importedCount ?? 0;
+  const tableCount = summary?.tableCount ?? fallbackTableCount;
+  return {
+    importItemCount,
+    tableCount,
+    failedCount: summary?.failedCount ?? 0,
+    skippedCount: summary?.skippedCount ?? 0
+  };
+}
+
+export function buildProjectState(state: WorkflowState): ProjectState {
+  const versionStatus = getVersionStatus(state.desktopVersion, state.unityPackageVersion, state.cliVersion);
+  const branchStatus = bestBranchStatus(state.lastQuickStatus, state.lastSyncPreview, state.lastSyncApply);
+  const sync = normalizeSyncCacheResult(state.lastSyncPreview ?? state.lastSyncApply ?? state.lastQuickStatus);
+  const gate = extractPrGate(state.lastGateReport);
+  const bridgeMode = state.bridgeSessionDir ? "bridge" : "standalone";
+  const expected = branchStatus?.tableCountExpected || sync?.tableCount || 0;
+  const registered = branchStatus?.tableCountRegistered || (expected > 0 && branchStatus && (branchStatus.missingTables || []).length === 0 ? expected : 0);
+  const onlineTableLabel = branchStatus
+    ? expected > 0
+      ? `${registered}/${expected} 已登记`
+      : "尚未读取在线注册中心"
+    : "尚未读取在线注册中心";
+  const onlineTableDetail = branchStatus
+    ? expected > 0 && registered < expected
+      ? `缺 ${(branchStatus.missingTables || []).length || expected - registered} 张在线表。`
+      : expected > 0
+        ? "以 live registry 的 BranchBindings / ConfigSheets 为准。"
+        : "请先运行快速状态检查。"
+    : "请先运行快速状态检查。";
+  const cacheLabel = sync
+    ? sync.cacheStatus === "upToDate"
+      ? "已是最新"
+      : sync.cacheStatus === "needsUpdate"
+        ? "需要写入 cache"
+        : sync.cacheStatus === "missingCache"
+          ? "缺少 cache"
+          : sync.cacheStatus === "dialectOutdated"
+            ? "需要修复类型行"
+            : sync.cacheStatus === "blocked"
+              ? "同步预检阻断"
+              : "等待预览"
+    : "等待预览";
+  const cacheDetail = sync ? syncResultSummaryLine(state.lastSyncPreview ?? state.lastSyncApply ?? state.lastQuickStatus) : "还没有同步预览。";
+  const importCounts = importSummaryCounts(state.lastUnityImport, expected);
+  const unityImportLabel = state.lastUnityImport?.success
+    ? "导入完成"
+    : bridgeMode === "bridge"
+      ? "等待导入"
+      : "需回 Unity 导入";
+  const unityImportDetail = state.lastUnityImport?.success
+    ? `导入成功：${importCounts.importItemCount} 个 Unity 导入项，失败 ${importCounts.failedCount} 个。对应在线表：${importCounts.tableCount || expected || "未知"} 张。`
+    : bridgeMode === "bridge"
+      ? "Desktop 可通过 Unity bridge 调用 ExcelToSO。"
+      : "独立模式不能直接调用 Unity Editor。";
+  const prGateLabel = gate
+    ? gate.passed || gate.gateState === "passed"
+      ? "已通过"
+      : gate.waived || gate.gateState === "waived"
+        ? "已临时放行"
+        : "未通过"
+    : "等待检查";
+  const prGateDetail = gate ? summarizeLifecycleResult(state.lastGateReport) : "导入完成后运行 PR 检查。";
+  const nextAction = versionStatus.blocking
+    ? "update-desktop"
+    : state.lastUnityImport?.success
+      ? "run-pr-gate"
+      : sync?.nextAction || "preview-sync";
+
+  return {
+    onlineTableLabel,
+    onlineTableDetail,
+    expectedTableCount: expected,
+    onlineTableCount: registered,
+    cacheLabel,
+    cacheDetail,
+    unityImportLabel,
+    unityImportDetail,
+    prGateLabel,
+    prGateDetail,
+    bridgeMode,
+    versionStatus,
+    nextAction
+  };
+}
+
 export function decideWorkflow(scenarioId: ScenarioId, state: WorkflowState): WorkflowDecision {
+  const projectState = buildProjectState(state);
+  if (projectState.versionStatus.blocking && scenarioId !== "environment") {
+    const base = baseDecision(scenarioId, state);
+    return {
+      ...base,
+      conclusion: "Desktop 版本过旧",
+      nextStep: projectState.versionStatus.message,
+      primaryLabel: "更新 Desktop",
+      primaryOperation: "update-desktop",
+      primaryDisabled: true,
+      disabledReason: "请回 Unity thin bridge 点击“安装/更新 Desktop”，或关闭旧 Desktop 后从 Unity 重新打开。",
+      safety: "版本不一致时禁止执行同步、导入、PR gate，避免旧流程污染结果。",
+      programSummary: projectState.versionStatus.message,
+      steps: [{ title: "更新 Desktop", status: "blocked" }],
+      warnings: [projectState.versionStatus.message]
+    };
+  }
+
   switch (scenarioId) {
     case "environment":
       return decideEnvironment(state);
@@ -650,6 +847,23 @@ export function decideSyncImport(state: WorkflowState): WorkflowDecision {
   const fingerprint = syncPreviewFingerprint(preview);
   const base = baseDecision("sync-import", state);
   const hasPreview = Boolean(normalized);
+  const versionStatus = getVersionStatus(state.desktopVersion, state.unityPackageVersion, state.cliVersion);
+
+  if (versionStatus.blocking) {
+    return {
+      ...base,
+      conclusion: "Desktop 版本过旧",
+      nextStep: versionStatus.message,
+      primaryLabel: "更新 Desktop",
+      primaryOperation: "update-desktop",
+      primaryDisabled: true,
+      disabledReason: "请回 Unity thin bridge 点击“安装/更新 Desktop”，或关闭旧 Desktop 后从 Unity 重新打开。",
+      safety: "版本不一致时禁止执行同步、导入、PR gate，避免旧流程污染结果。",
+      programSummary: versionStatus.message,
+      steps: [{ title: "更新 Desktop", status: "blocked" }],
+      warnings: [versionStatus.message]
+    };
+  }
 
   if (state.activeOperation) {
     return {
@@ -661,6 +875,21 @@ export function decideSyncImport(state: WorkflowState): WorkflowDecision {
       primaryDisabled: true,
       disabledReason: "后台任务运行中，完成后会自动恢复。",
       steps: syncSteps("active-preview")
+    };
+  }
+
+  if (state.lastUnityImport?.success && ((state.lastUnityImport.nextAction || state.lastUnityImport.unityImportSummary?.nextStep || "").toLowerCase().includes("run-pr-gate") || state.lastUnityImport.nextAction === "run-pr-gate")) {
+    const counts = importSummaryCounts(state.lastUnityImport, tableCount);
+    return {
+      ...base,
+      conclusion: "Unity 配表资产已导入",
+      nextStep: "下一步运行 PR 检查，确认审查记录、cache 和权限都满足合并要求。",
+      primaryLabel: "运行 PR 检查",
+      primaryOperation: "pr-gate-report",
+      primaryDisabled: false,
+      safety: "PR 检查只生成报告；hard gate 使用 strict bot，不会静默使用 user fallback。",
+      programSummary: `unity-import-assets success=true；importItemCount=${counts.importItemCount}，tableCount=${counts.tableCount}，nextAction=run-pr-gate。`,
+      steps: syncSteps("gate")
     };
   }
 
@@ -764,7 +993,7 @@ export function decidePrMerge(state: WorkflowState): WorkflowDecision {
   if (gate?.passed || gate?.gateState === "passed") {
     return {
       ...base,
-      conclusion: "PR gate 已通过",
+      conclusion: "PR 检查已通过",
       nextStep: "可以回到 GitHub 合并 PR。",
       primaryLabel: "完成",
       primaryOperation: "",
@@ -794,7 +1023,7 @@ export function decidePrMerge(state: WorkflowState): WorkflowDecision {
     return {
       ...base,
       conclusion: "合并预览已生成",
-      nextStep: "提交合并审查记录，然后运行 PR gate。",
+      nextStep: "提交合并审查记录，然后运行 PR 检查。",
       primaryLabel: "提交合并审查记录",
       primaryOperation: "submit-merge-review",
       primaryDisabled: !state.lastComparePreview.requestFingerprint,
@@ -808,7 +1037,7 @@ export function decidePrMerge(state: WorkflowState): WorkflowDecision {
   return {
     ...base,
     conclusion: "等待 PR 检查",
-    nextStep: "运行 PR gate。",
+    nextStep: "运行 PR 检查。",
     primaryLabel: "运行 PR 检查",
     primaryOperation: "pr-gate-report",
     primaryDisabled: false,
@@ -935,11 +1164,11 @@ export function summarizeLifecycleResult(result: LifecycleResultLike | PrGateRep
   const gate = extractPrGate(result);
   if (gate) {
     if (gate.passed || gate.gateState === "passed") {
-      return "PR gate 已通过。";
+      return "PR 检查已通过。";
     }
 
     if (gate.waived || gate.gateState === "waived") {
-      return "PR gate 已由负责人临时放行。";
+      return "PR 检查已由负责人临时放行。";
     }
   }
 
@@ -953,10 +1182,13 @@ export function summarizeLifecycleResult(result: LifecycleResultLike | PrGateRep
       return (lifecycle.humanReadableFailures || []).slice(0, 1)[0] || lifecycle.summary || "Unity 导入未完成，请查看失败表。";
     }
 
-    const imported = summary?.importedCount ?? 0;
+    const importItems = summary?.importItemCount ?? summary?.importedCount ?? 0;
+    const tableCount = summary?.tableCount ?? 0;
     const failed = summary?.failedCount ?? 0;
     const skipped = summary?.skippedCount ?? 0;
-    return `导入成功 ${imported} 张，失败 ${failed} 张${skipped > 0 ? `，跳过 ${skipped} 张` : ""}。下一步：运行 PR gate。`;
+    const tableText = tableCount > 0 ? `对应在线表：${tableCount} 张。` : "";
+    const explain = tableCount > 0 && importItems !== tableCount ? "RoomData 等表可能包含附属导入项，所以 Unity 导入项数量可能多于在线表数量。" : "";
+    return `导入成功：${importItems} 个 Unity 导入项，失败 ${failed} 个${skipped > 0 ? `，跳过 ${skipped} 个` : ""}。${tableText}${explain ? " " + explain : ""} 下一步：运行 PR 检查。`;
   }
 
   if (lifecycle.success === false) {
@@ -989,12 +1221,12 @@ function baseDecision(scenarioId: ScenarioId, state: WorkflowState): WorkflowDec
   };
 }
 
-function syncSteps(active: "preview" | "active-preview" | "blocked" | "apply" | "import"): ScenarioStep[] {
+function syncSteps(active: "preview" | "active-preview" | "blocked" | "apply" | "import" | "gate"): ScenarioStep[] {
   return [
     { title: "预览同步", status: active === "preview" || active === "active-preview" ? "active" : "done" },
-    { title: "写入 cache", status: active === "blocked" ? "blocked" : active === "apply" ? "active" : active === "import" ? "done" : "pending" },
-    { title: "导入 Unity", status: active === "import" ? "active" : "pending" },
-    { title: "PR 检查", status: "pending" }
+    { title: "写入 cache", status: active === "blocked" ? "blocked" : active === "apply" ? "active" : (active === "import" || active === "gate") ? "done" : "pending" },
+    { title: "导入 Unity", status: active === "import" ? "active" : active === "gate" ? "done" : "pending" },
+    { title: "PR 检查", status: active === "gate" ? "active" : "pending" }
   ];
 }
 

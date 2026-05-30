@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   decideRecommendedScenario,
   decideWorkflow,
+  buildProjectState,
   desktopResultNameForOperation,
   getScenario,
   humanToolStatus,
@@ -384,11 +385,13 @@ export function App() {
   const [lastResult, setLastResult] = useState<CliRunResult | null>(null);
   const [lastResultParsed, setLastResultParsed] = useState<LifecycleResultLike | null>(null);
   const [lastSyncPreview, setLastSyncPreview] = useState<LifecycleResultLike | null>(null);
+  const [lastSyncApply, setLastSyncApply] = useState<LifecycleResultLike | null>(null);
   const [lastQuickStatus, setLastQuickStatus] = useState<LifecycleResultLike | null>(null);
   const [lastSyncPreviewPath, setLastSyncPreviewPath] = useState("");
   const [lastComparePreview, setLastComparePreview] = useState<LifecycleResultLike | null>(null);
   const [lastComparePreviewPath, setLastComparePreviewPath] = useState("");
   const [lastGateReport, setLastGateReport] = useState<LifecycleResultLike | null>(null);
+  const [lastUnityImport, setLastUnityImport] = useState<LifecycleResultLike | null>(null);
   const [logExpanded, setLogExpanded] = useState(false);
   const [moreExpanded, setMoreExpanded] = useState(false);
   const [error, setError] = useState("");
@@ -429,18 +432,27 @@ export function App() {
   }, [activeTask?.elapsedMs, operationStartedAt, activeOperation]);
   const larkCheck = checks.find((check) => check.name === "lark-cli");
   const cliCheck = checks.find((check) => check.name === "Config Sheet Forge CLI");
+  const desktopVersion = startup.desktopVersion || "开发预览";
+  const unityVersion = snapshot?.unityPackageVersion || "未识别";
+  const cliVersion = startup.sidecarCliVersion || (cliCheck?.source?.includes("sidecar") ? desktopVersion : cliCheck?.source || "未识别");
   const recommendedScenario = useMemo(
     () => decideRecommendedScenario({
       snapshot,
       checks,
       lastScenario: selectedScenario,
       lastSyncPreview,
+      lastSyncApply,
+      lastQuickStatus,
+      lastUnityImport,
       lastComparePreview,
       lastGateReport,
       bridgeSessionDir: startup.bridgeSessionDir,
-      activeOperation
+      activeOperation,
+      desktopVersion,
+      unityPackageVersion: unityVersion,
+      cliVersion
     }),
-    [activeOperation, checks, lastComparePreview, lastGateReport, lastSyncPreview, selectedScenario, snapshot, startup.bridgeSessionDir]
+    [activeOperation, checks, cliVersion, desktopVersion, lastComparePreview, lastGateReport, lastQuickStatus, lastSyncApply, lastSyncPreview, lastUnityImport, selectedScenario, snapshot, startup.bridgeSessionDir, unityVersion]
   );
   const decision = useMemo(
     () => decideWorkflow(selectedScenario, {
@@ -448,12 +460,37 @@ export function App() {
       checks,
       lastScenario: selectedScenario,
       lastSyncPreview,
+      lastSyncApply,
+      lastQuickStatus,
+      lastUnityImport,
       lastComparePreview,
       lastGateReport,
       bridgeSessionDir: startup.bridgeSessionDir,
-      activeOperation
+      activeOperation,
+      desktopVersion,
+      unityPackageVersion: unityVersion,
+      cliVersion
     }),
-    [activeOperation, checks, lastComparePreview, lastGateReport, lastSyncPreview, selectedScenario, snapshot, startup.bridgeSessionDir]
+    [activeOperation, checks, cliVersion, desktopVersion, lastComparePreview, lastGateReport, lastQuickStatus, lastSyncApply, lastSyncPreview, lastUnityImport, selectedScenario, snapshot, startup.bridgeSessionDir, unityVersion]
+  );
+  const projectState = useMemo(
+    () => buildProjectState({
+      snapshot,
+      checks,
+      lastScenario: selectedScenario,
+      lastSyncPreview,
+      lastSyncApply,
+      lastQuickStatus,
+      lastUnityImport,
+      lastComparePreview,
+      lastGateReport,
+      bridgeSessionDir: startup.bridgeSessionDir,
+      activeOperation,
+      desktopVersion,
+      unityPackageVersion: unityVersion,
+      cliVersion
+    }),
+    [activeOperation, checks, cliVersion, desktopVersion, lastComparePreview, lastGateReport, lastQuickStatus, lastSyncApply, lastSyncPreview, lastUnityImport, selectedScenario, snapshot, startup.bridgeSessionDir, unityVersion]
   );
   const newTableErrors = validateNewTableDraft(newTable);
 
@@ -681,18 +718,25 @@ export function App() {
       setLastSyncPreview(parsed);
       setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "sync-cache"));
     } else if (operation === "sync-cache-apply" || (parsed.operation === "sync-cache" && !syncResult?.dryRun)) {
+      setLastSyncApply(parsed);
       setLastSyncPreview(parsed);
       setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "sync-cache-apply"));
     } else if (operation === "repair-cache-dialect" || operation === "repair-cache-dialect-apply" || parsed.operation === "repair-cache-dialect") {
+      setLastSyncApply(parsed);
       setLastSyncPreview(parsed);
       setLastSyncPreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "repair-cache-dialect"));
+    } else if (operation === "unity-import" || parsed.operation === "unity-import-assets" || parsed.unityImportSummary) {
+      setLastUnityImport(parsed);
+      if (parsed.success && parsed.nextAction === "run-pr-gate") {
+        updateScenario("sync-import");
+      }
     } else if (operation === "compare-merge") {
       setLastComparePreview(parsed);
       setLastComparePreviewPath(result.resultPath || desktopResultPath(snapshot, projectRoot, "compare-merge"));
     } else if (operation === "pr-gate-report") {
       setLastGateReport(parsed);
     }
-  }, [projectRoot, snapshot]);
+  }, [projectRoot, snapshot, updateScenario]);
 
   useEffect(() => {
     if (!runtimeAvailable || !snapshot?.projectRoot) {
@@ -705,6 +749,7 @@ export function App() {
         ["sync-cache", "sync-cache-dry-run"],
         ["sync-cache-apply", "sync-cache-apply"],
         ["repair-cache-dialect", "repair-cache-dialect"],
+        ["unity-import-assets", "unity-import"],
         ["compare-merge", "compare-merge"],
         ["pr-gate-report", "pr-gate-report"]
       ];
@@ -732,7 +777,7 @@ export function App() {
 
   const sendUnityBridgeCommand = useCallback(async (operation: string) => {
     if (!startup.bridgeSessionDir) {
-      setError("当前 Desktop 不是从 Unity bridge 启动。请回 Unity 点击“导入 Unity 配表资产”。");
+      setError("这个窗口不是从 Unity 打开的，所以暂时不能直接让 Unity 导入。请回到 Unity 的 Config Sheet Forge 窗口点击“导入 Unity 配表资产”，或从 Unity 重新打开 Desktop。");
       return;
     }
 
@@ -941,11 +986,6 @@ export function App() {
   const primaryDisabled = decision.primaryDisabled
     || (selectedScenario === "new-table" && decision.primaryOperation === "new-table-dry-run" && newTableErrors.length > 0)
     || Boolean(activeOperation);
-  const statusSource = lastSyncPreview || lastQuickStatus;
-  const statusSourceSync = normalizeSyncCacheResult(statusSource);
-  const desktopVersion = startup.desktopVersion || "开发预览";
-  const unityVersion = snapshot?.unityPackageVersion || "未识别";
-  const cliVersion = startup.sidecarCliVersion || (cliCheck?.source?.includes("sidecar") ? desktopVersion : cliCheck?.source || "未识别");
   const visibleResult = activeTask ? taskToCliResult(activeTask) : lastResult;
   const visibleParsed = activeTask ? parseResultJson(activeTask.resultJson) : lastResultParsed;
   const resultNext = resultNextAction(visibleParsed, startup.bridgeSessionDir);
@@ -983,6 +1023,12 @@ export function App() {
         <button className="secondary" onClick={() => void discover()}>识别项目</button>
       </section>
 
+      {projectState.versionStatus.blocking ? <section className="error-card">{projectState.versionStatus.message}</section> : null}
+      {projectState.bridgeMode === "standalone" ? (
+        <section className="mode-card">
+          这个窗口不是从 Unity 打开的，所以暂时不能直接让 Unity 导入。请回到 Unity 的 Config Sheet Forge 窗口点击“导入 Unity 配表资产”，或从 Unity 重新打开 Desktop。
+        </section>
+      ) : null}
       {error ? <section className="error-card">{error}</section> : null}
 
       {activeOperation ? (
@@ -1026,9 +1072,10 @@ export function App() {
       </section>
 
       <section className="status-strip">
-        <StatusCard title="在线表" value={statusSource?.branchStatus ? `${statusSource.branchStatus.tableCountRegistered || 0}/${statusSource.branchStatus.tableCountExpected || 0} 已登记` : "等待读取"} detail="以 live registry 为准。" />
-        <StatusCard title="本地 cache" value={statusSourceSync?.cacheStatus || "等待预览"} detail={summarizeLifecycleResult(statusSource)} />
-        <StatusCard title="PR gate" value={lastGateReport?.prGateReport?.gateState || "等待检查"} detail={summarizeLifecycleResult(lastGateReport)} url={snapshot?.prUrl} onOpen={openExternal} />
+        <StatusCard title="在线表" value={projectState.onlineTableLabel} detail={projectState.onlineTableDetail} />
+        <StatusCard title="本地 cache" value={projectState.cacheLabel} detail={projectState.cacheDetail} />
+        <StatusCard title="Unity 导入" value={projectState.unityImportLabel} detail={projectState.unityImportDetail} />
+        <StatusCard title="PR 检查" value={projectState.prGateLabel} detail={projectState.prGateDetail} url={snapshot?.prUrl} onOpen={openExternal} />
         <StatusCard title="飞书注册中心" value={snapshot?.registryBaseToken ? "已配置" : "等待识别"} detail={`Base: ${redact(snapshot?.registryBaseToken || "")}`} url={snapshot?.registryBaseUrl} onOpen={openExternal} />
       </section>
 
@@ -1237,7 +1284,7 @@ function resultNextAction(result: LifecycleResultLike | null, bridgeSessionDir: 
   if (result?.operation === "unity-import-assets" || result?.unityImportSummary) {
     return result.success === false
       ? null
-      : { operation: "pr-gate-report", label: "运行 PR gate" };
+      : { operation: "pr-gate-report", label: "运行 PR 检查" };
   }
 
   const normalized = normalizeSyncCacheResult(result);
