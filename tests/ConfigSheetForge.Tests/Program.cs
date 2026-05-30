@@ -97,6 +97,7 @@ var tests = new List<(string Name, Func<Task> Body)>
     ("repair-cache-dialect scans stale dimension right-side columns", RepairCacheDialectScansStaleDimensionRightSideColumns),
     ("repair-cache-dialect writes exceldatareader compatible xlsx", RepairCacheDialectWritesExcelDataReaderCompatibleXlsx),
     ("repair-cache-dialect rewrites already typed legacy xlsx package", RepairCacheDialectRewritesAlreadyTypedLegacyXlsxPackage),
+    ("repair-cache-dialect rewrites invalid display field row", RepairCacheDialectRewritesInvalidDisplayFieldRow),
     ("excel to so cache writer preserves physical template semantics", () => RunSync(ExcelToSoCacheWriterPreservesPhysicalTemplateSemantics)),
     ("sync local input does not rewrite unchanged cache", SyncLocalInputDoesNotRewriteUnchangedCache),
     ("strict bot mode does not fallback to user", StrictBotModeDoesNotFallbackToUser),
@@ -3558,6 +3559,120 @@ static async Task RepairCacheDialectRewritesAlreadyTypedLegacyXlsxPackage()
             AssertTrue(XlsxHasEntry(xlsx, "xl/styles.xml"), "Repaired typed legacy xlsx must include styles.xml.");
             AssertTrue(!WorksheetContainsInlineStrings(xlsx), "Repaired typed legacy xlsx should not use inlineStr.");
             AssertLegacyExcelReaderCanOpenIfAvailable(xlsx);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(oldDir);
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(temp))
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+}
+
+static async Task RepairCacheDialectRewritesInvalidDisplayFieldRow()
+{
+    var temp = Path.Combine(Path.GetTempPath(), "csforge-repair-dialect-display-field-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var state = Path.Combine(temp, ".config-sheet-forge");
+        var cache = Path.Combine(state, "cache");
+        var excelCache = Path.Combine(state, "excel-cache");
+        Directory.CreateDirectory(cache);
+        Directory.CreateDirectory(excelCache);
+        await File.WriteAllTextAsync(Path.Combine(state, "config.json"), JsonSerializer.Serialize(new ForgeConfig(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var oldExcel = Path.Combine(temp, "Excel", "AutoPickupDropData.xlsx");
+        Directory.CreateDirectory(Path.GetDirectoryName(oldExcel)!);
+        var physicalFields = new[] { "Id", "InteractionTime", "InteractionRadius", "Prefab", "Pickup Sfx", "InteractionStartEventCallback", "InteractionEndEventCallback" };
+        var physicalTypes = new[] { "int", "float", "float", "string", "string", "string[]", "string[]" };
+        CreateTypeHintXlsx(oldExcel, physicalFields, physicalTypes, sheetName: "AutoPickupDropEntry", descriptionRow: new[] { "唯一ID", "交互时间", "交互半径", "Prefab", "Assets/Media/Audios/Skill", "开始事件", "结束事件" });
+
+        var workbook = SampleWorkbookWithColumns(
+            ("id", "integer"),
+            ("interactiontime", "number"),
+            ("interactionradius", "number"),
+            ("prefab", "string"),
+            ("pickup_sfx", "string"),
+            ("interactionstarteventcallback", "json"),
+            ("interactionendeventcallback", "json"));
+        var row = workbook.Sheets[0].Rows[0];
+        row.Cells["id"].RawText = "1";
+        row.Cells["id"].NormalizedText = "1";
+        row.Cells["interactiontime"].RawText = "0.2";
+        row.Cells["interactiontime"].NormalizedText = "0.2";
+        row.Cells["interactionradius"].RawText = "3.5";
+        row.Cells["interactionradius"].NormalizedText = "3.5";
+        row.Cells["prefab"].RawText = "AutoPickup";
+        row.Cells["prefab"].NormalizedText = "AutoPickup";
+        row.Cells["pickup_sfx"].RawText = "掉落物拾取1.mp3";
+        row.Cells["pickup_sfx"].NormalizedText = "掉落物拾取1.mp3";
+        row.Cells["interactionstarteventcallback"].RawText = "[\"begin\"]";
+        row.Cells["interactionstarteventcallback"].NormalizedText = "[\"begin\"]";
+        row.Cells["interactionendeventcallback"].RawText = "[\"heal_player_100\"]";
+        row.Cells["interactionendeventcallback"].NormalizedText = "[\"heal_player_100\"]";
+
+        await File.WriteAllTextAsync(Path.Combine(cache, "AutoPickupDropData.semantic.json"), JsonSerializer.Serialize(workbook, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        await File.WriteAllTextAsync(Path.Combine(cache, "AutoPickupDropData.sha256"), SemanticHasher.ComputeHash(workbook) + Environment.NewLine);
+
+        var xlsx = Path.Combine(excelCache, "AutoPickupDropData.xlsx");
+        CreateTypeHintXlsx(xlsx, physicalFields, physicalTypes, sheetName: "AutoPickupDropEntry", descriptionRow: new[] { "唯一ID", "交互时间", "交互半径", "Prefab", "Assets/Media/Audios/Skill", "开始事件", "结束事件" });
+
+        var request = new LifecycleContractRequest
+        {
+            Operation = "repair-cache-dialect",
+            DryRun = true,
+            SeedFromLocalXlsx = new SeedFromLocalXlsxContract
+            {
+                CacheDirectory = ".config-sheet-forge/cache",
+                ExcelCacheDirectory = ".config-sheet-forge/excel-cache"
+            }
+        };
+        request.SeedFromLocalXlsx.Tables.Add(new SeedTableContract
+        {
+            TableId = "AutoPickupDropData",
+            DisplayName = "AutoPickupDropData",
+            SourceXlsxPath = "Excel/AutoPickupDropData.xlsx",
+            CacheXlsxPath = ".config-sheet-forge/excel-cache/AutoPickupDropData.xlsx",
+            SemanticCachePath = ".config-sheet-forge/cache/AutoPickupDropData.semantic.json",
+            HashCachePath = ".config-sheet-forge/cache/AutoPickupDropData.sha256",
+            FieldRow = 0,
+            TypeRow = 1,
+            DescriptionRow = 2,
+            DataStartRow = 3,
+            UnityExcelToSo = new UnityExcelToSoContract { SettingsPath = "ProjectSettings/ExcelToScriptableObjectSettings.asset", ExcelPath = ".config-sheet-forge/excel-cache/AutoPickupDropData.xlsx" }
+        });
+
+        var manifest = Path.Combine(temp, "contract.json");
+        var dryResultPath = Path.Combine(temp, "dry-result.json");
+        var applyResultPath = Path.Combine(temp, "apply-result.json");
+        await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var oldDir = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(temp);
+            var dry = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--dry-run", "--out", dryResultPath });
+            AssertEqual("0", dry.ToString(), "repair-cache-dialect dry-run should catch display labels that are invalid ExcelToSO field names.");
+            var dryResult = JsonSerializer.Deserialize<LifecycleContractResult>(await File.ReadAllTextAsync(dryResultPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            AssertTrue(dryResult != null && dryResult.SyncCacheSummary.CacheStatus == "dialectOutdated", "Invalid display field row should be dialectOutdated instead of upToDate.");
+
+            var apply = await ConfigSheetForge.Cli.Program.Main(new[] { "repair-cache-dialect", "--manifest", manifest, "--yes", "--out", applyResultPath });
+            AssertEqual("0", apply.ToString(), "repair-cache-dialect apply should rewrite invalid display field rows.");
+            var applyResult = JsonSerializer.Deserialize<LifecycleContractResult>(await File.ReadAllTextAsync(applyResultPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            AssertTrue(applyResult != null && applyResult.SyncCacheSummary.CacheStatus == "upToDate", "Apply result should become upToDate after field row repair.");
+
+            var fields = ReadTypeRowFromXlsx(xlsx, 0);
+            AssertEqual("Id,InteractionTime,InteractionRadius,Prefab,PickupSfx,InteractionStartEventCallback,InteractionEndEventCallback", string.Join(",", fields), "repair-cache-dialect --yes must rewrite the physical field row to legal ExcelToSO field names.");
+            AssertTrue(!fields.Contains("Pickup Sfx"), "repair-cache-dialect --yes must not leave the old display label in the ExcelToSO field row.");
+            var data = ReadRowFromXlsxPreservePositions(xlsx, 3);
+            AssertEqual("掉落物拾取1.mp3", data[4], "PickupSfx data must remain in the sfx column after repair.");
+            AssertEqual("heal_player_100", data[6], "InteractionEndEventCallback data must not shift into the sfx column.");
         }
         finally
         {

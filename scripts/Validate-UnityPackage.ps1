@@ -485,6 +485,12 @@ foreach ($requiredV448Marker in @("ToExcelToSoOutputFieldName", "SanitizeExcelTo
   }
 }
 
+foreach ($requiredV449Marker in @("RepairCacheDialectRewritesInvalidDisplayFieldRow", "dialectOutdated", "PickupSfx data must remain in the sfx column", "旧模板 display label", "SanitizeExcelToSoFieldName(expectedFields")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw src/cli/ConfigSheetForge.Cli/Program.cs) + "`n" + (Get-Content -Raw packages/unity/CHANGELOG.md) + "`n" + (Get-Content -Raw tests/ConfigSheetForge.Tests/Program.cs)) -notlike "*$requiredV449Marker*") {
+    throw "Unity v0.4.49 repair-cache-dialect physical field-row marker is missing: $requiredV449Marker"
+  }
+}
+
 if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
   throw "Unity bridge import-assets must not open the Legacy sync window."
 }

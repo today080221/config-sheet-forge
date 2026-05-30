@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.49
+
+- 修复 `repair-cache-dialect` 只按旧模板原文比较字段行导致误判 `upToDate` 的问题。现在旧模板 display label（如 `Pickup Sfx`）会先投影成 ExcelToSO 合法字段名（`PickupSfx`），再参与物理 xlsx 判定。
+- `repair-cache-dialect --dry-run` 会把仍含空格/符号的 ExcelToSO 字段行判为 `dialectOutdated`；`--yes` 会实际重写 xlsx 第一行，并在 postflight 中阻断非法字段名。
+- 增加命令级回归测试：已有 cache xlsx 第一行为 `Pickup Sfx` 时，apply 后实际文件第一行必须写成 `PickupSfx`，且音效列和事件列不丢不串。
+
 ## 0.4.48
 
 - 修复 SourceOfTruthCache cache xlsx 字段行仍保留旧 Excel display label 的问题。旧模板/在线表显示名可继续宽松匹配，但写给 ExcelToSO 的 `field_row` 现在必须是合法脚本字段名；例如 `Pickup Sfx` 会输出为 `PickupSfx`，说明行仍保留人类可读文本。

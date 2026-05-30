@@ -5641,13 +5641,21 @@ public static class Program
                     return true;
                 }
 
+                if (fieldRow.Any(field => !string.IsNullOrWhiteSpace(field) && !IsExcelToSoFieldName(field)))
+                {
+                    return true;
+                }
+
                 if (template.Available)
                 {
                     var expectedFields = template.Fields.TakeWhile(field => !string.IsNullOrWhiteSpace(field)).ToList();
                     for (var i = 0; i < expectedFields.Count; i++)
                     {
                         var actual = i < fieldRow.Count ? fieldRow[i] : "";
-                        if (!string.Equals(actual, expectedFields[i], StringComparison.Ordinal))
+                        var expected = IsExcelToSoFieldName(expectedFields[i])
+                            ? expectedFields[i]
+                            : SanitizeExcelToSoFieldName(expectedFields[i]);
+                        if (!string.Equals(actual, expected, StringComparison.Ordinal))
                         {
                             return true;
                         }
