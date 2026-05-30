@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.52
+
+- 修复 Desktop “运行 PR 检查”按钮错误调用 `apply-contract --operation pr-gate-report` 的问题。现在 PR 检查会先走项目 adapter 生成 `pr-gate-report.contract.json`，再调用 sidecar CLI `apply-contract --request`。
+- Desktop 会写出 `Temp/ConfigSheetForge/desktop/pr-gate-report.inputs.json`、`pr-gate-report.contract.json`、`pr-gate-report.result.json`，并保留最终标准报告 `Temp/ConfigSheetForge/pr-gate-report.json`。
+- 普通视图继续只显示 PR 检查的人话状态；完整 adapter/apply-contract 命令只进入 Debug。
+- 增加回归测试，确保 Desktop PR 检查命令不再包含 `apply-contract --operation pr-gate-report`。
+
 ## 0.4.51
 
 - Desktop 启动和运行中会扫描 Unity bridge session 中已经完成的 `*.processed.json`，即使结果不是本次 Desktop 进程发起，也会补写 `Temp/ConfigSheetForge/desktop/unity-import-assets.result.json` 并把流程推进到“运行 PR 检查”。

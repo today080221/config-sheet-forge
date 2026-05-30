@@ -213,7 +213,7 @@ function buildCommandArgs(
     case "submit-merge-review":
       return ["submit-merge-review", "--preview-result", previewResultPath, "--details", ...out("submit-merge-review")];
     case "pr-gate-report":
-      return ["apply-contract", "--operation", "pr-gate-report", "--details", ...out("pr-gate-report")];
+      return ["project-lifecycle", "--operation", "pr-gate-report", "--details", ...out("pr-gate-report")];
     case "bootstrap-current-branch-from-target-dry-run":
       return ["bootstrap-current-branch-from-target", ...manifestArgs, "--dry-run", "--details", ...out("bootstrap-current-branch-from-target"), ...fallbackArgs];
     case "new-table-dry-run":

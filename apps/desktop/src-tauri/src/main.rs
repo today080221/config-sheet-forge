@@ -133,6 +133,13 @@ struct TaskSpec {
     progress_path: String,
 }
 
+impl TaskSpec {
+    fn with_attempted_paths(mut self, extra: Vec<String>) -> Self {
+        self.tool.attempted_paths.extend(extra);
+        self
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReleaseSmokeReport {
@@ -1754,6 +1761,12 @@ fn build_cli_task_spec(
         .ok_or_else(|| missing_cli_message(&root, &config))?;
     let lark_cli = resolve_lark_cli(&root, &config);
     let args = normalize_cli_path_args(&root, &args);
+    if operation == "pr-gate-report"
+        && args.first().map(|value| value == "project-lifecycle").unwrap_or(false)
+    {
+        return build_project_lifecycle_task_spec(root, config, tool, lark_cli, operation, args);
+    }
+
     let result_path = find_result_path(
         &root,
         &tool.command_args(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
@@ -1770,6 +1783,219 @@ fn build_cli_task_spec(
         result_path,
         progress_path,
     })
+}
+
+fn build_project_lifecycle_task_spec(
+    root: PathBuf,
+    config: Value,
+    cli_tool: ResolvedTool,
+    lark_cli: Option<ResolvedTool>,
+    operation: String,
+    args: Vec<String>,
+) -> Result<TaskSpec, String> {
+    let requested_operation = find_named_arg(&args, "--operation").unwrap_or_else(|| operation.clone());
+    if requested_operation != "pr-gate-report" {
+        return Err("Desktop project-lifecycle 当前只支持 PR 检查。".to_string());
+    }
+
+    let config_path = find_project_config(&root)
+        .ok_or_else(|| "没有找到 ProjectSettings/*ConfigSheetForge*.json，无法生成 PR gate contract。".to_string())?;
+    let adapter_script = find_string_deep(&config, &["adapterScript"])
+        .ok_or_else(|| "项目配置缺少 adapterScript，无法生成 PR gate contract。".to_string())?;
+    let adapter_script_path = normalize_cli_path_arg(&root, &adapter_script);
+    if adapter_script_path.trim().is_empty() || !Path::new(&adapter_script_path).exists() {
+        return Err(format!(
+            "项目 adapter 不存在：{}。请检查 ProjectSettings/*ConfigSheetForge*.json 的 toolkit.adapterScript。",
+            adapter_script
+        ));
+    }
+
+    let result_path = find_named_arg_path(&root, &args, "--out")
+        .unwrap_or_else(|| {
+            root.join("Temp")
+                .join("ConfigSheetForge")
+                .join("desktop")
+                .join("pr-gate-report.result.json")
+                .to_string_lossy()
+                .to_string()
+        });
+    let progress_path = find_named_arg_path(&root, &args, "--progress")
+        .unwrap_or_else(|| {
+            root.join("Temp")
+                .join("ConfigSheetForge")
+                .join("desktop")
+                .join("pr-gate-report.progress.ndjson")
+                .to_string_lossy()
+                .to_string()
+        });
+    let work_dir = root.join("Temp").join("ConfigSheetForge").join("desktop");
+    fs::create_dir_all(&work_dir)
+        .map_err(|e| format!("无法创建 Desktop lifecycle 目录：{}", e))?;
+    let inputs_path = work_dir.join("pr-gate-report.inputs.json");
+    let contract_path = work_dir.join("pr-gate-report.contract.json");
+    let gate_report_path = root
+        .join("Temp")
+        .join("ConfigSheetForge")
+        .join("pr-gate-report.json");
+    let inputs = serde_json::json!({
+        "operation": "pr-gate-report",
+        "dryRun": false,
+        "projectRoot": normalize_path_string_for_cli(&root.to_string_lossy()),
+        "gateReportPath": normalize_path_string_for_cli(&gate_report_path.to_string_lossy())
+    });
+    fs::write(
+        &inputs_path,
+        serde_json::to_string_pretty(&inputs).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| format!("写入 PR gate inputs 失败：{}", e))?;
+
+    let adapter_tool = build_adapter_tool(&adapter_script_path, &config);
+    let adapter_args = build_adapter_args(
+        &root,
+        &config_path,
+        &adapter_script_path,
+        "pr-gate-report",
+        &inputs_path,
+        &contract_path,
+    );
+    let mut apply_args = vec![
+        "apply-contract".to_string(),
+        "--request".to_string(),
+        normalize_path_string_for_cli(&contract_path.to_string_lossy()),
+        "--out".to_string(),
+        normalize_path_string_for_cli(&result_path),
+        "--progress".to_string(),
+        normalize_path_string_for_cli(&progress_path),
+        "--report".to_string(),
+        normalize_path_string_for_cli(&gate_report_path.to_string_lossy()),
+    ];
+    if args.iter().any(|arg| arg == "--details") {
+        apply_args.push("--details".to_string());
+    }
+
+    let adapter_command = build_display_command(
+        &adapter_tool,
+        &adapter_tool.command_args(&adapter_args.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+    );
+    let apply_command = build_display_command(
+        &cli_tool,
+        &cli_tool.command_args(&apply_args.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+    );
+    let shell = resolve_powershell_tool()
+        .ok_or_else(|| "没有找到 PowerShell，无法串联项目 adapter 和 apply-contract。".to_string())?;
+    let script = build_pr_gate_pipeline_script(&adapter_tool, &adapter_args, &cli_tool, &apply_args);
+
+    Ok(TaskSpec {
+        operation,
+        root,
+        tool: shell,
+        args: vec!["-NoProfile".to_string(), "-ExecutionPolicy".to_string(), "Bypass".to_string(), "-Command".to_string(), script],
+        lark_cli,
+        stdin: None,
+        result_path: normalize_path_string_for_cli(&result_path),
+        progress_path: normalize_path_string_for_cli(&progress_path),
+    }
+    .with_attempted_paths(vec![adapter_command, apply_command]))
+}
+
+fn resolve_powershell_tool() -> Option<ResolvedTool> {
+    resolve_path_tool("pwsh", &[".exe", ".cmd", ".bat", ""]).or_else(|| {
+        resolve_path_tool("powershell", &[".exe", ".cmd", ".bat", ""])
+    })
+}
+
+fn build_adapter_tool(adapter_script_path: &str, config: &Value) -> ResolvedTool {
+    if let Some(interpreter) = find_string_deep(config, &["adapterInterpreter"]) {
+        if !interpreter.trim().is_empty() {
+            return ResolvedTool {
+                program: interpreter.trim().to_string(),
+                prefix_args: vec![adapter_script_path.to_string()],
+                display_path: interpreter.trim().to_string(),
+                source: "project adapter interpreter".to_string(),
+                attempted_paths: vec![adapter_script_path.to_string()],
+            };
+        }
+    }
+
+    if adapter_script_path.ends_with(".py") {
+        ResolvedTool {
+            program: "python".to_string(),
+            prefix_args: vec![adapter_script_path.to_string()],
+            display_path: "python".to_string(),
+            source: "project adapter python".to_string(),
+            attempted_paths: vec![adapter_script_path.to_string()],
+        }
+    } else if adapter_script_path.ends_with(".ps1") {
+        ResolvedTool {
+            program: "pwsh".to_string(),
+            prefix_args: vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                adapter_script_path.to_string(),
+            ],
+            display_path: "pwsh".to_string(),
+            source: "project adapter powershell".to_string(),
+            attempted_paths: vec![adapter_script_path.to_string()],
+        }
+    } else {
+        ResolvedTool {
+            program: adapter_script_path.to_string(),
+            prefix_args: Vec::new(),
+            display_path: adapter_script_path.to_string(),
+            source: "project adapter executable".to_string(),
+            attempted_paths: vec![adapter_script_path.to_string()],
+        }
+    }
+}
+
+fn build_adapter_args(
+    root: &Path,
+    config_path: &Path,
+    adapter_script_path: &str,
+    operation: &str,
+    inputs_path: &Path,
+    contract_path: &Path,
+) -> Vec<String> {
+    let _ = adapter_script_path;
+    vec![
+        "--project-root".to_string(),
+        normalize_path_string_for_cli(&root.to_string_lossy()),
+        "--config".to_string(),
+        normalize_path_string_for_cli(&config_path.to_string_lossy()),
+        "--operation".to_string(),
+        operation.to_string(),
+        "--inputs".to_string(),
+        normalize_path_string_for_cli(&inputs_path.to_string_lossy()),
+        "--out".to_string(),
+        normalize_path_string_for_cli(&contract_path.to_string_lossy()),
+        "--json".to_string(),
+    ]
+}
+
+fn ps_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn ps_invocation(tool: &ResolvedTool, args: &[String]) -> String {
+    let all_args = tool.command_args(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let mut parts = vec!["&".to_string(), ps_quote(&tool.program)];
+    parts.extend(all_args.iter().map(|arg| ps_quote(arg)));
+    parts.join(" ")
+}
+
+fn build_pr_gate_pipeline_script(
+    adapter_tool: &ResolvedTool,
+    adapter_args: &[String],
+    cli_tool: &ResolvedTool,
+    apply_args: &[String],
+) -> String {
+    format!(
+        "$ErrorActionPreference = 'Stop'; {}; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; {}; exit $LASTEXITCODE",
+        ps_invocation(adapter_tool, adapter_args),
+        ps_invocation(cli_tool, apply_args)
+    )
 }
 
 fn build_setup_task_spec(
@@ -2268,12 +2494,13 @@ fn append_limited(buffer: &mut String, text: &str) {
 }
 
 fn find_named_arg_path(root: &Path, args: &[String], name: &str) -> Option<String> {
-    for window in args.windows(2) {
-        if window[0] == name {
-            return Some(normalize_cli_path_arg(root, &window[1]));
-        }
-    }
-    None
+    find_named_arg(args, name).map(|value| normalize_cli_path_arg(root, &value))
+}
+
+fn find_named_arg(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|window| window[0] == name)
+        .map(|window| window[1].clone())
 }
 
 fn kill_process_tree(pid: u32) {
@@ -2943,6 +3170,85 @@ mod tests {
         let persisted = fs::read_to_string(&desktop_result).expect("persisted result");
         assert!(persisted.contains("run-pr-gate"));
         assert!(persisted.contains("importItemCount"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pr_gate_desktop_action_uses_adapter_contract_request() {
+        let root = env::temp_dir().join(format!("csforge-prgate-project-{}", chrono_like_timestamp()));
+        let settings = root.join("ProjectSettings");
+        let adapter_dir = root.join("tools").join("config_sheet_source_of_truth");
+        fs::create_dir_all(&settings).expect("settings dir");
+        fs::create_dir_all(&adapter_dir).expect("adapter dir");
+        let adapter = adapter_dir.join("nttd_config_sheet_bridge.py");
+        let fake_cli = root.join("config-sheet-forge.cmd");
+        fs::write(&adapter, "print('adapter')").expect("adapter file");
+        fs::write(&fake_cli, "@echo off\r\necho config-sheet-forge %*\r\n").expect("fake cli");
+        fs::write(
+            settings.join("Project.ConfigSheetForge.json"),
+            r#"{
+  "projectId": "fixture",
+  "toolkit": {
+    "adapterScript": "tools/config_sheet_source_of_truth/nttd_config_sheet_bridge.py"
+  }
+}"#,
+        )
+        .expect("project config");
+
+        let args = vec![
+            "project-lifecycle".to_string(),
+            "--operation".to_string(),
+            "pr-gate-report".to_string(),
+            "--details".to_string(),
+            "--out".to_string(),
+            root.join("Temp")
+                .join("ConfigSheetForge")
+                .join("desktop")
+                .join("pr-gate-report.result.json")
+                .to_string_lossy()
+                .to_string(),
+            "--progress".to_string(),
+            root.join("Temp")
+                .join("ConfigSheetForge")
+                .join("desktop")
+                .join("pr-gate-report.progress.ndjson")
+                .to_string_lossy()
+                .to_string(),
+        ];
+
+        let old_cli_env = env::var("CONFIG_SHEET_FORGE_CLI").ok();
+        unsafe {
+            env::set_var("CONFIG_SHEET_FORGE_CLI", fake_cli.to_string_lossy().to_string());
+        }
+        let spec = build_cli_task_spec(root.clone(), "pr-gate-report".to_string(), args)
+            .expect("pr gate task spec");
+        if let Some(old) = old_cli_env {
+            unsafe {
+                env::set_var("CONFIG_SHEET_FORGE_CLI", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("CONFIG_SHEET_FORGE_CLI");
+            }
+        }
+        let command_line = build_display_command(
+            &spec.tool,
+            &spec
+                .tool
+                .command_args(&spec.args.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+        );
+
+        assert!(command_line.contains("pr-gate-report.contract.json"));
+        assert!(command_line.contains("apply-contract"));
+        assert!(command_line.contains("--request"));
+        assert!(!command_line.contains("apply-contract --operation pr-gate-report"));
+        assert!(spec.result_path.ends_with("pr-gate-report.result.json"));
+        assert!(root
+            .join("Temp")
+            .join("ConfigSheetForge")
+            .join("desktop")
+            .join("pr-gate-report.inputs.json")
+            .exists());
         let _ = fs::remove_dir_all(root);
     }
 }

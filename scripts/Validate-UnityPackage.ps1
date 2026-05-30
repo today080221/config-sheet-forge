@@ -503,6 +503,12 @@ foreach ($requiredV451Marker in @("scan_bridge_processed_results", "bridge_proce
   }
 }
 
+foreach ($requiredV452Marker in @("project-lifecycle", "pr_gate_desktop_action_uses_adapter_contract_request", "pr-gate-report.contract.json", "apply-contract --operation pr-gate-report", "0.4.52")) {
+  if (($desktopWorkflowSources + "`n" + (Get-Content -Raw apps/desktop/src-tauri/src/main.rs) + "`n" + (Get-Content -Raw apps/desktop/tests/ui-smoke.mjs) + "`n" + (Get-Content -Raw packages/unity/CHANGELOG.md)) -notlike "*$requiredV452Marker*") {
+    throw "Unity v0.4.52 Desktop PR gate adapter pipeline marker is missing: $requiredV452Marker"
+  }
+}
+
 if ($bridgeWindow -like "*Desktop 请求导入 Unity 配表资产。已打开 Unity 导入面板*") {
   throw "Unity bridge import-assets must not open the Legacy sync window."
 }
